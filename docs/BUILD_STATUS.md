@@ -6,8 +6,8 @@ deployed, restarted, or used as a source of private state.
 
 ## Checkpoint A — step-1 foundation candidate
 
-Exact implementation SHA: recorded in the next ledger entry immediately after
-this atomic commit is created.
+Exact implementation SHA: `1fae9da69dbcdb4a48804354954c89a8a9e184c0`
+(`feat: establish v1 control-plane foundation`).
 
 Completed acceptance units:
 
