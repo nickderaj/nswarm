@@ -682,6 +682,60 @@ impl ControlStore {
         Ok(id)
     }
 
+    /// Validates a worker report against the immutable brief's object schema and
+    /// appends its redacted evidence form.
+    ///
+    /// The step-1 validator deliberately supports the contract's required
+    /// object fields. Unsupported or missing schema shapes fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the report is not an object, a required field
+    /// is missing, or persistence fails.
+    pub fn record_report(
+        &mut self,
+        unit_id: &UnitId,
+        report: &Value,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<i64, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, _) = unit_identity_tx(&transaction, unit_id)?;
+        let brief_json: String = transaction.query_row(
+            "SELECT brief_json FROM jobs WHERE job_id = ?1",
+            [job_id.as_str()],
+            |row| row.get(0),
+        )?;
+        let brief: JobBrief = serde_json::from_str(&brief_json)?;
+        let report_object = report
+            .as_object()
+            .ok_or(StoreError::ReportSchemaViolation)?;
+        let required = brief
+            .report_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .ok_or(StoreError::ReportSchemaViolation)?;
+        if required.iter().any(|field| {
+            field
+                .as_str()
+                .is_none_or(|name| !report_object.contains_key(name))
+        }) {
+            return Err(StoreError::ReportSchemaViolation);
+        }
+        let id = append_event_tx(
+            &transaction,
+            &job_id,
+            idempotency_key,
+            "worker-report",
+            report,
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(id)
+    }
+
     /// Registers one role-bound isolated profile home.
     ///
     /// # Errors
@@ -1017,7 +1071,7 @@ fn append_event_tx(
     if idempotency_key.trim().is_empty() || event_type.trim().is_empty() {
         return Err(StoreError::InvalidEvent);
     }
-    let payload_json = serde_json::to_string(payload)?;
+    let payload_json = serde_json::to_string(&redact_evidence(payload))?;
     transaction.execute(
         "INSERT INTO events (job_id, idempotency_key, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(idempotency_key) DO NOTHING",
         params![job_id.as_str(), idempotency_key, event_type, payload_json, now],
@@ -1034,6 +1088,55 @@ fn path_resources_overlap(left: &str, right: &str) -> bool {
     let left = Path::new(left);
     let right = Path::new(right);
     left.starts_with(right) || right.starts_with(left)
+}
+
+fn redact_evidence(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, item)| {
+                    let upper = key.to_ascii_uppercase();
+                    let secret_field = [
+                        "KEY",
+                        "TOKEN",
+                        "PASSWORD",
+                        "SECRET",
+                        "CREDENTIAL",
+                        "AUTHORIZATION",
+                        "COOKIE",
+                    ]
+                    .iter()
+                    .any(|name| upper == *name || upper.ends_with(&format!("_{name}")));
+                    (
+                        key.clone(),
+                        if secret_field {
+                            Value::String("[REDACTED]".to_owned())
+                        } else {
+                            redact_evidence(item)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_evidence).collect()),
+        Value::String(text) if contains_secret_shape(text) => {
+            Value::String("[REDACTED]".to_owned())
+        }
+        _ => value.clone(),
+    }
+}
+
+fn contains_secret_shape(text: &str) -> bool {
+    text.to_ascii_uppercase().contains("PRIVATE KEY")
+        || text
+            .split(|character: char| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+            })
+            .any(|word| {
+                (word.starts_with("ghp_") && word.len() >= 30)
+                    || (word.starts_with("sk-") && word.len() >= 20)
+            })
 }
 
 /// Transactional control-plane failure.
@@ -1142,6 +1245,9 @@ pub enum StoreError {
         /// Remaining blocking assessments.
         blocking: i64,
     },
+    /// Worker report did not satisfy the immutable brief's required object fields.
+    #[error("worker report does not satisfy the immutable report schema")]
+    ReportSchemaViolation,
 }
 
 const SCHEMA: &str = r"
@@ -1578,6 +1684,53 @@ mod tests {
             )
             .expect("idempotent append");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn worker_reports_are_schema_checked_and_redacted_before_storage() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        assert!(matches!(
+            store.record_report(
+                &brief.unit_id,
+                &json!({"head_sha": sha('b').as_str()}),
+                "incomplete-report",
+                2,
+            ),
+            Err(StoreError::ReportSchemaViolation)
+        ));
+
+        let provider_token = "sk-".to_owned() + &"x".repeat(24);
+        let source_token = "ghp_".to_owned() + &"y".repeat(30);
+        store
+            .record_report(
+                &brief.unit_id,
+                &json!({
+                    "head_sha": sha('b').as_str(),
+                    "evidence": {
+                        "OPENROUTER_API_KEY": provider_token,
+                        "nested": [{"authorization": source_token}],
+                        "note": "focused test passed"
+                    }
+                }),
+                "complete-report",
+                3,
+            )
+            .expect("valid report recorded");
+
+        let stored: String = store
+            .connection
+            .query_row(
+                "SELECT payload_json FROM events WHERE idempotency_key = ?1",
+                ["complete-report"],
+                |row| row.get(0),
+            )
+            .expect("stored report");
+        assert!(!stored.contains(&provider_token));
+        assert!(!stored.contains(&source_token));
+        assert_eq!(stored.matches("[REDACTED]").count(), 2);
+        assert!(stored.contains("focused test passed"));
     }
 
     #[test]

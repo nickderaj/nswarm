@@ -352,7 +352,20 @@ impl JobBrief {
         for grant in &self.credential_grants {
             grant.validate()?;
         }
-        if !matches!(self.report_schema, Value::Object(_)) {
+        let Value::Object(schema) = &self.report_schema else {
+            return Err(BriefError::InvalidReportSchema);
+        };
+        if schema.get("type").and_then(Value::as_str) != Some("object") {
+            return Err(BriefError::InvalidReportSchema);
+        }
+        let Some(required) = schema.get("required").and_then(Value::as_array) else {
+            return Err(BriefError::InvalidReportSchema);
+        };
+        if required.is_empty()
+            || required
+                .iter()
+                .any(|field| field.as_str().is_none_or(|name| name.trim().is_empty()))
+        {
             return Err(BriefError::InvalidReportSchema);
         }
         if self.standing_policy_version.trim().is_empty() {
