@@ -48,6 +48,22 @@ Verified commands and outcomes:
 - `cargo hack check --workspace --feature-powerset --depth 2` — pass;
 - generated systemd/profile byte comparison and clean-diff check — pass.
 
+## Checkpoint B — manifest-derived fleet drift gate
+
+Exact implementation SHA: `648f1397155dd204f4e206c2ff2d8d688df052ad`
+(`feat(fleet): add drift and inventory checks`).
+
+Completed acceptance units:
+
+- `fleet check` discovers every `bots/*.toml` file without a maintained list
+  and verifies its profile sources and crate/package scaffold exist;
+- `fleet render <manifest> --diff <installed-unit>` returns `clean` only for a
+  byte-identical installed artifact and exposes complete drift otherwise;
+- the research manifest now points to an explicit fail-closed workspace
+  scaffold rather than a nonexistent executable;
+- `just ci` now runs the repository inventory check and remains green with 36
+  tests and 90.57% line coverage.
+
 Known gaps and external gates:
 
 - GitHub Actions have not run until this branch is pushed and a PR exists.
@@ -57,8 +73,9 @@ Known gaps and external gates:
   are configured but were not claimed as executed on this macOS host.
 - The 38 cargo-vet exemptions are explicit bootstrap debt, not completed source
   audits; new dependencies remain fail-closed.
-- `fleet` currently validates and renders; host diff/deploy/check/status/new and
-  encrypted secret materialization remain before step 1 is complete.
+- `fleet` now validates, inventories, renders, and diffs local installed-unit
+  fixtures; host mutation via deploy, status/new scaffolding, and encrypted
+  secret materialization remain before step 1 is complete.
 - Agent store tables exist for profiles, sessions, branches, artifacts, review
   findings, and credential grants; typed repository methods for the remaining
   records and negative tests remain before the control plane is complete.
