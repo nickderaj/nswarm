@@ -84,6 +84,25 @@ Completed acceptance units:
 - `just ci` remains green with 38 tests, 9 deterministic hostile-input evals,
   and 90.59% line coverage.
 
+## Checkpoint D — evidence storage boundary
+
+Exact implementation SHA: `cba309a45a4be788060770995089972c4cfc4699`
+(`fix(control): redact and validate evidence`).
+
+Completed acceptance units:
+
+- job creation now rejects report contracts that are not object schemas with
+  at least one non-empty required field;
+- worker reports are checked against the immutable brief's required fields
+  before they can enter the evidence ledger;
+- every event payload is recursively redacted at the shared persistence
+  boundary for secret-bearing field names, private-key markers, and common
+  provider/source-control token shapes;
+- a negative regression proves incomplete reports fail closed and synthetic
+  secrets never reach SQLite while ordinary evidence remains intact;
+- `just ci` remains green with 85 files policy-scanned, 39 tests, 9
+  deterministic hostile-input evals, and 90.88% line coverage.
+
 Known gaps and external gates:
 
 - GitHub Actions have not run until this branch is pushed and a PR exists.
@@ -96,9 +115,10 @@ Known gaps and external gates:
 - `fleet` now validates, inventories, renders, and diffs local installed-unit
   fixtures; host mutation via deploy, status/new scaffolding, and encrypted
   secret materialization remain before step 1 is complete.
-- Credential revocation, branch-head updates, artifact/report schema validation,
-  explicit integrator disposition of non-blocking review findings, and profile
-  destruction/audit methods remain before the control plane is complete.
+- Credential revocation, branch-head updates, richer report-field typing and
+  artifact schemas, explicit integrator disposition of non-blocking review
+  findings, and profile destruction/audit methods remain before the control
+  plane is complete.
 - The checked-in research service manifest is a rendering/policy fixture; no
   writable research agent or bot behaviour is enabled.
 - Crate publication was not attempted. The remote repository already supplies
@@ -111,9 +131,9 @@ Known gaps and external gates:
 Next executable action after checkpointing:
 
 ```console
-cargo test -p agent-control
+cargo test -p fleet
 ```
 
-Then add typed profile/session/branch/artifact/finding repositories and their
-unauthorized/stale negative tests, followed by `fleet render --diff` against a
-temporary host-root fixture. Re-run `just ci` before the next commit.
+Then add fail-closed host-root deployment, status/new scaffolding, and encrypted
+secret materialization around the manifest-derived fleet core. Re-run `just ci`
+before the next commit.
