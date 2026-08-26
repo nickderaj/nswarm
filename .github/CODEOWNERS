@@ -1,0 +1,13 @@
+# Security and acceptance policy require dedicated owner review.
+/.github/ @nickderaj
+/scripts/ @nickderaj
+/supply-chain/ @nickderaj
+/audits/ @nickderaj
+/profiles/ @nickderaj
+/eval/ @nickderaj
+/generated/ @nickderaj
+/deny.toml @nickderaj
+/mutants.toml @nickderaj
+/Cargo.toml @nickderaj
+/Cargo.lock @nickderaj
+/rust-toolchain.toml @nickderaj

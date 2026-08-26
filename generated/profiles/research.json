@@ -1,0 +1,29 @@
+{
+  "capabilities": [
+    "repository-read",
+    "network-read",
+    "evidence-write"
+  ],
+  "forbidden_capabilities": [
+    "repository-write",
+    "branch-push",
+    "integrate",
+    "merge",
+    "deploy"
+  ],
+  "governance": {
+    "background_review": false,
+    "curator": false,
+    "write_approval": true
+  },
+  "memory": "profiles/research/memory",
+  "network": {
+    "brief_allow_list_required": true,
+    "default": "deny"
+  },
+  "policy_version": "v1",
+  "profile_version": 1,
+  "role": "research",
+  "skills": "profiles/research/skills",
+  "soul": "profiles/research/SOUL.md"
+}

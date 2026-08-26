@@ -1,0 +1,35 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: rustup toolchain install nightly-2025-09-18 --profile minimal
+      - run: cargo +nightly-2025-09-18 install cargo-fuzz --version 0.13.2 --locked
+      - run: cargo +nightly-2025-09-18 fuzz run manifest -- -max_total_time=900
+
+  mutation:
+    name: expanded-mutation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: cargo install cargo-mutants --version 27.1.0 --locked
+      - run: cargo mutants --workspace --in-place
+
+  feature-powerset:
+    name: expanded-features
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: cargo install cargo-hack --version 0.6.45 --locked
+      - run: cargo hack check --workspace --feature-powerset

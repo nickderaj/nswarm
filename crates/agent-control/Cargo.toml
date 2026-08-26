@@ -1,0 +1,25 @@
+[package]
+name = "agent-control"
+description = "Transactional job, lease, evidence, and authorization control plane for nswarm agents"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["agents", "audit", "sqlite"]
+categories = ["database-implementations"]
+
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

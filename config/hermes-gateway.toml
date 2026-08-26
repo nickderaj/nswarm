@@ -1,0 +1,6 @@
+user = "hermes-gateway"
+prefix = "/opt/nswarm/hermes"
+state = "/var/lib/hermes-gateway"
+port = 8642
+revision = "v2026.8.19"
+secrets_allow = ["OPENROUTER_API_KEY", "XAI_API_KEY"]

@@ -1,0 +1,17 @@
+profile_version = 1
+policy_version = "v1"
+role = "research"
+soul = "profiles/research/SOUL.md"
+skills = "profiles/research/skills"
+memory = "profiles/research/memory"
+capabilities = ["repository-read", "network-read", "evidence-write"]
+forbidden_capabilities = ["repository-write", "branch-push", "integrate", "merge", "deploy"]
+
+[governance]
+write_approval = true
+background_review = false
+curator = false
+
+[network]
+default = "deny"
+brief_allow_list_required = true

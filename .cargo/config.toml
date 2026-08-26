@@ -1,0 +1,5 @@
+[alias]
+policy = "run --quiet -p fleet -- validate bots/research.toml"
+
+[env]
+RUST_BACKTRACE = "1"

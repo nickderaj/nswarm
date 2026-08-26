@@ -1,0 +1,1289 @@
+use std::path::Path;
+
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde_json::{Value, json};
+use thiserror::Error;
+
+use crate::types::BriefError;
+use crate::{JobBrief, JobId, JobState, LeaseKind, Sha, UnitId};
+
+const SCHEMA_VERSION: i64 = 1;
+
+/// Transactional `SQLite` repository for agent jobs and audit evidence.
+pub struct ControlStore {
+    connection: Connection,
+}
+
+impl ControlStore {
+    /// Opens or creates a control-plane database and applies idempotent schema
+    /// migrations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot open or migrate the file.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let connection = Connection::open(path)?;
+        let mut store = Self { connection };
+        store.migrate()?;
+        Ok(store)
+    }
+
+    /// Opens an isolated in-memory database for deterministic tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot initialize the schema.
+    pub fn open_in_memory() -> Result<Self, StoreError> {
+        let connection = Connection::open_in_memory()?;
+        let mut store = Self { connection };
+        store.migrate()?;
+        Ok(store)
+    }
+
+    /// Applies the schema from empty or an already current database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for an unsupported prior version or SQL failure.
+    pub fn migrate(&mut self) -> Result<(), StoreError> {
+        self.connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let version = self
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(StoreError::UnsupportedSchema(version));
+        }
+        if version == 0 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(SCHEMA)?;
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            transaction.commit()?;
+        }
+        Ok(())
+    }
+
+    /// Stores one validated immutable brief and its dependent records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when validation, serialization, or the atomic
+    /// insert fails.
+    pub fn create_job(&mut self, brief: &JobBrief, now: i64) -> Result<(), StoreError> {
+        brief.validate()?;
+        let brief_json = serde_json::to_string(brief)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO jobs (job_id, brief_json, created_at) VALUES (?1, ?2, ?3)",
+            params![brief.job_id.as_str(), brief_json, now],
+        )?;
+        transaction.execute(
+            "INSERT INTO units (unit_id, job_id, state, base_sha, updated_at) VALUES (?1, ?2, 'pending', ?3, ?4)",
+            params![
+                brief.unit_id.as_str(),
+                brief.job_id.as_str(),
+                brief.base_sha.as_str(),
+                now
+            ],
+        )?;
+        for dependency in &brief.dependencies {
+            transaction.execute(
+                "INSERT INTO dependencies (unit_id, depends_on_unit_id) VALUES (?1, ?2)",
+                params![brief.unit_id.as_str(), dependency.as_str()],
+            )?;
+        }
+        for grant in &brief.credential_grants {
+            transaction.execute(
+                "INSERT INTO credential_grants (job_id, credential_id, methods_json, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    brief.job_id.as_str(),
+                    grant.credential_id,
+                    serde_json::to_string(&grant.methods)?,
+                    now
+                ],
+            )?;
+        }
+        append_event_tx(
+            &transaction,
+            &brief.job_id,
+            &format!("job-created:{}", brief.unit_id),
+            "job-created",
+            &json!({"unit_id": brief.unit_id.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Returns the current enforced state for a unit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the unit does not exist or stored state is
+    /// invalid.
+    pub fn state(&self, unit_id: &UnitId) -> Result<JobState, StoreError> {
+        let text: String = self
+            .connection
+            .query_row(
+                "SELECT state FROM units WHERE unit_id = ?1",
+                [unit_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::UnknownUnit(unit_id.to_string()))?;
+        Ok(JobState::try_from(text.as_str())?)
+    }
+
+    /// Performs a non-evidence-bearing state edge atomically.
+    ///
+    /// Candidate creation, verification, integration completion, authorization,
+    /// and merging use their dedicated methods and cannot be reached here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for an illegal edge or missing unit.
+    pub fn transition(
+        &mut self,
+        unit_id: &UnitId,
+        next: JobState,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        if matches!(
+            next,
+            JobState::CandidateReady
+                | JobState::Reviewing
+                | JobState::Verified
+                | JobState::Integrated
+                | JobState::MergeAuthorized
+                | JobState::Merged
+        ) {
+            return Err(StoreError::DedicatedGateRequired(next));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
+        if !current.can_transition_to(next) {
+            return Err(StoreError::InvalidTransition { current, next });
+        }
+        update_state_tx(&transaction, unit_id, next, now)?;
+        append_event_tx(
+            &transaction,
+            &job_id,
+            idempotency_key,
+            "state-transition",
+            &json!({
+                "unit_id": unit_id.as_str(),
+                "from": current.as_str(),
+                "to": next.as_str()
+            }),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Records the worker's committed candidate and enters `candidate-ready`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] unless the unit is self-verifying.
+    pub fn record_candidate(
+        &mut self,
+        unit_id: &UnitId,
+        head_sha: &Sha,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
+        if current != JobState::SelfVerifying {
+            return Err(StoreError::InvalidTransition {
+                current,
+                next: JobState::CandidateReady,
+            });
+        }
+        transaction.execute(
+            "UPDATE units SET state = 'candidate-ready', candidate_sha = ?1, integration_sha = NULL, updated_at = ?2 WHERE unit_id = ?3",
+            params![head_sha.as_str(), now, unit_id.as_str()],
+        )?;
+        append_event_tx(
+            &transaction,
+            &job_id,
+            idempotency_key,
+            "candidate-recorded",
+            &json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Publishes an exact-SHA verification verdict and enters review.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for stale SHA evidence or the wrong state.
+    pub fn record_verdict(
+        &mut self,
+        unit_id: &UnitId,
+        head_sha: &Sha,
+        passed: bool,
+        evidence: &Value,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
+        if current != JobState::IndependentlyVerifying {
+            return Err(StoreError::InvalidTransition {
+                current,
+                next: JobState::Reviewing,
+            });
+        }
+        let candidate = candidate_sha_tx(&transaction, unit_id)?;
+        if candidate != *head_sha {
+            return Err(StoreError::StaleVerification {
+                candidate,
+                verdict: head_sha.clone(),
+            });
+        }
+        transaction.execute(
+            "INSERT INTO verification_verdicts (unit_id, head_sha, passed, evidence_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                unit_id.as_str(),
+                head_sha.as_str(),
+                passed,
+                serde_json::to_string(evidence)?,
+                now
+            ],
+        )?;
+        update_state_tx(&transaction, unit_id, JobState::Reviewing, now)?;
+        append_event_tx(
+            &transaction,
+            &job_id,
+            idempotency_key,
+            "verification-recorded",
+            &json!({
+                "unit_id": unit_id.as_str(),
+                "head_sha": head_sha.as_str(),
+                "passed": passed
+            }),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Marks a reviewed candidate verified only when its latest verdict passes
+    /// at the exact current SHA. Reverified integration SHAs enter `integrated`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when prose is the only evidence or the verdict is
+    /// stale or failing.
+    pub fn accept_verdict(
+        &mut self,
+        unit_id: &UnitId,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<JobState, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
+        if current != JobState::Reviewing {
+            return Err(StoreError::InvalidTransition {
+                current,
+                next: JobState::Verified,
+            });
+        }
+        let candidate = candidate_sha_tx(&transaction, unit_id)?;
+        require_passing_verdict_tx(&transaction, unit_id, &candidate)?;
+        let integration_sha: Option<String> = transaction.query_row(
+            "SELECT integration_sha FROM units WHERE unit_id = ?1",
+            [unit_id.as_str()],
+            |row| row.get(0),
+        )?;
+        let next = if integration_sha.as_deref() == Some(candidate.as_str()) {
+            JobState::Integrated
+        } else {
+            JobState::Verified
+        };
+        update_state_tx(&transaction, unit_id, next, now)?;
+        append_event_tx(
+            &transaction,
+            &job_id,
+            idempotency_key,
+            "verdict-accepted",
+            &json!({"unit_id": unit_id.as_str(), "head_sha": candidate.as_str(), "state": next.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(next)
+    }
+
+    /// Completes integration. A content-changing SHA invalidates the old verdict
+    /// and returns to `candidate-ready`; an unchanged SHA may become integrated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] unless an integrator currently owns the state.
+    pub fn complete_integration(
+        &mut self,
+        unit_id: &UnitId,
+        integrated_sha: &Sha,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<JobState, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
+        if current != JobState::Integrating {
+            return Err(StoreError::InvalidTransition {
+                current,
+                next: JobState::Integrated,
+            });
+        }
+        let candidate = candidate_sha_tx(&transaction, unit_id)?;
+        let next = if candidate == *integrated_sha {
+            require_passing_verdict_tx(&transaction, unit_id, integrated_sha)?;
+            JobState::Integrated
+        } else {
+            JobState::CandidateReady
+        };
+        transaction.execute(
+            "UPDATE units SET state = ?1, candidate_sha = ?2, integration_sha = ?2, updated_at = ?3 WHERE unit_id = ?4",
+            params![next.as_str(), integrated_sha.as_str(), now, unit_id.as_str()],
+        )?;
+        append_event_tx(
+            &transaction,
+            &job_id,
+            idempotency_key,
+            "integration-completed",
+            &json!({
+                "unit_id": unit_id.as_str(),
+                "old_sha": candidate.as_str(),
+                "integrated_sha": integrated_sha.as_str(),
+                "requires_reverification": next == JobState::CandidateReady
+            }),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(next)
+    }
+
+    /// Grants one exact-SHA merge authorization after integration verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for an unverified, stale, or unauthorized SHA.
+    pub fn authorize_merge(
+        &mut self,
+        unit_id: &UnitId,
+        head_sha: &Sha,
+        authorized_by: &str,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        if authorized_by.trim().is_empty() {
+            return Err(StoreError::MissingAuthorizer);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
+        if current != JobState::Integrated {
+            return Err(StoreError::InvalidTransition {
+                current,
+                next: JobState::MergeAuthorized,
+            });
+        }
+        let candidate = candidate_sha_tx(&transaction, unit_id)?;
+        if candidate != *head_sha {
+            return Err(StoreError::UnauthorizedSha {
+                expected: candidate,
+                actual: head_sha.clone(),
+            });
+        }
+        require_passing_verdict_tx(&transaction, unit_id, head_sha)?;
+        transaction.execute(
+            "INSERT INTO merge_authorizations (unit_id, head_sha, authorized_by, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![unit_id.as_str(), head_sha.as_str(), authorized_by, now],
+        )?;
+        update_state_tx(&transaction, unit_id, JobState::MergeAuthorized, now)?;
+        append_event_tx(
+            &transaction,
+            &job_id,
+            idempotency_key,
+            "merge-authorized",
+            &json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str(), "authorized_by": authorized_by}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Records protected-branch completion for exactly the authorized SHA.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for a stale SHA or missing authorization.
+    pub fn record_merged(
+        &mut self,
+        unit_id: &UnitId,
+        head_sha: &Sha,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
+        if current != JobState::MergeAuthorized {
+            return Err(StoreError::InvalidTransition {
+                current,
+                next: JobState::Merged,
+            });
+        }
+        let authorized: Option<String> = transaction
+            .query_row(
+                "SELECT head_sha FROM merge_authorizations WHERE unit_id = ?1",
+                [unit_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if authorized.as_deref() != Some(head_sha.as_str()) {
+            let expected = authorized
+                .map(Sha::new)
+                .transpose()?
+                .ok_or(StoreError::MissingMergeAuthorization)?;
+            return Err(StoreError::UnauthorizedSha {
+                expected,
+                actual: head_sha.clone(),
+            });
+        }
+        update_state_tx(&transaction, unit_id, JobState::Merged, now)?;
+        append_event_tx(
+            &transaction,
+            &job_id,
+            idempotency_key,
+            "merged",
+            &json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Acquires one expiring path, profile, or topology lease.
+    ///
+    /// Expired leases are closed in the same transaction. Path-prefix overlap,
+    /// duplicate profiles, and a second topology owner are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when another live lease overlaps or expiry is not
+    /// in the future.
+    pub fn acquire_lease(
+        &mut self,
+        job_id: &JobId,
+        unit_id: &UnitId,
+        kind: LeaseKind,
+        resource: &str,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<i64, StoreError> {
+        if resource.trim().is_empty() || expires_at <= now {
+            return Err(StoreError::InvalidLease);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "UPDATE leases SET released_at = ?1 WHERE released_at IS NULL AND expires_at <= ?1",
+            [now],
+        )?;
+        let mut statement = transaction.prepare(
+            "SELECT resource FROM leases WHERE kind = ?1 AND released_at IS NULL AND expires_at > ?2",
+        )?;
+        let resources = statement
+            .query_map(params![kind.as_str(), now], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let overlaps = match kind {
+            LeaseKind::Path => resources
+                .iter()
+                .any(|active| path_resources_overlap(active, resource)),
+            LeaseKind::Topology | LeaseKind::Profile => {
+                resources.iter().any(|active| active == resource)
+            }
+        };
+        if overlaps {
+            return Err(StoreError::LeaseConflict(resource.to_owned()));
+        }
+        transaction.execute(
+            "INSERT INTO leases (job_id, unit_id, kind, resource, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![job_id.as_str(), unit_id.as_str(), kind.as_str(), resource, expires_at],
+        )?;
+        let lease_id = transaction.last_insert_rowid();
+        append_event_tx(
+            &transaction,
+            job_id,
+            &format!("lease-acquired:{lease_id}"),
+            "lease-acquired",
+            &json!({"unit_id": unit_id.as_str(), "lease_id": lease_id, "kind": kind.as_str(), "resource": resource}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(lease_id)
+    }
+
+    /// Accepts a worker result only under its current live lease.
+    ///
+    /// Late results are durably quarantined before the stale-result error is
+    /// returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::StaleLease`] for missing, released, or expired
+    /// leases.
+    pub fn accept_worker_result(
+        &mut self,
+        unit_id: &UnitId,
+        lease_id: i64,
+        head_sha: &Sha,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
+        let live: bool = transaction
+            .query_row(
+                "SELECT expires_at > ?1 AND released_at IS NULL FROM leases WHERE lease_id = ?2 AND unit_id = ?3",
+                params![now, lease_id, unit_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !live {
+            if current.can_transition_to(JobState::Quarantined) {
+                update_state_tx(&transaction, unit_id, JobState::Quarantined, now)?;
+            }
+            append_event_tx(
+                &transaction,
+                &job_id,
+                &format!("stale-result:{lease_id}:{}", head_sha.as_str()),
+                "result-quarantined",
+                &json!({"unit_id": unit_id.as_str(), "lease_id": lease_id, "head_sha": head_sha.as_str()}),
+                now,
+            )?;
+            transaction.commit()?;
+            return Err(StoreError::StaleLease(lease_id));
+        }
+        append_event_tx(
+            &transaction,
+            &job_id,
+            &format!("worker-result:{lease_id}:{}", head_sha.as_str()),
+            "worker-result",
+            &json!({"unit_id": unit_id.as_str(), "lease_id": lease_id, "head_sha": head_sha.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Appends an idempotent evidence event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for an empty key or database failure.
+    pub fn append_event(
+        &mut self,
+        job_id: &JobId,
+        idempotency_key: &str,
+        event_type: &str,
+        payload: &Value,
+        now: i64,
+    ) -> Result<i64, StoreError> {
+        if idempotency_key.trim().is_empty() || event_type.trim().is_empty() {
+            return Err(StoreError::InvalidEvent);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id = append_event_tx(
+            &transaction,
+            job_id,
+            idempotency_key,
+            event_type,
+            payload,
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(id)
+    }
+}
+
+fn unit_identity_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    unit_id: &UnitId,
+) -> Result<(JobId, JobState), StoreError> {
+    let row: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT job_id, state FROM units WHERE unit_id = ?1",
+            [unit_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (job_id, state) = row.ok_or_else(|| StoreError::UnknownUnit(unit_id.to_string()))?;
+    Ok((JobId::new(job_id)?, JobState::try_from(state.as_str())?))
+}
+
+fn candidate_sha_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    unit_id: &UnitId,
+) -> Result<Sha, StoreError> {
+    let value: Option<String> = transaction.query_row(
+        "SELECT candidate_sha FROM units WHERE unit_id = ?1",
+        [unit_id.as_str()],
+        |row| row.get(0),
+    )?;
+    value
+        .map(Sha::new)
+        .transpose()?
+        .ok_or(StoreError::MissingCandidate)
+}
+
+fn require_passing_verdict_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    unit_id: &UnitId,
+    head_sha: &Sha,
+) -> Result<(), StoreError> {
+    let passed: Option<bool> = transaction
+        .query_row(
+            "SELECT passed FROM verification_verdicts WHERE unit_id = ?1 AND head_sha = ?2 ORDER BY verdict_id DESC LIMIT 1",
+            params![unit_id.as_str(), head_sha.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if passed == Some(true) {
+        Ok(())
+    } else {
+        Err(StoreError::MissingPassingVerdict(head_sha.clone()))
+    }
+}
+
+fn update_state_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    unit_id: &UnitId,
+    state: JobState,
+    now: i64,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "UPDATE units SET state = ?1, updated_at = ?2 WHERE unit_id = ?3",
+        params![state.as_str(), now, unit_id.as_str()],
+    )?;
+    Ok(())
+}
+
+fn append_event_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    job_id: &JobId,
+    idempotency_key: &str,
+    event_type: &str,
+    payload: &Value,
+    now: i64,
+) -> Result<i64, StoreError> {
+    if idempotency_key.trim().is_empty() || event_type.trim().is_empty() {
+        return Err(StoreError::InvalidEvent);
+    }
+    let payload_json = serde_json::to_string(payload)?;
+    transaction.execute(
+        "INSERT INTO events (job_id, idempotency_key, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(idempotency_key) DO NOTHING",
+        params![job_id.as_str(), idempotency_key, event_type, payload_json, now],
+    )?;
+    let id = transaction.query_row(
+        "SELECT event_id FROM events WHERE idempotency_key = ?1",
+        [idempotency_key],
+        |row| row.get(0),
+    )?;
+    Ok(id)
+}
+
+fn path_resources_overlap(left: &str, right: &str) -> bool {
+    let left = Path::new(left);
+    let right = Path::new(right);
+    left.starts_with(right) || right.starts_with(left)
+}
+
+/// Transactional control-plane failure.
+#[derive(Debug, Error)]
+pub enum StoreError {
+    /// `SQLite` operation failed.
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    /// Brief or persisted typed value failed validation.
+    #[error("brief validation error: {0}")]
+    Brief(#[from] BriefError),
+    /// JSON evidence failed serialization.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    /// Database was created by a newer incompatible binary.
+    #[error("unsupported control-plane schema version: {0}")]
+    UnsupportedSchema(i64),
+    /// Unit id does not exist.
+    #[error("unknown unit: {0}")]
+    UnknownUnit(String),
+    /// State edge violates the declared lifecycle.
+    #[error("invalid transition from {current:?} to {next:?}")]
+    InvalidTransition {
+        /// Current persisted state.
+        current: JobState,
+        /// Refused target state.
+        next: JobState,
+    },
+    /// Evidence-bearing state requires a dedicated API.
+    #[error("state {0:?} requires its dedicated evidence gate")]
+    DedicatedGateRequired(JobState),
+    /// Candidate must always be a committed full SHA.
+    #[error("candidate SHA is missing")]
+    MissingCandidate,
+    /// Verifier checked a different content revision.
+    #[error("verification SHA {verdict} is stale; candidate is {candidate}")]
+    StaleVerification {
+        /// Current candidate.
+        candidate: Sha,
+        /// Refused verdict revision.
+        verdict: Sha,
+    },
+    /// No exact current passing verdict exists.
+    #[error("no passing verification verdict for exact SHA {0}")]
+    MissingPassingVerdict(Sha),
+    /// Merge request does not match the current verified integration.
+    #[error("requested SHA {actual} does not match authorized SHA {expected}")]
+    UnauthorizedSha {
+        /// Current verified or authorized SHA.
+        expected: Sha,
+        /// Refused requested SHA.
+        actual: Sha,
+    },
+    /// Authorization must be attributable.
+    #[error("merge authorizer must not be empty")]
+    MissingAuthorizer,
+    /// Shipper attempted merge without a recorded capability grant.
+    #[error("merge authorization is missing")]
+    MissingMergeAuthorization,
+    /// Lease request is empty or already expired.
+    #[error("invalid lease request")]
+    InvalidLease,
+    /// Another live worker owns an overlapping resource.
+    #[error("live lease overlaps resource: {0}")]
+    LeaseConflict(String),
+    /// Worker output arrived after its authority expired.
+    #[error("worker result belongs to stale lease {0}")]
+    StaleLease(i64),
+    /// Append-only event keys and types are required.
+    #[error("event idempotency key and type must not be empty")]
+    InvalidEvent,
+}
+
+const SCHEMA: &str = r"
+CREATE TABLE jobs (
+    job_id TEXT PRIMARY KEY,
+    brief_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE units (
+    unit_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    state TEXT NOT NULL,
+    base_sha TEXT NOT NULL,
+    candidate_sha TEXT,
+    integration_sha TEXT,
+    updated_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE dependencies (
+    unit_id TEXT NOT NULL REFERENCES units(unit_id),
+    depends_on_unit_id TEXT NOT NULL,
+    PRIMARY KEY (unit_id, depends_on_unit_id)
+) STRICT;
+
+CREATE TABLE profiles (
+    profile_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    unit_id TEXT NOT NULL REFERENCES units(unit_id),
+    role TEXT NOT NULL,
+    home TEXT NOT NULL UNIQUE,
+    destroyed_at INTEGER
+) STRICT;
+
+CREATE TABLE sessions (
+    session_id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL REFERENCES profiles(profile_id),
+    external_key TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (profile_id, external_key)
+) STRICT;
+
+CREATE TABLE leases (
+    lease_id INTEGER PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    unit_id TEXT NOT NULL REFERENCES units(unit_id),
+    kind TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    released_at INTEGER
+) STRICT;
+
+CREATE TABLE credential_grants (
+    grant_id INTEGER PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    credential_id TEXT NOT NULL,
+    methods_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER
+) STRICT;
+
+CREATE TABLE branches (
+    branch_id INTEGER PRIMARY KEY,
+    unit_id TEXT NOT NULL REFERENCES units(unit_id),
+    name TEXT NOT NULL UNIQUE,
+    worktree TEXT NOT NULL UNIQUE,
+    base_sha TEXT NOT NULL,
+    head_sha TEXT
+) STRICT;
+
+CREATE TABLE events (
+    event_id INTEGER PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    idempotency_key TEXT NOT NULL UNIQUE,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE artifacts (
+    artifact_id INTEGER PRIMARY KEY,
+    unit_id TEXT NOT NULL REFERENCES units(unit_id),
+    kind TEXT NOT NULL,
+    path TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (unit_id, path, digest)
+) STRICT;
+
+CREATE TABLE verification_verdicts (
+    verdict_id INTEGER PRIMARY KEY,
+    unit_id TEXT NOT NULL REFERENCES units(unit_id),
+    head_sha TEXT NOT NULL,
+    passed INTEGER NOT NULL CHECK (passed IN (0, 1)),
+    evidence_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE review_findings (
+    finding_id INTEGER PRIMARY KEY,
+    unit_id TEXT NOT NULL REFERENCES units(unit_id),
+    head_sha TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    finding_json TEXT NOT NULL,
+    disposition TEXT,
+    created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE merge_authorizations (
+    authorization_id INTEGER PRIMARY KEY,
+    unit_id TEXT NOT NULL UNIQUE REFERENCES units(unit_id),
+    head_sha TEXT NOT NULL,
+    authorized_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TRIGGER jobs_brief_immutable
+BEFORE UPDATE OF brief_json ON jobs
+BEGIN
+    SELECT RAISE(ABORT, 'job brief is immutable');
+END;
+
+CREATE TRIGGER events_no_update
+BEFORE UPDATE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'events are append-only');
+END;
+
+CREATE TRIGGER events_no_delete
+BEFORE DELETE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'events are append-only');
+END;
+";
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    use super::{ControlStore, StoreError};
+    use crate::{
+        CredentialGrant, JobBrief, JobId, JobState, LeaseKind, NetworkMode, NetworkPolicy,
+        PathPolicy, ResourceLimits, RiskClass, Sha, UnitId, VerificationCommand,
+    };
+
+    fn sha(character: char) -> Sha {
+        Sha::new(character.to_string().repeat(40)).expect("valid SHA")
+    }
+
+    fn brief() -> JobBrief {
+        JobBrief {
+            job_id: JobId::new("job-1").expect("valid job"),
+            unit_id: UnitId::new("unit-1").expect("valid unit"),
+            goal: "Implement a bounded unit and prove it".to_owned(),
+            repository: "https://github.com/nickderaj/nswarm".to_owned(),
+            base_sha: sha('a'),
+            paths: PathPolicy {
+                readable: vec![PathBuf::from("crates/assigned")],
+                writable: vec![PathBuf::from("crates/assigned/src")],
+                forbidden: vec![PathBuf::from("crates/sibling")],
+            },
+            dependencies: Vec::new(),
+            acceptance_criteria: vec!["focused test passes".to_owned()],
+            verification_commands: vec![VerificationCommand {
+                program: "cargo".to_owned(),
+                arguments: vec!["test".to_owned(), "-p".to_owned(), "assigned".to_owned()],
+            }],
+            risk_class: RiskClass::Medium,
+            limits: ResourceLimits {
+                wall_seconds: 900,
+                memory_bytes: 1_000_000_000,
+                disk_bytes: 1_000_000_000,
+                process_count: 64,
+                cost_microunits: 0,
+            },
+            network: NetworkPolicy {
+                mode: NetworkMode::DenyAll,
+                destinations: Vec::new(),
+            },
+            credential_grants: vec![CredentialGrant {
+                credential_id: "github-job-push".to_owned(),
+                methods: vec!["git:push:refs/heads/nswarm/job-1/unit-1".to_owned()],
+            }],
+            report_schema: json!({"type": "object", "required": ["head_sha", "evidence"]}),
+            standing_policy_version: "v1".to_owned(),
+        }
+    }
+
+    fn advance_to_self_verifying(store: &mut ControlStore, unit: &UnitId) {
+        for (state, timestamp) in [
+            JobState::Leased,
+            JobState::Grounding,
+            JobState::Implementing,
+            JobState::SelfVerifying,
+        ]
+        .into_iter()
+        .zip([2_i64, 3, 4, 5])
+        {
+            store
+                .transition(unit, state, &format!("advance-{timestamp}"), timestamp)
+                .expect("valid transition");
+        }
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        store.migrate().expect("second migration succeeds");
+    }
+
+    #[test]
+    fn missing_brief_fields_refuse_creation() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let mut invalid = brief();
+        invalid.verification_commands.clear();
+        assert!(store.create_job(&invalid, 1).is_err());
+    }
+
+    #[test]
+    fn candidate_requires_commit_sha_and_independent_proof() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let unit = brief.unit_id.clone();
+        store.create_job(&brief, 1).expect("job created");
+        assert!(matches!(
+            store.transition(&unit, JobState::Verified, "skip", 2),
+            Err(StoreError::DedicatedGateRequired(JobState::Verified))
+        ));
+        advance_to_self_verifying(&mut store, &unit);
+        store
+            .record_candidate(&unit, &sha('b'), "candidate", 7)
+            .expect("candidate recorded");
+        assert_eq!(store.state(&unit).expect("state"), JobState::CandidateReady);
+    }
+
+    #[test]
+    fn changed_sha_invalidates_verification() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let unit = brief.unit_id.clone();
+        store.create_job(&brief, 1).expect("job created");
+        advance_to_self_verifying(&mut store, &unit);
+        store
+            .record_candidate(&unit, &sha('b'), "candidate", 7)
+            .expect("candidate recorded");
+        store
+            .transition(&unit, JobState::IndependentlyVerifying, "verify", 8)
+            .expect("verification starts");
+        assert!(matches!(
+            store.record_verdict(&unit, &sha('c'), true, &json!({}), "stale", 9),
+            Err(StoreError::StaleVerification { .. })
+        ));
+    }
+
+    #[test]
+    fn integration_content_change_requires_reverification() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let unit = brief.unit_id.clone();
+        store.create_job(&brief, 1).expect("job created");
+        advance_to_self_verifying(&mut store, &unit);
+        store
+            .record_candidate(&unit, &sha('b'), "candidate", 7)
+            .expect("candidate recorded");
+        store
+            .transition(&unit, JobState::IndependentlyVerifying, "verify", 8)
+            .expect("verification starts");
+        store
+            .record_verdict(
+                &unit,
+                &sha('b'),
+                true,
+                &json!({"commands": ["cargo test"]}),
+                "verdict",
+                9,
+            )
+            .expect("verdict recorded");
+        assert_eq!(
+            store.accept_verdict(&unit, "accept", 10).expect("accepted"),
+            JobState::Verified
+        );
+        store
+            .transition(&unit, JobState::Integrating, "integrate", 11)
+            .expect("integration starts");
+        assert_eq!(
+            store
+                .complete_integration(&unit, &sha('c'), "integrated", 12)
+                .expect("integration completes"),
+            JobState::CandidateReady
+        );
+        assert!(matches!(
+            store.authorize_merge(&unit, &sha('c'), "owner", "authorize", 13),
+            Err(StoreError::InvalidTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn overlapping_and_topology_leases_are_rejected() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        store
+            .acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Path,
+                "crates/assigned",
+                100,
+                2,
+            )
+            .expect("first path lease");
+        assert!(matches!(
+            store.acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Path,
+                "crates/assigned/src",
+                100,
+                3,
+            ),
+            Err(StoreError::LeaseConflict(_))
+        ));
+        store
+            .acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Topology,
+                "integration-stack",
+                100,
+                3,
+            )
+            .expect("first topology lease");
+        assert!(matches!(
+            store.acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Topology,
+                "integration-stack",
+                100,
+                4,
+            ),
+            Err(StoreError::LeaseConflict(_))
+        ));
+    }
+
+    #[test]
+    fn zombie_result_is_durably_quarantined() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        store
+            .transition(&brief.unit_id, JobState::Leased, "leased", 2)
+            .expect("leased");
+        let lease = store
+            .acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                "coder-job-1-unit-1",
+                10,
+                2,
+            )
+            .expect("lease acquired");
+        assert!(matches!(
+            store.accept_worker_result(&brief.unit_id, lease, &sha('b'), 11),
+            Err(StoreError::StaleLease(_))
+        ));
+        assert_eq!(
+            store.state(&brief.unit_id).expect("state"),
+            JobState::Quarantined
+        );
+    }
+
+    #[test]
+    fn evidence_events_are_idempotent() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let first = store
+            .append_event(
+                &brief.job_id,
+                "claim-1",
+                "claim",
+                &json!({"kind": "direct"}),
+                2,
+            )
+            .expect("first append");
+        let second = store
+            .append_event(
+                &brief.job_id,
+                "claim-1",
+                "claim",
+                &json!({"kind": "direct"}),
+                2,
+            )
+            .expect("idempotent append");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn exact_sha_can_complete_the_full_authorized_lifecycle() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let unit = brief.unit_id.clone();
+        let candidate = sha('b');
+        store.create_job(&brief, 1).expect("job created");
+        advance_to_self_verifying(&mut store, &unit);
+        store
+            .record_candidate(&unit, &candidate, "candidate-full", 7)
+            .expect("candidate recorded");
+        store
+            .transition(&unit, JobState::IndependentlyVerifying, "verify-full", 8)
+            .expect("verification starts");
+        store
+            .record_verdict(
+                &unit,
+                &candidate,
+                true,
+                &json!({"commands": ["cargo test"], "artifacts": []}),
+                "verdict-full",
+                9,
+            )
+            .expect("verdict recorded");
+        assert_eq!(
+            store
+                .accept_verdict(&unit, "accept-full", 10)
+                .expect("accepted"),
+            JobState::Verified
+        );
+        store
+            .transition(&unit, JobState::Integrating, "integrate-full", 11)
+            .expect("integration starts");
+        assert_eq!(
+            store
+                .complete_integration(&unit, &candidate, "integrated-full", 12)
+                .expect("unchanged integration remains verified"),
+            JobState::Integrated
+        );
+        assert!(matches!(
+            store.authorize_merge(&unit, &sha('c'), "owner", "wrong-auth", 13),
+            Err(StoreError::UnauthorizedSha { .. })
+        ));
+        store
+            .authorize_merge(&unit, &candidate, "owner", "authorize-full", 14)
+            .expect("exact SHA authorized");
+        assert!(matches!(
+            store.record_merged(&unit, &sha('c'), "wrong-merge", 15),
+            Err(StoreError::UnauthorizedSha { .. })
+        ));
+        store
+            .record_merged(&unit, &candidate, "merged-full", 16)
+            .expect("exact SHA merged");
+        assert_eq!(store.state(&unit).expect("state"), JobState::Merged);
+    }
+
+    #[test]
+    fn live_worker_result_and_expired_lease_replacement_are_explicit() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        store
+            .transition(&brief.unit_id, JobState::Leased, "leased-live", 2)
+            .expect("leased");
+        let first = store
+            .acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                "coder-job-1-unit-1",
+                10,
+                2,
+            )
+            .expect("first lease");
+        store
+            .accept_worker_result(&brief.unit_id, first, &sha('b'), 5)
+            .expect("live result accepted");
+        let second = store
+            .acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                "coder-job-1-unit-1",
+                20,
+                11,
+            )
+            .expect("expired lease is closed before replacement");
+        assert_ne!(first, second);
+    }
+}

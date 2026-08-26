@@ -1,0 +1,30 @@
+{
+  "capabilities": [
+    "repository-read",
+    "repository-write",
+    "evidence-write",
+    "branch-push"
+  ],
+  "forbidden_capabilities": [
+    "coordinate",
+    "verify",
+    "integrate",
+    "merge",
+    "deploy"
+  ],
+  "governance": {
+    "background_review": false,
+    "curator": false,
+    "write_approval": true
+  },
+  "memory": "profiles/coder/memory",
+  "network": {
+    "brief_allow_list_required": true,
+    "default": "deny"
+  },
+  "policy_version": "v1",
+  "profile_version": 1,
+  "role": "coder",
+  "skills": "profiles/coder/skills",
+  "soul": "profiles/coder/SOUL.md"
+}

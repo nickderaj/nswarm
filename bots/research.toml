@@ -1,0 +1,31 @@
+[bot]
+name = "research"
+crate = "research-bot"
+runtime = "rust"
+user = "research-agent"
+prefix = "/opt/nswarm/research"
+state = "/var/lib/research-agent"
+data = "/var/lib/nswarm/research"
+
+[surface]
+telegram = false
+socket = "/run/research/mcp.sock"
+ask = true
+peers = ["boss-agent"]
+
+[secrets]
+allow = ["OPENROUTER_API_KEY"]
+
+[agent]
+profile = "research"
+soul = "profiles/research/SOUL.md"
+skills = "profiles/research/skills"
+memory = "profiles/research/memory"
+toolsets = ["mcp-research", "clarify", "memory", "session_search", "skills"]
+write_approval = true
+background_review = false
+
+[sandbox]
+memory_max = "1G"
+cpu_quota = "100%"
+deny_paths = ["/var/lib/nswarm/gym", "/var/lib/nswarm/tutor", "/var/lib/nswarm/trading"]
