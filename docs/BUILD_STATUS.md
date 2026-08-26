@@ -64,6 +64,26 @@ Completed acceptance units:
 - `just ci` now runs the repository inventory check and remains green with 36
   tests and 90.57% line coverage.
 
+## Checkpoint C — transactional evidence repositories
+
+Exact implementation SHA: `b45c83cfd98853676e8336e6fdcefecf563179fe`
+(`feat(control): enforce evidence repositories`).
+
+Completed acceptance units:
+
+- typed profile and session IDs with transactional profile/session repositories;
+- exact job-owned branch namespace/base registration and immutable artifact
+  digest recording;
+- schema v2 migration from the committed v1 layout adds reviewer attribution and
+  is tested from both empty and prior-version databases;
+- medium/high-risk candidates cannot become verified without two distinct,
+  same-job verifier/reviewer profiles at the exact candidate SHA;
+- stale review SHAs, non-review-state submissions, unauthorized reviewer roles,
+  job/unit ownership mismatches, unsatisfied dependencies, overlapping paths,
+  and multiple topology owners fail closed;
+- `just ci` remains green with 38 tests, 9 deterministic hostile-input evals,
+  and 90.59% line coverage.
+
 Known gaps and external gates:
 
 - GitHub Actions have not run until this branch is pushed and a PR exists.
@@ -76,9 +96,9 @@ Known gaps and external gates:
 - `fleet` now validates, inventories, renders, and diffs local installed-unit
   fixtures; host mutation via deploy, status/new scaffolding, and encrypted
   secret materialization remain before step 1 is complete.
-- Agent store tables exist for profiles, sessions, branches, artifacts, review
-  findings, and credential grants; typed repository methods for the remaining
-  records and negative tests remain before the control plane is complete.
+- Credential revocation, branch-head updates, artifact/report schema validation,
+  explicit integrator disposition of non-blocking review findings, and profile
+  destruction/audit methods remain before the control plane is complete.
 - The checked-in research service manifest is a rendering/policy fixture; no
   writable research agent or bot behaviour is enabled.
 - Crate publication was not attempted. The remote repository already supplies
