@@ -5,9 +5,35 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::types::BriefError;
-use crate::{JobBrief, JobId, JobState, LeaseKind, Sha, UnitId};
+use crate::{
+    JobBrief, JobId, JobState, LeaseKind, ProfileId, RiskClass, Role, SessionId, Sha, UnitId,
+};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// Reviewer assessment recorded against one exact candidate SHA.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewAssessment {
+    /// Candidate must not advance until a new author revision resolves it.
+    Blocking,
+    /// Non-blocking concern requiring integrator disposition.
+    Consider,
+    /// Evidence was reviewed and no blocking issue was found.
+    Noted,
+    /// A previously raised concern was rejected with evidence.
+    Dismissed,
+}
+
+impl ReviewAssessment {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocking => "blocking",
+            Self::Consider => "consider",
+            Self::Noted => "noted",
+            Self::Dismissed => "dismissed",
+        }
+    }
+}
 
 /// Transactional `SQLite` repository for agent jobs and audit evidence.
 pub struct ControlStore {
@@ -53,11 +79,21 @@ impl ControlStore {
         if version > SCHEMA_VERSION {
             return Err(StoreError::UnsupportedSchema(version));
         }
+        let mut version = version;
         if version == 0 {
             let transaction = self
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(SCHEMA)?;
+            transaction.pragma_update(None, "user_version", 1_i64)?;
+            transaction.commit()?;
+            version = 1;
+        }
+        if version == 1 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(MIGRATION_2)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
         }
@@ -308,6 +344,7 @@ impl ControlStore {
         }
         let candidate = candidate_sha_tx(&transaction, unit_id)?;
         require_passing_verdict_tx(&transaction, unit_id, &candidate)?;
+        require_review_gate_tx(&transaction, unit_id, &candidate)?;
         let integration_sha: Option<String> = transaction.query_row(
             "SELECT integration_sha FROM units WHERE unit_id = ?1",
             [unit_id.as_str()],
@@ -509,6 +546,18 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (actual_job, _) = unit_identity_tx(&transaction, unit_id)?;
+        if actual_job != *job_id {
+            return Err(StoreError::JobUnitMismatch);
+        }
+        let unsatisfied: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM dependencies AS dependency JOIN units AS prerequisite ON prerequisite.unit_id = dependency.depends_on_unit_id WHERE dependency.unit_id = ?1 AND prerequisite.state != 'merged'",
+            [unit_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if unsatisfied != 0 {
+            return Err(StoreError::DependenciesUnsatisfied(unsatisfied));
+        }
         transaction.execute(
             "UPDATE leases SET released_at = ?1 WHERE released_at IS NULL AND expires_at <= ?1",
             [now],
@@ -524,9 +573,8 @@ impl ControlStore {
             LeaseKind::Path => resources
                 .iter()
                 .any(|active| path_resources_overlap(active, resource)),
-            LeaseKind::Topology | LeaseKind::Profile => {
-                resources.iter().any(|active| active == resource)
-            }
+            LeaseKind::Topology => !resources.is_empty(),
+            LeaseKind::Profile => resources.iter().any(|active| active == resource),
         };
         if overlaps {
             return Err(StoreError::LeaseConflict(resource.to_owned()));
@@ -633,6 +681,239 @@ impl ControlStore {
         transaction.commit()?;
         Ok(id)
     }
+
+    /// Registers one role-bound isolated profile home.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for a job/unit mismatch, relative home, duplicate
+    /// profile, or database failure.
+    pub fn register_profile(
+        &mut self,
+        profile_id: &ProfileId,
+        job_id: &JobId,
+        unit_id: &UnitId,
+        role: Role,
+        home: &Path,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        if !home.is_absolute() {
+            return Err(StoreError::InvalidProfileHome(home.to_path_buf()));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (actual_job, _) = unit_identity_tx(&transaction, unit_id)?;
+        if actual_job != *job_id {
+            return Err(StoreError::JobUnitMismatch);
+        }
+        transaction.execute(
+            "INSERT INTO profiles (profile_id, job_id, unit_id, role, home) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                profile_id.as_str(),
+                job_id.as_str(),
+                unit_id.as_str(),
+                role.as_str(),
+                home.to_string_lossy()
+            ],
+        )?;
+        append_event_tx(
+            &transaction,
+            job_id,
+            &format!("profile-registered:{profile_id}"),
+            "profile-registered",
+            &json!({"profile_id": profile_id.as_str(), "unit_id": unit_id.as_str(), "role": role.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Registers a deterministic session key under exactly one profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for a blank key, unknown profile, duplicate, or
+    /// database failure.
+    pub fn register_session(
+        &mut self,
+        session_id: &SessionId,
+        profile_id: &ProfileId,
+        external_key: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        if external_key.trim().is_empty() {
+            return Err(StoreError::InvalidSessionKey);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let job_id: String = transaction.query_row(
+            "SELECT job_id FROM profiles WHERE profile_id = ?1",
+            [profile_id.as_str()],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO sessions (session_id, profile_id, external_key, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![session_id.as_str(), profile_id.as_str(), external_key, now],
+        )?;
+        append_event_tx(
+            &transaction,
+            &JobId::new(job_id)?,
+            &format!("session-registered:{session_id}"),
+            "session-registered",
+            &json!({"session_id": session_id.as_str(), "profile_id": profile_id.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Registers the one branch/worktree assigned to a coding unit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] unless branch namespace and base SHA exactly match
+    /// the immutable job record and the worktree path is absolute.
+    pub fn register_branch(
+        &mut self,
+        unit_id: &UnitId,
+        name: &str,
+        worktree: &Path,
+        base_sha: &Sha,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        if !worktree.is_absolute() {
+            return Err(StoreError::InvalidWorktree(worktree.to_path_buf()));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, _) = unit_identity_tx(&transaction, unit_id)?;
+        let expected_name = format!("nswarm/{job_id}/{unit_id}");
+        let expected_base: String = transaction.query_row(
+            "SELECT base_sha FROM units WHERE unit_id = ?1",
+            [unit_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if name != expected_name || expected_base != base_sha.as_str() {
+            return Err(StoreError::InvalidBranchAssignment);
+        }
+        transaction.execute(
+            "INSERT INTO branches (unit_id, name, worktree, base_sha) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                unit_id.as_str(),
+                name,
+                worktree.to_string_lossy(),
+                base_sha.as_str()
+            ],
+        )?;
+        append_event_tx(
+            &transaction,
+            &job_id,
+            &format!("branch-registered:{unit_id}"),
+            "branch-registered",
+            &json!({"unit_id": unit_id.as_str(), "name": name, "base_sha": base_sha.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Stores an immutable artifact digest for later verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for blank kind/path or database failure.
+    pub fn record_artifact(
+        &mut self,
+        unit_id: &UnitId,
+        kind: &str,
+        path: &Path,
+        digest: &Sha,
+        now: i64,
+    ) -> Result<i64, StoreError> {
+        if kind.trim().is_empty() || path.as_os_str().is_empty() {
+            return Err(StoreError::InvalidArtifact);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, _) = unit_identity_tx(&transaction, unit_id)?;
+        transaction.execute(
+            "INSERT INTO artifacts (unit_id, kind, path, digest, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![unit_id.as_str(), kind, path.to_string_lossy(), digest.as_str(), now],
+        )?;
+        let artifact_id = transaction.last_insert_rowid();
+        append_event_tx(
+            &transaction,
+            &job_id,
+            &format!("artifact-recorded:{artifact_id}"),
+            "artifact-recorded",
+            &json!({"unit_id": unit_id.as_str(), "artifact_id": artifact_id, "digest": digest.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(artifact_id)
+    }
+
+    /// Records an independent reviewer assessment against the exact candidate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] unless the unit is in review, the SHA is current,
+    /// and the profile has the verifier/reviewer role for the same job.
+    pub fn record_review(
+        &mut self,
+        unit_id: &UnitId,
+        reviewer: &ProfileId,
+        head_sha: &Sha,
+        assessment: ReviewAssessment,
+        finding: &Value,
+        now: i64,
+    ) -> Result<i64, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, state) = unit_identity_tx(&transaction, unit_id)?;
+        if state != JobState::Reviewing {
+            return Err(StoreError::ReviewOutsideReviewState);
+        }
+        let candidate = candidate_sha_tx(&transaction, unit_id)?;
+        if candidate != *head_sha {
+            return Err(StoreError::StaleVerification {
+                candidate,
+                verdict: head_sha.clone(),
+            });
+        }
+        let reviewer_record: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT job_id, role FROM profiles WHERE profile_id = ?1",
+                [reviewer.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if !reviewer_record.as_ref().is_some_and(|(review_job, role)| {
+            review_job == job_id.as_str() && role == Role::VerifierReviewer.as_str()
+        }) {
+            return Err(StoreError::UnauthorizedReviewer);
+        }
+        transaction.execute(
+            "INSERT INTO review_findings (unit_id, head_sha, reviewer_profile, severity, finding_json, disposition, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?4, ?6)",
+            params![unit_id.as_str(), head_sha.as_str(), reviewer.as_str(), assessment.as_str(), serde_json::to_string(finding)?, now],
+        )?;
+        let finding_id = transaction.last_insert_rowid();
+        append_event_tx(
+            &transaction,
+            &job_id,
+            &format!("review-recorded:{finding_id}"),
+            "review-recorded",
+            &json!({"unit_id": unit_id.as_str(), "reviewer": reviewer.as_str(), "head_sha": head_sha.as_str(), "assessment": assessment.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(finding_id)
+    }
 }
 
 fn unit_identity_tx(
@@ -682,6 +963,34 @@ fn require_passing_verdict_tx(
     } else {
         Err(StoreError::MissingPassingVerdict(head_sha.clone()))
     }
+}
+
+fn require_review_gate_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    unit_id: &UnitId,
+    head_sha: &Sha,
+) -> Result<(), StoreError> {
+    let brief_json: String = transaction.query_row(
+        "SELECT jobs.brief_json FROM jobs JOIN units USING (job_id) WHERE units.unit_id = ?1",
+        [unit_id.as_str()],
+        |row| row.get(0),
+    )?;
+    let brief: JobBrief = serde_json::from_str(&brief_json)?;
+    if brief.risk_class == RiskClass::Low {
+        return Ok(());
+    }
+    let (reviewers, blocking): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(DISTINCT reviewer_profile), COALESCE(SUM(CASE WHEN disposition = 'blocking' THEN 1 ELSE 0 END), 0) FROM review_findings WHERE unit_id = ?1 AND head_sha = ?2",
+        params![unit_id.as_str(), head_sha.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if reviewers < 2 || blocking != 0 {
+        return Err(StoreError::ReviewGateUnsatisfied {
+            reviewers,
+            blocking,
+        });
+    }
+    Ok(())
 }
 
 fn update_state_tx(
@@ -796,6 +1105,43 @@ pub enum StoreError {
     /// Append-only event keys and types are required.
     #[error("event idempotency key and type must not be empty")]
     InvalidEvent,
+    /// Profile home must be an explicit isolated absolute path.
+    #[error("profile home must be absolute: {path}", path = .0.display())]
+    InvalidProfileHome(std::path::PathBuf),
+    /// Profile registration cannot cross job ownership.
+    #[error("job and unit ownership do not match")]
+    JobUnitMismatch,
+    /// A worker cannot lease a unit before every declared dependency merges.
+    #[error("unit has {0} unsatisfied dependencies")]
+    DependenciesUnsatisfied(i64),
+    /// Session keys are always explicit.
+    #[error("session external key must not be empty")]
+    InvalidSessionKey,
+    /// Worktree must be an explicit scheduler-owned absolute path.
+    #[error("worktree must be absolute: {path}", path = .0.display())]
+    InvalidWorktree(std::path::PathBuf),
+    /// Branch namespace and base must derive from the immutable brief.
+    #[error("branch name or base SHA does not match the unit assignment")]
+    InvalidBranchAssignment,
+    /// Artifact kind and path are required evidence fields.
+    #[error("artifact kind and path must not be empty")]
+    InvalidArtifact,
+    /// Reviews are accepted only during the explicit review state.
+    #[error("review was submitted outside the reviewing state")]
+    ReviewOutsideReviewState,
+    /// Only an isolated verifier/reviewer profile for the same job may review.
+    #[error("profile is not an authorized independent reviewer")]
+    UnauthorizedReviewer,
+    /// Medium/high-risk changes need two independent non-blocking reviews.
+    #[error(
+        "review gate needs two reviewers and no blockers; reviewers={reviewers}, blocking={blocking}"
+    )]
+    ReviewGateUnsatisfied {
+        /// Distinct independent reviewer profiles observed.
+        reviewers: i64,
+        /// Remaining blocking assessments.
+        blocking: i64,
+    },
 }
 
 const SCHEMA: &str = r"
@@ -931,16 +1277,22 @@ BEGIN
 END;
 ";
 
+const MIGRATION_2: &str = r"
+ALTER TABLE review_findings
+ADD COLUMN reviewer_profile TEXT NOT NULL DEFAULT 'legacy-reviewer';
+";
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use serde_json::json;
 
-    use super::{ControlStore, StoreError};
+    use super::{ControlStore, ReviewAssessment, SCHEMA, StoreError};
     use crate::{
         CredentialGrant, JobBrief, JobId, JobState, LeaseKind, NetworkMode, NetworkPolicy,
-        PathPolicy, ResourceLimits, RiskClass, Sha, UnitId, VerificationCommand,
+        PathPolicy, ProfileId, ResourceLimits, RiskClass, Role, SessionId, Sha, UnitId,
+        VerificationCommand,
     };
 
     fn sha(character: char) -> Sha {
@@ -999,6 +1351,32 @@ mod tests {
             store
                 .transition(unit, state, &format!("advance-{timestamp}"), timestamp)
                 .expect("valid transition");
+        }
+    }
+
+    fn record_two_reviews(store: &mut ControlStore, brief: &JobBrief, head_sha: &Sha, now: i64) {
+        for index in 1..=2 {
+            let profile = ProfileId::new(format!("reviewer-{index}")).expect("valid profile");
+            store
+                .register_profile(
+                    &profile,
+                    &brief.job_id,
+                    &brief.unit_id,
+                    Role::VerifierReviewer,
+                    PathBuf::from(format!("/tmp/nswarm-reviewer-{index}")).as_path(),
+                    now + index,
+                )
+                .expect("review profile registered");
+            store
+                .record_review(
+                    &brief.unit_id,
+                    &profile,
+                    head_sha,
+                    ReviewAssessment::Noted,
+                    &json!({"summary": "independent review passed"}),
+                    now + index + 2,
+                )
+                .expect("review recorded");
         }
     }
 
@@ -1075,21 +1453,26 @@ mod tests {
                 9,
             )
             .expect("verdict recorded");
+        assert!(matches!(
+            store.accept_verdict(&unit, "premature-accept", 10),
+            Err(StoreError::ReviewGateUnsatisfied { reviewers: 0, .. })
+        ));
+        record_two_reviews(&mut store, &brief, &sha('b'), 10);
         assert_eq!(
-            store.accept_verdict(&unit, "accept", 10).expect("accepted"),
+            store.accept_verdict(&unit, "accept", 15).expect("accepted"),
             JobState::Verified
         );
         store
-            .transition(&unit, JobState::Integrating, "integrate", 11)
+            .transition(&unit, JobState::Integrating, "integrate", 16)
             .expect("integration starts");
         assert_eq!(
             store
-                .complete_integration(&unit, &sha('c'), "integrated", 12)
+                .complete_integration(&unit, &sha('c'), "integrated", 17)
                 .expect("integration completes"),
             JobState::CandidateReady
         );
         assert!(matches!(
-            store.authorize_merge(&unit, &sha('c'), "owner", "authorize", 13),
+            store.authorize_merge(&unit, &sha('c'), "owner", "authorize", 18),
             Err(StoreError::InvalidTransition { .. })
         ));
     }
@@ -1135,7 +1518,7 @@ mod tests {
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Topology,
-                "integration-stack",
+                "other-integration-stack",
                 100,
                 4,
             ),
@@ -1221,34 +1604,35 @@ mod tests {
                 9,
             )
             .expect("verdict recorded");
+        record_two_reviews(&mut store, &brief, &candidate, 10);
         assert_eq!(
             store
-                .accept_verdict(&unit, "accept-full", 10)
+                .accept_verdict(&unit, "accept-full", 15)
                 .expect("accepted"),
             JobState::Verified
         );
         store
-            .transition(&unit, JobState::Integrating, "integrate-full", 11)
+            .transition(&unit, JobState::Integrating, "integrate-full", 16)
             .expect("integration starts");
         assert_eq!(
             store
-                .complete_integration(&unit, &candidate, "integrated-full", 12)
+                .complete_integration(&unit, &candidate, "integrated-full", 17)
                 .expect("unchanged integration remains verified"),
             JobState::Integrated
         );
         assert!(matches!(
-            store.authorize_merge(&unit, &sha('c'), "owner", "wrong-auth", 13),
+            store.authorize_merge(&unit, &sha('c'), "owner", "wrong-auth", 18),
             Err(StoreError::UnauthorizedSha { .. })
         ));
         store
-            .authorize_merge(&unit, &candidate, "owner", "authorize-full", 14)
+            .authorize_merge(&unit, &candidate, "owner", "authorize-full", 19)
             .expect("exact SHA authorized");
         assert!(matches!(
-            store.record_merged(&unit, &sha('c'), "wrong-merge", 15),
+            store.record_merged(&unit, &sha('c'), "wrong-merge", 20),
             Err(StoreError::UnauthorizedSha { .. })
         ));
         store
-            .record_merged(&unit, &candidate, "merged-full", 16)
+            .record_merged(&unit, &candidate, "merged-full", 21)
             .expect("exact SHA merged");
         assert_eq!(store.state(&unit).expect("state"), JobState::Merged);
     }
@@ -1285,5 +1669,81 @@ mod tests {
             )
             .expect("expired lease is closed before replacement");
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn profile_session_branch_and_artifact_repositories_are_scoped() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let profile = ProfileId::new("coder-job-1-unit-1").expect("profile id");
+        store
+            .register_profile(
+                &profile,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::Coder,
+                std::path::Path::new("/tmp/nswarm-coder-job-1-unit-1"),
+                2,
+            )
+            .expect("profile registered");
+        store
+            .register_session(
+                &SessionId::new("session-1").expect("session id"),
+                &profile,
+                "job:job-1:unit:unit-1",
+                3,
+            )
+            .expect("session registered");
+        store
+            .register_branch(
+                &brief.unit_id,
+                "nswarm/job-1/unit-1",
+                std::path::Path::new("/tmp/nswarm-worktrees/unit-1"),
+                &brief.base_sha,
+                4,
+            )
+            .expect("branch registered");
+        let artifact = store
+            .record_artifact(
+                &brief.unit_id,
+                "test-report",
+                std::path::Path::new("artifacts/report.json"),
+                &sha('d'),
+                5,
+            )
+            .expect("artifact recorded");
+        assert!(artifact > 0);
+        assert!(matches!(
+            store.record_review(
+                &brief.unit_id,
+                &profile,
+                &sha('b'),
+                ReviewAssessment::Noted,
+                &json!({}),
+                6,
+            ),
+            Err(StoreError::ReviewOutsideReviewState)
+        ));
+    }
+
+    #[test]
+    fn prior_schema_migrates_to_reviewer_attribution() {
+        let connection = rusqlite::Connection::open_in_memory().expect("connection");
+        connection.execute_batch(SCHEMA).expect("v1 schema");
+        connection
+            .pragma_update(None, "user_version", 1_i64)
+            .expect("set v1");
+        let mut store = ControlStore { connection };
+        store.migrate().expect("v1 to v2 migration");
+        let reviewer_column: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('review_findings') WHERE name = 'reviewer_profile'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("column query");
+        assert_eq!(reviewer_column, 1);
     }
 }

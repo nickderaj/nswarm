@@ -51,6 +51,11 @@ identifier!(
     UnitId,
     "Stable identifier for one independently leased job unit."
 );
+identifier!(
+    ProfileId,
+    "Stable identifier for one isolated agent profile."
+);
+identifier!(SessionId, "Stable identifier for one profile conversation.");
 
 /// Full Git object id used by verification and merge authorization.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]

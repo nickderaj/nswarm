@@ -43,6 +43,19 @@ pub enum Role {
 }
 
 impl Role {
+    /// Stable database and generated-policy representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Research => "research",
+            Self::Coordinator => "coordinator",
+            Self::Coder => "coder",
+            Self::VerifierReviewer => "verifier-reviewer",
+            Self::Integrator => "integrator",
+            Self::Shipper => "shipper",
+        }
+    }
+
     /// Returns the complete immutable capability set for this role.
     #[must_use]
     pub const fn capabilities(self) -> &'static [Capability] {
