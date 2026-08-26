@@ -16,6 +16,7 @@ python3 scripts/policy_check.py
 python3 scripts/validate_profiles.py
 python3 scripts/run_evals.py
 ./scripts/check_generated.sh
+cargo run --quiet -p fleet -- check .
 cargo fmt --all --check
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings

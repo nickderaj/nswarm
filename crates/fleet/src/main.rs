@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-use fleet::{BotManifest, GatewayManifest};
+use fleet::{BotManifest, GatewayManifest, validate_repository};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1)) {
@@ -22,30 +22,55 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
-    let command = args
-        .next()
-        .ok_or_else(|| "usage: fleet <validate|render|render-gateway> <manifest>".to_owned())?;
-    let path = args
-        .next()
-        .ok_or_else(|| "a manifest path is required".to_owned())?;
-    if args.next().is_some() {
-        return Err("unexpected additional arguments".to_owned());
-    }
-    let source = fs::read_to_string(&path).map_err(|error| format!("read {path}: {error}"))?;
+fn run(args: impl Iterator<Item = String>) -> Result<String, String> {
+    let args = args.collect::<Vec<_>>();
+    let (command, rest) = args
+        .split_first()
+        .ok_or_else(|| "usage: fleet <check|validate|render|render-gateway> ...".to_owned())?;
     match command.as_str() {
-        "validate" => {
-            BotManifest::parse(&source).map_err(|error| error.to_string())?;
-            Ok(format!("{}: valid", display_file_name(&path)))
+        "check" if rest.len() <= 1 => {
+            let root = rest.first().map_or(".", String::as_str);
+            let names = validate_repository(Path::new(root)).map_err(|error| error.to_string())?;
+            Ok(format!(
+                "{} manifest(s): {}\n",
+                names.len(),
+                names.join(", ")
+            ))
         }
-        "render" => BotManifest::parse(&source)
-            .and_then(|manifest| manifest.render_unit())
-            .map_err(|error| error.to_string()),
-        "render-gateway" => GatewayManifest::parse(&source)
-            .and_then(|manifest| manifest.render_unit())
-            .map_err(|error| error.to_string()),
+        "validate" if rest.len() == 1 => {
+            let path = &rest[0];
+            let source = read(path)?;
+            BotManifest::parse(&source).map_err(|error| error.to_string())?;
+            Ok(format!("{}: valid", display_file_name(path)))
+        }
+        "render" if rest.len() == 1 => {
+            let source = read(&rest[0])?;
+            BotManifest::parse(&source)
+                .and_then(|manifest| manifest.render_unit())
+                .map_err(|error| error.to_string())
+        }
+        "render" if rest.len() == 3 && rest[1] == "--diff" => {
+            let source = read(&rest[0])?;
+            let installed = read(&rest[2])?;
+            BotManifest::parse(&source)
+                .and_then(|manifest| manifest.render_diff(&installed))
+                .map_err(|error| error.to_string())
+        }
+        "render-gateway" if rest.len() == 1 => {
+            let source = read(&rest[0])?;
+            GatewayManifest::parse(&source)
+                .and_then(|manifest| manifest.render_unit())
+                .map_err(|error| error.to_string())
+        }
+        "check" | "validate" | "render" | "render-gateway" => {
+            Err(format!("unexpected arguments for {command}"))
+        }
         _ => Err(format!("unknown command: {command}")),
     }
+}
+
+fn read(path: &str) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|error| format!("read {path}: {error}"))
 }
 
 fn display_file_name(path: &str) -> String {
@@ -123,6 +148,17 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         let unit = run(["render".to_owned(), bot_path.display().to_string()].into_iter())
             .expect("render succeeds");
         assert!(unit.contains("User=research-agent"));
+        let installed_path = directory.path().join("research.service");
+        fs::write(&installed_path, &unit).expect("write installed fixture");
+        let plan = run([
+            "render".to_owned(),
+            bot_path.display().to_string(),
+            "--diff".to_owned(),
+            installed_path.display().to_string(),
+        ]
+        .into_iter())
+        .expect("diff succeeds");
+        assert_eq!(plan, "clean\n");
 
         let gateway = run([
             "render-gateway".to_owned(),
@@ -147,5 +183,16 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         let unknown = run(["unknown".to_owned(), path.display().to_string()].into_iter())
             .expect_err("unknown command must fail");
         assert!(unknown.contains("unknown command"));
+    }
+
+    #[test]
+    fn check_enumerates_the_workspace_manifests() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let output = run(["check".to_owned(), root.display().to_string()].into_iter())
+            .expect("fleet check succeeds");
+        assert_eq!(output, "1 manifest(s): research\n");
     }
 }

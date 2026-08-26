@@ -1,6 +1,7 @@
 //! Declarative fleet manifests and deterministic systemd rendering.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
@@ -255,6 +256,32 @@ impl BotManifest {
         Ok(format!("{}\n", lines.join("\n")))
     }
 
+    /// Compares the deterministic unit with installed bytes.
+    ///
+    /// A clean host returns `clean`. Drift returns a complete replacement diff;
+    /// callers never normalize or hide host edits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError`] if the manifest no longer validates.
+    pub fn render_diff(&self, installed: &str) -> Result<String, ManifestError> {
+        let rendered = self.render_unit()?;
+        if rendered == installed {
+            return Ok("clean\n".to_owned());
+        }
+        let removed = installed
+            .lines()
+            .map(|line| format!("-{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let added = rendered
+            .lines()
+            .map(|line| format!("+{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(format!("--- installed\n+++ rendered\n{removed}\n{added}\n"))
+    }
+
     /// Renders only the allow-listed environment variables in sorted order.
     ///
     /// # Errors
@@ -284,6 +311,55 @@ impl BotManifest {
             format!("{}\n", rendered.join("\n"))
         })
     }
+}
+
+/// Validates every `bots/*.toml` manifest and its repository-owned sources.
+///
+/// Enumeration is directory-derived so a new bot cannot be omitted from a
+/// hand-maintained fleet list.
+///
+/// # Errors
+///
+/// Returns [`ManifestError`] for an unreadable directory, empty fleet, invalid
+/// manifest, missing profile source, or missing crate/package scaffold.
+pub fn validate_repository(repository_root: &Path) -> Result<Vec<String>, ManifestError> {
+    let bot_directory = repository_root.join("bots");
+    let mut paths = fs::read_dir(&bot_directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "toml")
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    if paths.is_empty() {
+        return Err(ManifestError::NoManifests(bot_directory));
+    }
+    let mut names = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source = fs::read_to_string(&path)?;
+        let manifest = BotManifest::parse(&source)?;
+        for profile_source in [
+            &manifest.agent.soul,
+            &manifest.agent.skills,
+            &manifest.agent.memory,
+        ] {
+            let resolved = repository_root.join(profile_source);
+            if !resolved.exists() {
+                return Err(ManifestError::MissingRepositorySource(resolved));
+            }
+        }
+        let crate_manifest = repository_root
+            .join("crates")
+            .join(&manifest.bot.crate_name)
+            .join("Cargo.toml");
+        if !crate_manifest.is_file() {
+            return Err(ManifestError::MissingRepositorySource(crate_manifest));
+        }
+        names.push(manifest.bot.name);
+    }
+    Ok(names)
 }
 
 /// Fleet-level Hermes gateway manifest.
@@ -427,6 +503,9 @@ fn is_model_credential(value: &str) -> bool {
 /// Manifest parsing and policy failures.
 #[derive(Debug, Error)]
 pub enum ManifestError {
+    /// Repository inventory or installed-unit read failed.
+    #[error("filesystem error: {0}")]
+    Io(#[from] std::io::Error),
     /// TOML decoding failed before policy validation.
     #[error("invalid TOML: {0}")]
     Toml(#[from] toml::de::Error),
@@ -499,13 +578,19 @@ pub enum ManifestError {
     /// Gateway secrets may contain only model/provider credentials.
     #[error("gateway secret is outside the provider credential scope: {0}")]
     InvalidGatewaySecret(String),
+    /// A fleet with no manifests cannot prove enumeration behaviour.
+    #[error("no bot manifests found in {path}", path = .0.display())]
+    NoManifests(PathBuf),
+    /// A manifest references source that is absent from the clean clone.
+    #[error("manifest source is missing: {path}", path = .0.display())]
+    MissingRepositorySource(PathBuf),
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{BotManifest, GatewayManifest, ManifestError};
+    use super::{BotManifest, GatewayManifest, ManifestError, validate_repository};
 
     const MANIFEST: &str = r#"
 [bot]
@@ -642,5 +727,28 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         assert!(unit.contains("IPAddressDeny=any"));
         assert!(unit.contains("IPAddressAllow=localhost"));
         assert!(unit.contains("User=hermes-gateway"));
+    }
+
+    #[test]
+    fn render_diff_is_clean_or_reports_full_drift() {
+        let manifest = BotManifest::parse(MANIFEST).expect("manifest validates");
+        let rendered = manifest.render_unit().expect("unit renders");
+        assert_eq!(manifest.render_diff(&rendered).expect("diff"), "clean\n");
+        let diff = manifest
+            .render_diff("[Unit]\nChanged=true\n")
+            .expect("diff");
+        assert!(diff.starts_with("--- installed\n+++ rendered\n"));
+        assert!(diff.contains("-Changed=true"));
+        assert!(diff.contains("+User=gym-agent"));
+    }
+
+    #[test]
+    fn repository_validation_enumerates_manifests_without_a_list() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let names = validate_repository(root).expect("repository validates");
+        assert_eq!(names, ["research"]);
     }
 }

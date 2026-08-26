@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/agent-control", "crates/botkit", "crates/fleet"]
+members = ["crates/agent-control", "crates/botkit", "crates/fleet", "crates/research-bot"]
 exclude = ["fuzz"]
 resolver = "3"
 
