@@ -5,7 +5,9 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-use fleet::{BotManifest, GatewayManifest, validate_repository};
+use fleet::{
+    BotManifest, GatewayManifest, parse_secret_source, plan_repository, validate_repository,
+};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1)) {
@@ -26,7 +28,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<String, String> {
     let args = args.collect::<Vec<_>>();
     let (command, rest) = args
         .split_first()
-        .ok_or_else(|| "usage: fleet <check|validate|render|render-gateway> ...".to_owned())?;
+        .ok_or_else(|| "usage: fleet <check|validate|render|render-gateway|plan> ...".to_owned())?;
     match command.as_str() {
         "check" if rest.len() <= 1 => {
             let root = rest.first().map_or(".", String::as_str);
@@ -62,7 +64,13 @@ fn run(args: impl Iterator<Item = String>) -> Result<String, String> {
                 .and_then(|manifest| manifest.render_unit())
                 .map_err(|error| error.to_string())
         }
-        "check" | "validate" | "render" | "render-gateway" => {
+        "plan" if rest.len() == 4 && rest[0] == "--all" => {
+            let secrets =
+                parse_secret_source(&read(&rest[3])?).map_err(|error| error.to_string())?;
+            plan_repository(Path::new(&rest[1]), Path::new(&rest[2]), &secrets)
+                .map_err(|error| error.to_string())
+        }
+        "check" | "validate" | "render" | "render-gateway" | "plan" => {
             Err(format!("unexpected arguments for {command}"))
         }
         _ => Err(format!("unknown command: {command}")),
@@ -194,5 +202,35 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         let output = run(["check".to_owned(), root.display().to_string()].into_iter())
             .expect("fleet check succeeds");
         assert_eq!(output, "1 manifest(s): research\n");
+    }
+
+    #[test]
+    fn plan_all_is_manifest_derived_and_never_prints_secrets() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let host = TempDir::new().expect("temporary host root");
+        let secret_directory = TempDir::new().expect("temporary secret source");
+        let secret_path = secret_directory.path().join("decrypted.env");
+        let synthetic_secret = "synthetic-provider-value";
+        fs::write(
+            &secret_path,
+            format!("OPENROUTER_API_KEY={synthetic_secret}\n"),
+        )
+        .expect("write synthetic source");
+
+        let plan = run([
+            "plan".to_owned(),
+            "--all".to_owned(),
+            root.display().to_string(),
+            host.path().display().to_string(),
+            secret_path.display().to_string(),
+        ]
+        .into_iter())
+        .expect("plan succeeds");
+        assert!(plan.contains("bot: research"));
+        assert!(plan.contains("environment: replace (contents redacted)"));
+        assert!(!plan.contains(synthetic_secret));
     }
 }

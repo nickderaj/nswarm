@@ -7,6 +7,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
+const SYSTEMD_UNIT_DIRECTORY: &str = "etc/systemd/system";
+const ENVIRONMENT_DIRECTORY: &str = "etc/nswarm";
+
 /// Complete declarative description of one durable bot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -311,6 +314,159 @@ impl BotManifest {
             format!("{}\n", rendered.join("\n"))
         })
     }
+
+    /// Returns the host-root-relative paths governed by this manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError`] if the manifest no longer validates.
+    pub fn installed_paths(&self) -> Result<(PathBuf, PathBuf), ManifestError> {
+        self.validate()?;
+        Ok((
+            PathBuf::from(SYSTEMD_UNIT_DIRECTORY).join(format!("{}.service", self.bot.name)),
+            PathBuf::from(ENVIRONMENT_DIRECTORY).join(format!("{}.env", self.bot.name)),
+        ))
+    }
+
+    /// Plans unit and environment changes without mutating the host or exposing
+    /// secret values in plan output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError`] if rendering fails.
+    pub fn render_host_plan(
+        &self,
+        installed_unit: Option<&str>,
+        installed_environment: Option<&str>,
+        secrets: &BTreeMap<String, String>,
+    ) -> Result<String, ManifestError> {
+        let unit_plan = match installed_unit {
+            Some(installed) => self.render_diff(installed)?,
+            None => self.render_diff("")?,
+        };
+        let environment = self.render_environment(secrets)?;
+        let environment_plan = if installed_environment == Some(environment.as_str()) {
+            "clean"
+        } else {
+            "replace (contents redacted)"
+        };
+        Ok(format!(
+            "bot: {}\nunit:\n{unit_plan}environment: {environment_plan}\n",
+            self.bot.name
+        ))
+    }
+}
+
+/// Parses strict dotenv-shaped plaintext obtained from a secrets-store
+/// decrypt operation.
+///
+/// Values are never interpolated, unescaped, logged, or inherited from the
+/// ambient process environment.
+///
+/// # Errors
+///
+/// Returns [`ManifestError`] for malformed lines, duplicate names, or invalid
+/// portable environment names.
+pub fn parse_secret_source(source: &str) -> Result<BTreeMap<String, String>, ManifestError> {
+    let mut values = BTreeMap::new();
+    for (index, line) in source.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, value) = line
+            .split_once('=')
+            .ok_or(ManifestError::InvalidSecretSourceLine(index + 1))?;
+        if !is_environment_name(name) {
+            return Err(ManifestError::InvalidSecretName(name.to_owned()));
+        }
+        if value.contains(['\r', '\0']) {
+            return Err(ManifestError::UnsafeSecretValue(name.to_owned()));
+        }
+        if values.insert(name.to_owned(), value.to_owned()).is_some() {
+            return Err(ManifestError::DuplicateSecretName(name.to_owned()));
+        }
+    }
+    Ok(values)
+}
+
+/// Discovers and parses every `bots/*.toml` manifest in deterministic order.
+///
+/// # Errors
+///
+/// Returns [`ManifestError`] rather than silently dropping an unreadable
+/// directory entry or malformed manifest.
+pub fn discover_manifests(
+    repository_root: &Path,
+) -> Result<Vec<(PathBuf, BotManifest)>, ManifestError> {
+    let bot_directory = repository_root.join("bots");
+    let mut paths = fs::read_dir(&bot_directory)?
+        .map(|entry| entry.map(|item| item.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "toml")
+    });
+    paths.sort();
+    if paths.is_empty() {
+        return Err(ManifestError::NoManifests(bot_directory));
+    }
+    let manifests = paths
+        .into_iter()
+        .map(|path| {
+            let source = fs::read_to_string(&path)?;
+            let manifest = BotManifest::parse(&source)?;
+            Ok((path, manifest))
+        })
+        .collect::<Result<Vec<_>, ManifestError>>()?;
+    let mut names = BTreeSet::new();
+    for (_, manifest) in &manifests {
+        if !names.insert(&manifest.bot.name) {
+            return Err(ManifestError::DuplicateBotName(manifest.bot.name.clone()));
+        }
+    }
+    Ok(manifests)
+}
+
+/// Plans every manifest against an explicit host root without mutation.
+///
+/// Environment drift is reported only as clean or redacted replacement; no
+/// secret value enters the returned plan.
+///
+/// # Errors
+///
+/// Returns [`ManifestError`] for manifest, host-root, or secret-source errors.
+pub fn plan_repository(
+    repository_root: &Path,
+    host_root: &Path,
+    secrets: &BTreeMap<String, String>,
+) -> Result<String, ManifestError> {
+    if !host_root.is_absolute() {
+        return Err(ManifestError::PathNotAbsolute {
+            field: "host_root",
+            path: host_root.to_path_buf(),
+        });
+    }
+    validate_repository(repository_root)?;
+    let mut output = String::new();
+    for (_, manifest) in discover_manifests(repository_root)? {
+        let (unit_path, environment_path) = manifest.installed_paths()?;
+        let unit = read_optional_host_file(&host_root.join(unit_path))?;
+        let environment = read_optional_host_file(&host_root.join(environment_path))?;
+        output.push_str(&manifest.render_host_plan(
+            unit.as_deref(),
+            environment.as_deref(),
+            secrets,
+        )?);
+    }
+    Ok(output)
+}
+
+fn read_optional_host_file(path: &Path) -> Result<Option<String>, ManifestError> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ManifestError::Io(error)),
+    }
 }
 
 /// Validates every `bots/*.toml` manifest and its repository-owned sources.
@@ -323,23 +479,9 @@ impl BotManifest {
 /// Returns [`ManifestError`] for an unreadable directory, empty fleet, invalid
 /// manifest, missing profile source, or missing crate/package scaffold.
 pub fn validate_repository(repository_root: &Path) -> Result<Vec<String>, ManifestError> {
-    let bot_directory = repository_root.join("bots");
-    let mut paths = fs::read_dir(&bot_directory)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "toml")
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
-    if paths.is_empty() {
-        return Err(ManifestError::NoManifests(bot_directory));
-    }
-    let mut names = Vec::with_capacity(paths.len());
-    for path in paths {
-        let source = fs::read_to_string(&path)?;
-        let manifest = BotManifest::parse(&source)?;
+    let manifests = discover_manifests(repository_root)?;
+    let mut names = Vec::with_capacity(manifests.len());
+    for (_, manifest) in manifests {
         for profile_source in [
             &manifest.agent.soul,
             &manifest.agent.skills,
@@ -566,6 +708,9 @@ pub enum ManifestError {
     /// systemd environment files are line-oriented.
     #[error("secret contains a forbidden control character: {0}")]
     UnsafeSecretValue(String),
+    /// Decrypted secret sources use strict, comment-free `NAME=value` lines.
+    #[error("invalid decrypted secret source line {0}")]
+    InvalidSecretSourceLine(usize),
     /// The gateway identity is fixed by the security contract.
     #[error("gateway user must be hermes-gateway")]
     InvalidGatewayUser,
@@ -581,6 +726,9 @@ pub enum ManifestError {
     /// A fleet with no manifests cannot prove enumeration behaviour.
     #[error("no bot manifests found in {path}", path = .0.display())]
     NoManifests(PathBuf),
+    /// Bot names own installed paths and therefore must be globally unique.
+    #[error("duplicate bot name in manifest inventory: {0}")]
+    DuplicateBotName(String),
     /// A manifest references source that is absent from the clean clone.
     #[error("manifest source is missing: {path}", path = .0.display())]
     MissingRepositorySource(PathBuf),
@@ -589,8 +737,14 @@ pub enum ManifestError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs;
 
-    use super::{BotManifest, GatewayManifest, ManifestError, validate_repository};
+    use tempfile::TempDir;
+
+    use super::{
+        BotManifest, GatewayManifest, ManifestError, discover_manifests, parse_secret_source,
+        plan_repository, validate_repository,
+    };
 
     const MANIFEST: &str = r#"
 [bot]
@@ -750,5 +904,79 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             .expect("workspace root");
         let names = validate_repository(root).expect("repository validates");
         assert_eq!(names, ["research"]);
+    }
+
+    #[test]
+    fn decrypted_secret_source_is_strict_and_non_interpolating() {
+        let values = parse_secret_source(
+            "GYM_BOT_TOKEN=synthetic-gym\nOPENROUTER_API_KEY=$NOT_EXPANDED=value\n",
+        )
+        .expect("strict source parses");
+        assert_eq!(values["OPENROUTER_API_KEY"], "$NOT_EXPANDED=value");
+        assert!(matches!(
+            parse_secret_source("OPENROUTER_API_KEY=one\nOPENROUTER_API_KEY=two\n"),
+            Err(ManifestError::DuplicateSecretName(name)) if name == "OPENROUTER_API_KEY"
+        ));
+        assert!(matches!(
+            parse_secret_source("export OPENROUTER_API_KEY=value\n"),
+            Err(ManifestError::InvalidSecretName(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_bot_names_cannot_collide_on_installed_paths() {
+        let repository = TempDir::new().expect("temporary repository");
+        let bots = repository.path().join("bots");
+        fs::create_dir(&bots).expect("create bot inventory");
+        fs::write(bots.join("one.toml"), MANIFEST).expect("write first manifest");
+        fs::write(bots.join("two.toml"), MANIFEST).expect("write second manifest");
+        assert!(matches!(
+            discover_manifests(repository.path()),
+            Err(ManifestError::DuplicateBotName(name)) if name == "gym"
+        ));
+    }
+
+    #[test]
+    fn repository_plan_compares_both_artifacts_without_secret_output() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let host = TempDir::new().expect("temporary host root");
+        let synthetic_secret = "synthetic-provider-value";
+        let secrets =
+            BTreeMap::from([("OPENROUTER_API_KEY".to_owned(), synthetic_secret.to_owned())]);
+        let first = plan_repository(repository, host.path(), &secrets).expect("plan renders");
+        assert!(first.contains("environment: replace (contents redacted)"));
+        assert!(!first.contains(synthetic_secret));
+
+        let manifest = BotManifest::parse(
+            &fs::read_to_string(repository.join("bots/research.toml"))
+                .expect("read research manifest"),
+        )
+        .expect("manifest parses");
+        let (unit_path, environment_path) = manifest.installed_paths().expect("installed paths");
+        let unit_path = host.path().join(unit_path);
+        let environment_path = host.path().join(environment_path);
+        fs::create_dir_all(unit_path.parent().expect("unit parent")).expect("create unit parent");
+        fs::create_dir_all(environment_path.parent().expect("environment parent"))
+            .expect("create environment parent");
+        fs::write(
+            unit_path,
+            manifest.render_unit().expect("render installed unit"),
+        )
+        .expect("write installed unit");
+        fs::write(
+            environment_path,
+            manifest
+                .render_environment(&secrets)
+                .expect("render installed environment"),
+        )
+        .expect("write installed environment");
+
+        let clean = plan_repository(repository, host.path(), &secrets).expect("clean plan");
+        assert!(clean.contains("unit:\nclean\n"));
+        assert!(clean.contains("environment: clean"));
+        assert!(!clean.contains(synthetic_secret));
     }
 }
