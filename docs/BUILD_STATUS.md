@@ -196,9 +196,8 @@ Completed acceptance units:
 
 The overnight implementation was independently reviewed rather than accepted
 from its prior local status claim. The severity-ranked findings and supporting
-evidence are in [`docs/AUDIT.md`](AUDIT.md). This checkpoint's exact commit SHA
-will be recorded after the remote accepts the push; no GitHub result is claimed
-from an unpushed working tree.
+evidence are in [`docs/AUDIT.md`](AUDIT.md). Exact checkpoint SHA:
+`72c033092e1698970f2290bc02f647fcea15371a`.
 
 Completed repair units:
 
@@ -233,7 +232,7 @@ Verified locally on 2026-08-27:
 - `just ci` — pass; 88 files policy-scanned, 2 profiles validated, 9
   deterministic eval checks, 59 nextest tests, doctests/rustdoc, strict Clippy,
   feature powerset, deny/vet/machete, and generated drift checks all pass;
-- enforced coverage — 95.64% repository lines, 95.13% changed executable lines,
+- enforced coverage — 95.64% repository lines, 95.69% changed executable lines,
   100% (54/54) configured critical branch outcomes; per-crate line coverage is
   96.69% agent-control, 99.24% botkit, 90.19% fleet, and 100% research-bot;
 - selected pinned-nightly Miri suites pass for `agent-control` policy/types and
@@ -241,15 +240,37 @@ Verified locally on 2026-08-27:
   SQLite/filesystem suites are outside the interpreter's supported isolation;
 - actionlint v1.7.12 accepts all three workflow files.
 
+## Checkpoint J — GitHub workflow bootstrap and first Linux repair
+
+The one-time default-branch exception is commit
+`fe746e4a52f7fdfb803a484f3f63d16ed6d2b5f3`. Its parent is the former `main`
+tip, and its complete file list is exactly:
+
+- `.github/workflows/pr.yml`;
+- `.github/workflows/merge-queue.yml`;
+- `.github/workflows/nightly.yml`.
+
+GitHub now recognizes all three workflows as active. [PR #1](https://github.com/nickderaj/nswarm/pull/1)
+targets `main` from `overnight/bootstrap`, with first PR workflow run
+[`33077451568`](https://github.com/nickderaj/nswarm/actions/runs/33077451568).
+That run proved quality, current stable, MSRV, aarch64 cross-compilation,
+reproducibility, and the strict coverage job on GitHub-hosted Linux. Its bounded
+fuzz job failed at link time with `undefined symbol: main`: the fuzz manifest
+disabled default features on `libfuzzer-sys` without explicitly enabling the
+runtime-providing `link_libfuzzer` feature.
+
+This checkpoint enables that exact pinned feature. Locally,
+`cargo +nightly-2025-09-18 fuzz build manifest` and the complete `just ci`
+contract pass. A macOS fuzz process can build but does not honor the requested
+libFuzzer time/run bound on this host, so execution is not claimed locally; the
+superseding GitHub Linux run is the authoritative execution check.
+
 Known gaps and external gates:
 
-- GitHub currently recognizes zero workflows and has zero check runs because
-  default branch `main` still has no workflow definitions. A narrow workflow-only
-  default-branch bootstrap is the next remote step; no feature code will be
-  included in that one-time exception.
-- No PR or branch protection currently exists. Protection will not be installed
-  until the intended check names have appeared and passed, avoiding a repository
-  deadlock; the actual returned protection payload will be saved here afterward.
+- PR #1 exists and all intended PR check names have appeared, but the latest
+  revision is not yet fully green. Protection will not be installed until those
+  names pass, avoiding a repository deadlock; the actual returned protection
+  payload will be saved here afterward.
 - Merge-tier Linux sanitizers, mutation, hosted ARM64, and fuzz jobs are
   configured but are not claimed as executed on this macOS host.
 - GitHub reports no registered self-hosted runner. A personal public repository
@@ -277,9 +298,8 @@ Known gaps and external gates:
 Next executable action after checkpointing:
 
 ```console
-git worktree add --detach /private/tmp/nswarm-audit-repair-clean HEAD
+git push origin overnight/bootstrap
 ```
 
-Run `just ci` in that clean detached checkout, then push this checkpoint to
-`overnight/bootstrap`. Only after that clean pass should the workflow-only
-default-branch bootstrap be created and pushed.
+Then query the new PR workflow run, inspect every complete job log, and repair
+any remaining GitHub-only failure before applying branch protection.
