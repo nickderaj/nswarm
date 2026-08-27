@@ -123,6 +123,29 @@ Completed acceptance units:
 - `just ci` remains green with 85 files policy-scanned, 43 tests, 9
   deterministic hostile-input evals, and 90.99% line coverage.
 
+## Checkpoint F — revocable authority and tracked branch heads
+
+Exact implementation SHA: `1edd1f86ef997db8ebcc3387c93f93698e33db56`
+(`feat(control): revoke grants and track branch heads`).
+
+Completed acceptance units:
+
+- credential methods are queryable without materializing secrets and only a
+  live same-job coordinator profile can revoke an active opaque grant;
+- registered branches begin at the immutable base SHA and advance only in
+  coding states through compare-and-swap updates;
+- a scheduler-tracked branch must match the exact candidate SHA before the
+  candidate can enter verification;
+- reuse of an event idempotency key with different job/type/payload evidence
+  fails closed and rolls back the surrounding state transaction;
+- secret redaction now covers verification-verdict and review-finding JSON as
+  well as append-only events and worker reports;
+- negative tests cover wrong-role revocation, already-revoked grants, stale
+  heads, early branch mutation, stale candidate SHA, conflicting idempotency,
+  rollback, and secret-bearing verdict/review evidence;
+- `just ci` remains green with 85 files policy-scanned, 46 tests, 9
+  deterministic hostile-input evals, and 91.86% line coverage.
+
 Known gaps and external gates:
 
 - GitHub Actions have not run until this branch is pushed and a PR exists.
@@ -136,10 +159,9 @@ Known gaps and external gates:
   drift across an explicit host root; host mutation via deploy, status/new
   scaffolding, and direct `age`/`pass` integration remain before the full §4 CLI
   is complete.
-- Credential revocation, branch-head updates, richer report-field typing and
-  artifact schemas, explicit integrator disposition of non-blocking review
-  findings, and profile destruction/audit methods remain before the control
-  plane is complete.
+- Richer report-field typing and artifact schemas, explicit integrator
+  disposition of non-blocking review findings, and profile destruction/audit
+  methods remain before the control plane is complete.
 - The checked-in research service manifest is a rendering/policy fixture; no
   writable research agent or bot behaviour is enabled.
 - Crate publication was not attempted. The remote repository already supplies
@@ -155,6 +177,6 @@ Next executable action after checkpointing:
 cargo test -p agent-control
 ```
 
-Then add credential revocation and branch-head update repositories with stale,
-unauthorized, and idempotency negative tests. Re-run `just ci` before the next
-commit.
+Then add explicit integrator disposition for non-blocking findings and audited
+profile destruction with wrong-role/state negative tests. Re-run `just ci`
+before the next commit.
