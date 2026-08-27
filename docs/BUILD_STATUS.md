@@ -146,6 +146,28 @@ Completed acceptance units:
 - `just ci` remains green with 85 files policy-scanned, 46 tests, 9
   deterministic hostile-input evals, and 91.86% line coverage.
 
+## Checkpoint G — integrator disposition and profile teardown
+
+Exact implementation SHA: `e52e477d2f74e416dfa71e49f003abd6ecdc5146`
+(`feat(control): govern findings and profile teardown`).
+
+Completed acceptance units:
+
+- schema v3 adds durable session destruction and migrates deterministically
+  from both the committed v1 shape and schema v2;
+- reviewer findings begin unresolved and medium/high-risk candidates cannot
+  advance until every exact-SHA finding has a one-shot final disposition;
+- only a live same-job integrator can dispose a finding; reviewer
+  self-disposition, duplicate disposition, stale findings, unresolved findings,
+  and remaining blockers fail closed;
+- only a live same-job coordinator can destroy a profile's authority; teardown
+  marks its sessions destroyed, releases matching profile leases, prevents new
+  sessions/reviews, and emits an append-only audit event;
+- filesystem removal is explicitly left to the scheduler after durable
+  authority removal rather than being implied by a database flag;
+- `just ci` remains green with 85 files policy-scanned, 48 tests, 9
+  deterministic hostile-input evals, and 92.75% line coverage.
+
 Known gaps and external gates:
 
 - GitHub Actions have not run until this branch is pushed and a PR exists.
@@ -159,9 +181,10 @@ Known gaps and external gates:
   drift across an explicit host root; host mutation via deploy, status/new
   scaffolding, and direct `age`/`pass` integration remain before the full §4 CLI
   is complete.
-- Richer report-field typing and artifact schemas, explicit integrator
-  disposition of non-blocking review findings, and profile destruction/audit
-  methods remain before the control plane is complete.
+- Richer report-field typing and typed artifact contracts remain before the
+  control plane's local step-1 scope is complete. Physical profile-home removal
+  remains a scheduler/OS adapter responsibility after the now-audited authority
+  teardown.
 - The checked-in research service manifest is a rendering/policy fixture; no
   writable research agent or bot behaviour is enabled.
 - Crate publication was not attempted. The remote repository already supplies
@@ -177,6 +200,6 @@ Next executable action after checkpointing:
 cargo test -p agent-control
 ```
 
-Then add explicit integrator disposition for non-blocking findings and audited
-profile destruction with wrong-role/state negative tests. Re-run `just ci`
-before the next commit.
+Then add recursive report-field type enforcement and typed artifact contracts
+with malformed-schema, wrong-type, unsafe-path, and stale-SHA negative tests.
+Re-run `just ci` before the next commit.
