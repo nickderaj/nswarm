@@ -10,7 +10,7 @@ use crate::{
     SessionId, Sha, UnitId,
 };
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Reviewer assessment recorded against one exact candidate SHA.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +44,20 @@ pub struct FindingDisposition<'a> {
     pub disposition: ReviewAssessment,
     /// Evidence supporting the disposition; redacted before persistence.
     pub rationale: &'a Value,
+    /// Globally unique logical-operation key.
+    pub idempotency_key: &'a str,
+}
+
+/// One verifier-attributed exact-SHA proof result.
+pub struct VerificationVerdict<'a> {
+    /// Live verifier profile publishing the result.
+    pub verifier: &'a ProfileId,
+    /// Exact candidate or integration revision that was tested.
+    pub head_sha: &'a Sha,
+    /// Machine result; any attributed failure blocks this exact SHA.
+    pub passed: bool,
+    /// Structured proof output, redacted before persistence.
+    pub evidence: &'a Value,
     /// Globally unique logical-operation key.
     pub idempotency_key: &'a str,
 }
@@ -126,6 +140,15 @@ impl ControlStore {
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(MIGRATION_4)?;
+            transaction.pragma_update(None, "user_version", 4_i64)?;
+            transaction.commit()?;
+            version = 4;
+        }
+        if version == 4 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(MIGRATION_5)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
         }
@@ -318,10 +341,7 @@ impl ControlStore {
     pub fn record_verdict(
         &mut self,
         unit_id: &UnitId,
-        head_sha: &Sha,
-        passed: bool,
-        evidence: &Value,
-        idempotency_key: &str,
+        verdict: &VerificationVerdict<'_>,
         now: i64,
     ) -> Result<(), StoreError> {
         let transaction = self
@@ -335,19 +355,28 @@ impl ControlStore {
             });
         }
         let candidate = candidate_sha_tx(&transaction, unit_id)?;
-        if candidate != *head_sha {
+        if candidate != *verdict.head_sha {
             return Err(StoreError::StaleVerification {
                 candidate,
-                verdict: head_sha.clone(),
+                verdict: verdict.head_sha.clone(),
             });
         }
+        if !live_profile_has_capability_tx(
+            &transaction,
+            verdict.verifier,
+            &job_id,
+            Capability::Verify,
+        )? {
+            return Err(StoreError::UnauthorizedVerifier);
+        }
         transaction.execute(
-            "INSERT INTO verification_verdicts (unit_id, head_sha, passed, evidence_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO verification_verdicts (unit_id, verifier_profile, head_sha, passed, evidence_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 unit_id.as_str(),
-                head_sha.as_str(),
-                passed,
-                serde_json::to_string(&redact_evidence(evidence))?,
+                verdict.verifier.as_str(),
+                verdict.head_sha.as_str(),
+                verdict.passed,
+                serde_json::to_string(&redact_evidence(verdict.evidence))?,
                 now
             ],
         )?;
@@ -355,12 +384,13 @@ impl ControlStore {
         append_event_tx(
             &transaction,
             &job_id,
-            idempotency_key,
+            verdict.idempotency_key,
             "verification-recorded",
             &json!({
                 "unit_id": unit_id.as_str(),
-                "head_sha": head_sha.as_str(),
-                "passed": passed
+                "verifier": verdict.verifier.as_str(),
+                "head_sha": verdict.head_sha.as_str(),
+                "passed": verdict.passed
             }),
             now,
         )?;
@@ -1369,14 +1399,12 @@ fn require_passing_verdict_tx(
     unit_id: &UnitId,
     head_sha: &Sha,
 ) -> Result<(), StoreError> {
-    let passed: Option<bool> = transaction
-        .query_row(
-            "SELECT passed FROM verification_verdicts WHERE unit_id = ?1 AND head_sha = ?2 ORDER BY verdict_id DESC LIMIT 1",
-            params![unit_id.as_str(), head_sha.as_str()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if passed == Some(true) {
+    let (attributed, failed): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN passed = 0 THEN 1 ELSE 0 END), 0) FROM verification_verdicts WHERE unit_id = ?1 AND head_sha = ?2 AND verifier_profile IS NOT NULL",
+        params![unit_id.as_str(), head_sha.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if attributed > 0 && failed == 0 {
         Ok(())
     } else {
         Err(StoreError::MissingPassingVerdict(head_sha.clone()))
@@ -1691,6 +1719,9 @@ pub enum StoreError {
     /// Only an isolated verifier/reviewer profile for the same job may review.
     #[error("profile is not an authorized independent reviewer")]
     UnauthorizedReviewer,
+    /// Only a live same-job verifier capability may publish a verdict.
+    #[error("profile is not an authorized independent verifier")]
+    UnauthorizedVerifier,
     /// Only a live same-job integrator may dispose review findings.
     #[error("profile is not an authorized live integrator")]
     UnauthorizedIntegrator,
@@ -1877,6 +1908,15 @@ SELECT artifact_id, unit_id, kind, path, digest, created_at FROM artifacts_v3;
 DROP TABLE artifacts_v3;
 ";
 
+const MIGRATION_5: &str = r"
+ALTER TABLE verification_verdicts
+ADD COLUMN verifier_profile TEXT REFERENCES profiles(profile_id);
+
+CREATE UNIQUE INDEX verification_verdict_actor_sha
+ON verification_verdicts (unit_id, head_sha, verifier_profile)
+WHERE verifier_profile IS NOT NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1885,7 +1925,7 @@ mod tests {
 
     use super::{
         ControlStore, FindingDisposition, ReviewAssessment, SCHEMA, StoreError,
-        contains_secret_shape, is_safe_relative_path,
+        VerificationVerdict, contains_secret_shape, is_safe_relative_path,
     };
     use crate::{
         ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
@@ -1975,6 +2015,26 @@ mod tests {
         }
     }
 
+    fn register_verifier(
+        store: &mut ControlStore,
+        brief: &JobBrief,
+        label: &str,
+        now: i64,
+    ) -> ProfileId {
+        let verifier = ProfileId::new(format!("verifier-{label}")).expect("verifier id");
+        store
+            .register_profile(
+                &verifier,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::VerifierReviewer,
+                PathBuf::from(format!("/tmp/nswarm-verifier-{label}")).as_path(),
+                now,
+            )
+            .expect("verifier registered");
+        verifier
+    }
+
     fn prepare_reviewing_candidate(store: &mut ControlStore, brief: &JobBrief, candidate: &Sha) {
         store.create_job(brief, 1).expect("job created");
         advance_to_self_verifying(store, &brief.unit_id);
@@ -1989,13 +2049,17 @@ mod tests {
                 8,
             )
             .expect("verification starts");
+        let verifier = register_verifier(store, brief, "prepared", 8);
         store
             .record_verdict(
                 &brief.unit_id,
-                candidate,
-                true,
-                &json!({"commands": ["cargo test"]}),
-                "verdict-prepared",
+                &VerificationVerdict {
+                    verifier: &verifier,
+                    head_sha: candidate,
+                    passed: true,
+                    evidence: &json!({"commands": ["cargo test"]}),
+                    idempotency_key: "verdict-prepared",
+                },
                 9,
             )
             .expect("verdict recorded");
@@ -2171,8 +2235,19 @@ mod tests {
         store
             .transition(&unit, JobState::IndependentlyVerifying, "verify", 8)
             .expect("verification starts");
+        let verifier = register_verifier(&mut store, &brief, "changed-sha", 8);
         assert!(matches!(
-            store.record_verdict(&unit, &sha('c'), true, &json!({}), "stale", 9),
+            store.record_verdict(
+                &unit,
+                &VerificationVerdict {
+                    verifier: &verifier,
+                    head_sha: &sha('c'),
+                    passed: true,
+                    evidence: &json!({}),
+                    idempotency_key: "stale",
+                },
+                9,
+            ),
             Err(StoreError::StaleVerification { .. })
         ));
     }
@@ -2190,13 +2265,17 @@ mod tests {
         store
             .transition(&unit, JobState::IndependentlyVerifying, "verify", 8)
             .expect("verification starts");
+        let verifier = register_verifier(&mut store, &brief, "integration", 8);
         store
             .record_verdict(
                 &unit,
-                &sha('b'),
-                true,
-                &json!({"commands": ["cargo test"]}),
-                "verdict",
+                &VerificationVerdict {
+                    verifier: &verifier,
+                    head_sha: &sha('b'),
+                    passed: true,
+                    evidence: &json!({"commands": ["cargo test"]}),
+                    idempotency_key: "verdict",
+                },
                 9,
             )
             .expect("verdict recorded");
@@ -2237,8 +2316,19 @@ mod tests {
         let unit = brief.unit_id.clone();
         let candidate = sha('b');
         store.create_job(&brief, 1).expect("job created");
+        let unknown = ProfileId::new("unknown-verifier").expect("profile id");
         assert!(matches!(
-            store.record_verdict(&unit, &candidate, true, &json!({}), "too-early", 2),
+            store.record_verdict(
+                &unit,
+                &VerificationVerdict {
+                    verifier: &unknown,
+                    head_sha: &candidate,
+                    passed: true,
+                    evidence: &json!({}),
+                    idempotency_key: "too-early",
+                },
+                2,
+            ),
             Err(StoreError::InvalidTransition { .. })
         ));
         assert!(matches!(
@@ -2257,13 +2347,17 @@ mod tests {
                 8,
             )
             .expect("verification starts");
+        let verifier = register_verifier(&mut store, &brief, "failed", 8);
         store
             .record_verdict(
                 &unit,
-                &candidate,
-                false,
-                &json!({"result": "failed"}),
-                "failed-verdict",
+                &VerificationVerdict {
+                    verifier: &verifier,
+                    head_sha: &candidate,
+                    passed: false,
+                    evidence: &json!({"result": "failed"}),
+                    idempotency_key: "failed-verdict",
+                },
                 9,
             )
             .expect("failing verdict is durable");
@@ -2293,6 +2387,109 @@ mod tests {
                 11,
             ),
             Err(StoreError::StaleVerification { .. })
+        ));
+    }
+
+    #[test]
+    fn verdict_requires_a_live_verifier_capability() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let candidate = sha('b');
+        store.create_job(&brief, 1).expect("job created");
+        advance_to_self_verifying(&mut store, &brief.unit_id);
+        store
+            .record_candidate(&brief.unit_id, &candidate, "auth-candidate", 7)
+            .expect("candidate recorded");
+        store
+            .transition(
+                &brief.unit_id,
+                JobState::IndependentlyVerifying,
+                "auth-verification-started",
+                8,
+            )
+            .expect("verification starts");
+
+        let unknown = ProfileId::new("unknown-verifier").expect("profile id");
+        let coder = ProfileId::new("coder-verdict").expect("coder id");
+        store
+            .register_profile(
+                &coder,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::Coder,
+                std::path::Path::new("/tmp/nswarm-coder-verdict"),
+                8,
+            )
+            .expect("coder registered");
+        for (profile, key) in [(&unknown, "unknown-verdict"), (&coder, "coder-verdict")] {
+            assert!(matches!(
+                store.record_verdict(
+                    &brief.unit_id,
+                    &VerificationVerdict {
+                        verifier: profile,
+                        head_sha: &candidate,
+                        passed: true,
+                        evidence: &json!({}),
+                        idempotency_key: key,
+                    },
+                    8,
+                ),
+                Err(StoreError::UnauthorizedVerifier)
+            ));
+        }
+    }
+
+    #[test]
+    fn any_attributed_failure_blocks_the_exact_sha() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let candidate = sha('b');
+        prepare_reviewing_candidate(&mut store, &brief, &candidate);
+        let dissenting = register_verifier(&mut store, &brief, "dissenting", 10);
+        store
+            .connection
+            .execute(
+                "INSERT INTO verification_verdicts (unit_id, verifier_profile, head_sha, passed, evidence_json, created_at) VALUES (?1, ?2, ?3, 0, '{}', 10)",
+                rusqlite::params![
+                    brief.unit_id.as_str(),
+                    dissenting.as_str(),
+                    candidate.as_str()
+                ],
+            )
+            .expect("independent failure recorded");
+        assert!(matches!(
+            store.accept_verdict(&brief.unit_id, "dissenting-accept", 11),
+            Err(StoreError::MissingPassingVerdict(head)) if head == candidate
+        ));
+    }
+
+    #[test]
+    fn unattributed_legacy_verdict_cannot_authorize_a_sha() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let candidate = sha('b');
+        store.create_job(&brief, 1).expect("job created");
+        advance_to_self_verifying(&mut store, &brief.unit_id);
+        store
+            .record_candidate(&brief.unit_id, &candidate, "legacy-candidate", 7)
+            .expect("candidate recorded");
+        store
+            .connection
+            .execute(
+                "INSERT INTO verification_verdicts (unit_id, head_sha, passed, evidence_json, created_at) VALUES (?1, ?2, 1, '{}', 8)",
+                rusqlite::params![brief.unit_id.as_str(), candidate.as_str()],
+            )
+            .expect("legacy verdict inserted");
+        store
+            .connection
+            .execute(
+                "UPDATE units SET state = 'reviewing' WHERE unit_id = ?1",
+                [brief.unit_id.as_str()],
+            )
+            .expect("model migrated reviewing state");
+        assert!(matches!(
+            store.accept_verdict(&brief.unit_id, "legacy-accept", 9),
+            Err(StoreError::MissingPassingVerdict(head)) if head == candidate
         ));
     }
 
@@ -2961,27 +3158,20 @@ mod tests {
             )
             .expect("verification starts");
         let token = "sk-".to_owned() + &"z".repeat(24);
+        let reviewer = register_verifier(&mut store, &brief, "redaction", 8);
         store
             .record_verdict(
                 &unit,
-                &candidate,
-                true,
-                &json!({"provider_token": token, "result": "pass"}),
-                "verdict-redaction",
+                &VerificationVerdict {
+                    verifier: &reviewer,
+                    head_sha: &candidate,
+                    passed: true,
+                    evidence: &json!({"provider_token": token, "result": "pass"}),
+                    idempotency_key: "verdict-redaction",
+                },
                 9,
             )
             .expect("verdict recorded");
-        let reviewer = ProfileId::new("reviewer-redaction").expect("reviewer id");
-        store
-            .register_profile(
-                &reviewer,
-                &brief.job_id,
-                &unit,
-                Role::VerifierReviewer,
-                std::path::Path::new("/tmp/nswarm-reviewer-redaction"),
-                10,
-            )
-            .expect("reviewer registered");
         store
             .record_review(
                 &unit,
@@ -3005,6 +3195,15 @@ mod tests {
             assert!(!stored.contains(&token));
             assert!(stored.contains("[REDACTED]"));
         }
+        let verdict_actor: String = store
+            .connection
+            .query_row(
+                "SELECT verifier_profile FROM verification_verdicts ORDER BY verdict_id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("verdict actor stored");
+        assert_eq!(verdict_actor, reviewer.as_str());
     }
 
     #[test]
@@ -3021,13 +3220,17 @@ mod tests {
         store
             .transition(&unit, JobState::IndependentlyVerifying, "verify-full", 8)
             .expect("verification starts");
+        let verifier = register_verifier(&mut store, &brief, "full", 8);
         store
             .record_verdict(
                 &unit,
-                &candidate,
-                true,
-                &json!({"commands": ["cargo test"], "artifacts": []}),
-                "verdict-full",
+                &VerificationVerdict {
+                    verifier: &verifier,
+                    head_sha: &candidate,
+                    passed: true,
+                    evidence: &json!({"commands": ["cargo test"], "artifacts": []}),
+                    idempotency_key: "verdict-full",
+                },
                 9,
             )
             .expect("verdict recorded");
@@ -3586,5 +3789,19 @@ mod tests {
             )
             .expect("artifact column query");
         assert_eq!(artifact_head_column, 1);
+        let verifier_column: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('verification_verdicts') WHERE name = 'verifier_profile'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("verifier column query");
+        assert_eq!(verifier_column, 1);
+        let schema_version: i64 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version query");
+        assert_eq!(schema_version, super::SCHEMA_VERSION);
     }
 }

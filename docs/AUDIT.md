@@ -182,10 +182,13 @@ the report at face value.
   count. Repair requires a schema migration that separates job-level identity
   from immutable unit briefs, foreign-keys both dependency endpoints, and
   proves two units in one job plus unknown-dependency rejection.
-- **C-5 — verification verdicts are unattributed.** A caller can record a
-  verdict without a live verifier profile, while review findings do carry an
-  actor. Verdict persistence and acceptance must bind evidence to an explicit,
-  live, same-job verifier/reviewer capability at the exact SHA.
+- **C-5 — verification verdicts were unattributed. Repaired in the current
+  worktree.** Schema v5 adds the verifier profile to exact-SHA verdicts and a
+  uniqueness constraint per unit/SHA/actor. Publishing requires a live
+  same-job `Verify` capability and persists the actor in both the verdict and
+  event. Acceptance requires at least one attributed verdict and rejects the
+  SHA if any attributed verifier failed. Migrated nullable legacy verdicts are
+  deliberately insufficient until fresh attributed proof runs.
 
 ### High follow-up findings
 

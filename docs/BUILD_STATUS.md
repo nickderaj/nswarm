@@ -387,3 +387,29 @@ outcomes across 35 marked critical functions.
 This checkpoint does not claim that every lifecycle method has actor identity.
 Attributed exact-SHA verification remains the next critical control-store
 repair, alongside the multi-unit job/dependency migration.
+
+## Checkpoint N — attributed exact-SHA verification
+
+Schema v5 adds verifier attribution to persisted verification verdicts and
+uniqueness per unit, exact SHA, and verifier profile. The typed verdict request
+requires a live same-job `Verify` capability before persistence, records the
+actor in the redacted event ledger, and makes any attributed failing verdict
+block that exact SHA. Nullable verdicts migrated from older schemas cannot
+authorize acceptance, so historical anonymous evidence fails closed and must
+be rerun.
+
+Negative tests prove an unknown profile and a live coder cannot publish a
+verdict, a dissenting attributed failure cannot be overridden by a pass, and a
+legacy anonymous pass cannot authorize the SHA. Schema migration remains
+idempotent from the committed v1 layout and exposes the new attribution column.
+Strict Clippy and all 50 `agent-control` tests pass. Fresh workspace coverage
+runs 76 tests and reports 97.14% repository lines, 97.20% changed executable
+lines, every crate above 90%, and 100% (238/238) branch outcomes across 35
+marked critical functions.
+
+The matching merge tier for prior head
+`e3433b60958de6912f70dd16f270dc56bcf177fb` passed in
+[run `33118132883`](https://github.com/nickderaj/nswarm/actions/runs/33118132883).
+GitHub did not create a pull-request suite for that revision, so it is not used
+as protection evidence; the next push must produce and pass a new PR suite
+before protection can be applied.
