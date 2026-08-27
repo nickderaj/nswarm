@@ -10,7 +10,7 @@ pub use provisioner::{
     CredentialBroker, CredentialLease, LocalWorktreeProvisioner, NoSecretBroker, ProvisionError,
     WorktreeProvisioner, WorktreeRequest,
 };
-pub use store::{ControlStore, ReviewAssessment, StoreError};
+pub use store::{ControlStore, FindingDisposition, ReviewAssessment, StoreError};
 pub use types::{
     BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind, NetworkMode, NetworkPolicy,
     PathPolicy, ProfileId, ResourceLimits, RiskClass, SessionId, Sha, UnitId, VerificationCommand,

@@ -9,7 +9,7 @@ use crate::{
     JobBrief, JobId, JobState, LeaseKind, ProfileId, RiskClass, Role, SessionId, Sha, UnitId,
 };
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Reviewer assessment recorded against one exact candidate SHA.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,6 +33,18 @@ impl ReviewAssessment {
             Self::Dismissed => "dismissed",
         }
     }
+}
+
+/// One integrator-owned final disposition request.
+pub struct FindingDisposition<'a> {
+    /// Finding repository identifier.
+    pub finding_id: i64,
+    /// Final classification applied by the integrator.
+    pub disposition: ReviewAssessment,
+    /// Evidence supporting the disposition; redacted before persistence.
+    pub rationale: &'a Value,
+    /// Globally unique logical-operation key.
+    pub idempotency_key: &'a str,
 }
 
 /// Transactional `SQLite` repository for agent jobs and audit evidence.
@@ -94,6 +106,15 @@ impl ControlStore {
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(MIGRATION_2)?;
+            transaction.pragma_update(None, "user_version", 2_i64)?;
+            transaction.commit()?;
+            version = 2;
+        }
+        if version == 2 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(MIGRATION_3)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
         }
@@ -818,11 +839,15 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let job_id: String = transaction.query_row(
-            "SELECT job_id FROM profiles WHERE profile_id = ?1",
-            [profile_id.as_str()],
-            |row| row.get(0),
-        )?;
+        let job_id: Option<String> = transaction
+            .query_row(
+                "SELECT job_id FROM profiles WHERE profile_id = ?1 AND destroyed_at IS NULL",
+                [profile_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let job_id =
+            job_id.ok_or_else(|| StoreError::UnknownLiveProfile(profile_id.to_string()))?;
         transaction.execute(
             "INSERT INTO sessions (session_id, profile_id, external_key, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![session_id.as_str(), profile_id.as_str(), external_key, now],
@@ -833,6 +858,73 @@ impl ControlStore {
             &format!("session-registered:{session_id}"),
             "session-registered",
             &json!({"session_id": session_id.as_str(), "profile_id": profile_id.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Marks an isolated profile and all of its sessions destroyed.
+    ///
+    /// Filesystem removal remains the scheduler's responsibility; this method
+    /// first durably removes the profile's control-plane authority and releases
+    /// any matching profile lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] unless a live same-job coordinator owns the
+    /// teardown or the target profile is already absent/destroyed.
+    pub fn destroy_profile(
+        &mut self,
+        coordinator: &ProfileId,
+        target: &ProfileId,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let target_record: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT job_id, unit_id FROM profiles WHERE profile_id = ?1 AND destroyed_at IS NULL",
+                [target.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (job_id, unit_id) =
+            target_record.ok_or_else(|| StoreError::UnknownLiveProfile(target.to_string()))?;
+        let authorized: Option<i64> = transaction
+            .query_row(
+                "SELECT 1 FROM profiles WHERE profile_id = ?1 AND job_id = ?2 AND role = ?3 AND destroyed_at IS NULL",
+                params![coordinator.as_str(), &job_id, Role::Coordinator.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if authorized.is_none() {
+            return Err(StoreError::UnauthorizedCoordinator);
+        }
+        transaction.execute(
+            "UPDATE profiles SET destroyed_at = ?1 WHERE profile_id = ?2",
+            params![now, target.as_str()],
+        )?;
+        transaction.execute(
+            "UPDATE sessions SET destroyed_at = ?1 WHERE profile_id = ?2 AND destroyed_at IS NULL",
+            params![now, target.as_str()],
+        )?;
+        transaction.execute(
+            "UPDATE leases SET released_at = ?1 WHERE job_id = ?2 AND unit_id = ?3 AND kind = 'profile' AND resource = ?4 AND released_at IS NULL",
+            params![now, &job_id, &unit_id, target.as_str()],
+        )?;
+        append_event_tx(
+            &transaction,
+            &JobId::new(job_id)?,
+            idempotency_key,
+            "profile-destroyed",
+            &json!({
+                "profile_id": target.as_str(),
+                "coordinator": coordinator.as_str(),
+                "unit_id": unit_id
+            }),
             now,
         )?;
         transaction.commit()?;
@@ -1092,7 +1184,7 @@ impl ControlStore {
         }
         let reviewer_record: Option<(String, String)> = transaction
             .query_row(
-                "SELECT job_id, role FROM profiles WHERE profile_id = ?1",
+                "SELECT job_id, role FROM profiles WHERE profile_id = ?1 AND destroyed_at IS NULL",
                 [reviewer.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -1103,7 +1195,7 @@ impl ControlStore {
             return Err(StoreError::UnauthorizedReviewer);
         }
         transaction.execute(
-            "INSERT INTO review_findings (unit_id, head_sha, reviewer_profile, severity, finding_json, disposition, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?4, ?6)",
+            "INSERT INTO review_findings (unit_id, head_sha, reviewer_profile, severity, finding_json, disposition, created_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
             params![unit_id.as_str(), head_sha.as_str(), reviewer.as_str(), assessment.as_str(), serde_json::to_string(&redact_evidence(finding))?, now],
         )?;
         let finding_id = transaction.last_insert_rowid();
@@ -1117,6 +1209,70 @@ impl ControlStore {
         )?;
         transaction.commit()?;
         Ok(finding_id)
+    }
+
+    /// Records the integrator-owned final disposition for one review finding.
+    ///
+    /// Disposition is one-shot and exact-candidate scoped. The rationale is
+    /// retained only in the redacted append-only event ledger.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for the wrong state, unauthorized profile, stale
+    /// or already-disposed finding, or persistence failure.
+    pub fn dispose_review_finding(
+        &mut self,
+        unit_id: &UnitId,
+        integrator: &ProfileId,
+        request: &FindingDisposition<'_>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, state) = unit_identity_tx(&transaction, unit_id)?;
+        if state != JobState::Reviewing {
+            return Err(StoreError::ReviewOutsideReviewState);
+        }
+        let authorized: Option<i64> = transaction
+            .query_row(
+                "SELECT 1 FROM profiles WHERE profile_id = ?1 AND job_id = ?2 AND role = ?3 AND destroyed_at IS NULL",
+                params![integrator.as_str(), job_id.as_str(), Role::Integrator.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if authorized.is_none() {
+            return Err(StoreError::UnauthorizedIntegrator);
+        }
+        let candidate = candidate_sha_tx(&transaction, unit_id)?;
+        let changed = transaction.execute(
+            "UPDATE review_findings SET disposition = ?1 WHERE finding_id = ?2 AND unit_id = ?3 AND head_sha = ?4 AND disposition IS NULL",
+            params![
+                request.disposition.as_str(),
+                request.finding_id,
+                unit_id.as_str(),
+                candidate.as_str()
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::UnknownOpenFinding(request.finding_id));
+        }
+        append_event_tx(
+            &transaction,
+            &job_id,
+            request.idempotency_key,
+            "review-disposed",
+            &json!({
+                "unit_id": unit_id.as_str(),
+                "finding_id": request.finding_id,
+                "integrator": integrator.as_str(),
+                "disposition": request.disposition.as_str(),
+                "rationale": request.rationale
+            }),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 }
 
@@ -1183,14 +1339,15 @@ fn require_review_gate_tx(
     if brief.risk_class == RiskClass::Low {
         return Ok(());
     }
-    let (reviewers, blocking): (i64, i64) = transaction.query_row(
-        "SELECT COUNT(DISTINCT reviewer_profile), COALESCE(SUM(CASE WHEN disposition = 'blocking' THEN 1 ELSE 0 END), 0) FROM review_findings WHERE unit_id = ?1 AND head_sha = ?2",
+    let (reviewers, unresolved, blocking): (i64, i64, i64) = transaction.query_row(
+        "SELECT COUNT(DISTINCT reviewer_profile), COALESCE(SUM(CASE WHEN disposition IS NULL THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN disposition = 'blocking' THEN 1 ELSE 0 END), 0) FROM review_findings WHERE unit_id = ?1 AND head_sha = ?2",
         params![unit_id.as_str(), head_sha.as_str()],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    if reviewers < 2 || blocking != 0 {
+    if reviewers < 2 || unresolved != 0 || blocking != 0 {
         return Err(StoreError::ReviewGateUnsatisfied {
             reviewers,
+            unresolved,
             blocking,
         });
     }
@@ -1389,6 +1546,9 @@ pub enum StoreError {
     /// Session keys are always explicit.
     #[error("session external key must not be empty")]
     InvalidSessionKey,
+    /// Profile is unknown or its authority has already been destroyed.
+    #[error("profile is not live: {0}")]
+    UnknownLiveProfile(String),
     /// Worktree must be an explicit scheduler-owned absolute path.
     #[error("worktree must be absolute: {path}", path = .0.display())]
     InvalidWorktree(std::path::PathBuf),
@@ -1424,13 +1584,21 @@ pub enum StoreError {
     /// Only an isolated verifier/reviewer profile for the same job may review.
     #[error("profile is not an authorized independent reviewer")]
     UnauthorizedReviewer,
+    /// Only a live same-job integrator may dispose review findings.
+    #[error("profile is not an authorized live integrator")]
+    UnauthorizedIntegrator,
+    /// Finding is stale, unknown, or already has a final disposition.
+    #[error("review finding is not open: {0}")]
+    UnknownOpenFinding(i64),
     /// Medium/high-risk changes need two independent non-blocking reviews.
     #[error(
-        "review gate needs two reviewers and no blockers; reviewers={reviewers}, blocking={blocking}"
+        "review gate needs two reviewers, dispositions, and no blockers; reviewers={reviewers}, unresolved={unresolved}, blocking={blocking}"
     )]
     ReviewGateUnsatisfied {
         /// Distinct independent reviewer profiles observed.
         reviewers: i64,
+        /// Findings still awaiting integrator disposition.
+        unresolved: i64,
         /// Remaining blocking assessments.
         blocking: i64,
     },
@@ -1577,13 +1745,18 @@ ALTER TABLE review_findings
 ADD COLUMN reviewer_profile TEXT NOT NULL DEFAULT 'legacy-reviewer';
 ";
 
+const MIGRATION_3: &str = r"
+ALTER TABLE sessions
+ADD COLUMN destroyed_at INTEGER;
+";
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use serde_json::json;
 
-    use super::{ControlStore, ReviewAssessment, SCHEMA, StoreError};
+    use super::{ControlStore, FindingDisposition, ReviewAssessment, SCHEMA, StoreError};
     use crate::{
         CredentialGrant, JobBrief, JobId, JobState, LeaseKind, NetworkMode, NetworkPolicy,
         PathPolicy, ProfileId, ResourceLimits, RiskClass, Role, SessionId, Sha, UnitId,
@@ -1649,7 +1822,44 @@ mod tests {
         }
     }
 
+    fn prepare_reviewing_candidate(store: &mut ControlStore, brief: &JobBrief, candidate: &Sha) {
+        store.create_job(brief, 1).expect("job created");
+        advance_to_self_verifying(store, &brief.unit_id);
+        store
+            .record_candidate(&brief.unit_id, candidate, "candidate-prepared", 7)
+            .expect("candidate recorded");
+        store
+            .transition(
+                &brief.unit_id,
+                JobState::IndependentlyVerifying,
+                "verification-prepared",
+                8,
+            )
+            .expect("verification starts");
+        store
+            .record_verdict(
+                &brief.unit_id,
+                candidate,
+                true,
+                &json!({"commands": ["cargo test"]}),
+                "verdict-prepared",
+                9,
+            )
+            .expect("verdict recorded");
+    }
+
     fn record_two_reviews(store: &mut ControlStore, brief: &JobBrief, head_sha: &Sha, now: i64) {
+        let integrator = ProfileId::new("integrator-review-gate").expect("valid integrator");
+        store
+            .register_profile(
+                &integrator,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::Integrator,
+                PathBuf::from("/tmp/nswarm-integrator-review-gate").as_path(),
+                now,
+            )
+            .expect("integrator profile registered");
         for index in 1..=2 {
             let profile = ProfileId::new(format!("reviewer-{index}")).expect("valid profile");
             store
@@ -1662,7 +1872,7 @@ mod tests {
                     now + index,
                 )
                 .expect("review profile registered");
-            store
+            let finding_id = store
                 .record_review(
                     &brief.unit_id,
                     &profile,
@@ -1672,7 +1882,57 @@ mod tests {
                     now + index + 2,
                 )
                 .expect("review recorded");
+            store
+                .dispose_review_finding(
+                    &brief.unit_id,
+                    &integrator,
+                    &FindingDisposition {
+                        finding_id,
+                        disposition: ReviewAssessment::Noted,
+                        rationale: &json!({"reason": "independent review evidence accepted"}),
+                        idempotency_key: &format!("review-disposed:{finding_id}"),
+                    },
+                    now + index + 4,
+                )
+                .expect("review disposed");
         }
+    }
+
+    fn record_unresolved_reviews(
+        store: &mut ControlStore,
+        brief: &JobBrief,
+        candidate: &Sha,
+    ) -> (Vec<ProfileId>, Vec<i64>) {
+        let mut findings = Vec::new();
+        let mut reviewers = Vec::new();
+        for index in 1..=2 {
+            let reviewer =
+                ProfileId::new(format!("disposition-reviewer-{index}")).expect("reviewer id");
+            store
+                .register_profile(
+                    &reviewer,
+                    &brief.job_id,
+                    &brief.unit_id,
+                    Role::VerifierReviewer,
+                    PathBuf::from(format!("/tmp/nswarm-disposition-reviewer-{index}")).as_path(),
+                    10 + index,
+                )
+                .expect("reviewer registered");
+            findings.push(
+                store
+                    .record_review(
+                        &brief.unit_id,
+                        &reviewer,
+                        candidate,
+                        ReviewAssessment::Consider,
+                        &json!({"summary": "non-blocking concern"}),
+                        12 + index,
+                    )
+                    .expect("review recorded"),
+            );
+            reviewers.push(reviewer);
+        }
+        (reviewers, findings)
     }
 
     #[test]
@@ -2056,6 +2316,88 @@ mod tests {
     }
 
     #[test]
+    fn review_gate_requires_live_integrator_disposition() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let unit = brief.unit_id.clone();
+        let candidate = sha('b');
+        prepare_reviewing_candidate(&mut store, &brief, &candidate);
+
+        let (reviewers, findings) = record_unresolved_reviews(&mut store, &brief, &candidate);
+        assert!(matches!(
+            store.accept_verdict(&unit, "unresolved-accept", 15),
+            Err(StoreError::ReviewGateUnsatisfied {
+                reviewers: 2,
+                unresolved: 2,
+                blocking: 0
+            })
+        ));
+        assert!(matches!(
+            store.dispose_review_finding(
+                &unit,
+                &reviewers[0],
+                &FindingDisposition {
+                    finding_id: findings[0],
+                    disposition: ReviewAssessment::Noted,
+                    rationale: &json!({"reason": "attempted self-disposition"}),
+                    idempotency_key: "self-disposition",
+                },
+                16,
+            ),
+            Err(StoreError::UnauthorizedIntegrator)
+        ));
+
+        let integrator = ProfileId::new("disposition-integrator").expect("integrator id");
+        store
+            .register_profile(
+                &integrator,
+                &brief.job_id,
+                &unit,
+                Role::Integrator,
+                std::path::Path::new("/tmp/nswarm-disposition-integrator"),
+                17,
+            )
+            .expect("integrator registered");
+        for (index, finding) in findings.into_iter().enumerate() {
+            store
+                .dispose_review_finding(
+                    &unit,
+                    &integrator,
+                    &FindingDisposition {
+                        finding_id: finding,
+                        disposition: ReviewAssessment::Noted,
+                        rationale: &json!({"reason": "accepted with evidence"}),
+                        idempotency_key: &format!("integrator-disposition-{index}"),
+                    },
+                    18 + i64::try_from(index).expect("small index"),
+                )
+                .expect("integrator disposition recorded");
+            if index == 0 {
+                assert!(matches!(
+                    store.dispose_review_finding(
+                        &unit,
+                        &integrator,
+                        &FindingDisposition {
+                            finding_id: finding,
+                            disposition: ReviewAssessment::Dismissed,
+                            rationale: &json!({"reason": "second disposition"}),
+                            idempotency_key: "duplicate-disposition",
+                        },
+                        20,
+                    ),
+                    Err(StoreError::UnknownOpenFinding(id)) if id == finding
+                ));
+            }
+        }
+        assert_eq!(
+            store
+                .accept_verdict(&unit, "disposed-accept", 22)
+                .expect("disposed reviews accepted"),
+            JobState::Verified
+        );
+    }
+
+    #[test]
     fn live_worker_result_and_expired_lease_replacement_are_explicit() {
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let brief = brief();
@@ -2143,6 +2485,90 @@ mod tests {
             ),
             Err(StoreError::ReviewOutsideReviewState)
         ));
+    }
+
+    #[test]
+    fn profile_destruction_revokes_sessions_and_profile_lease() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let coordinator = ProfileId::new("destroy-coordinator").expect("coordinator id");
+        let coder = ProfileId::new("destroy-coder").expect("coder id");
+        for (profile, role, home) in [
+            (
+                &coordinator,
+                Role::Coordinator,
+                "/tmp/nswarm-destroy-coordinator",
+            ),
+            (&coder, Role::Coder, "/tmp/nswarm-destroy-coder"),
+        ] {
+            store
+                .register_profile(
+                    profile,
+                    &brief.job_id,
+                    &brief.unit_id,
+                    role,
+                    std::path::Path::new(home),
+                    2,
+                )
+                .expect("profile registered");
+        }
+        store
+            .register_session(
+                &SessionId::new("destroy-session").expect("session id"),
+                &coder,
+                "job:job-1:unit:unit-1",
+                3,
+            )
+            .expect("session registered");
+        store
+            .acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                coder.as_str(),
+                100,
+                4,
+            )
+            .expect("profile lease acquired");
+        assert!(matches!(
+            store.destroy_profile(&coder, &coder, "self-destroy", 5),
+            Err(StoreError::UnauthorizedCoordinator)
+        ));
+        store
+            .destroy_profile(&coordinator, &coder, "coordinator-destroy", 6)
+            .expect("coordinator destroys profile authority");
+        assert!(matches!(
+            store.register_session(
+                &SessionId::new("late-session").expect("session id"),
+                &coder,
+                "late",
+                7,
+            ),
+            Err(StoreError::UnknownLiveProfile(id)) if id == coder.as_str()
+        ));
+        assert!(matches!(
+            store.destroy_profile(&coordinator, &coder, "duplicate-destroy", 8),
+            Err(StoreError::UnknownLiveProfile(id)) if id == coder.as_str()
+        ));
+        let destroyed_sessions: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE profile_id = ?1 AND destroyed_at = 6",
+                [coder.as_str()],
+                |row| row.get(0),
+            )
+            .expect("destroyed session count");
+        let released_leases: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM leases WHERE resource = ?1 AND released_at = 6",
+                [coder.as_str()],
+                |row| row.get(0),
+            )
+            .expect("released profile lease count");
+        assert_eq!(destroyed_sessions, 1);
+        assert_eq!(released_leases, 1);
     }
 
     #[test]
@@ -2297,5 +2723,14 @@ mod tests {
             )
             .expect("column query");
         assert_eq!(reviewer_column, 1);
+        let destroyed_session_column: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'destroyed_at'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("session column query");
+        assert_eq!(destroyed_session_column, 1);
     }
 }
