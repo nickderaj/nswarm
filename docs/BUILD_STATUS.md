@@ -168,6 +168,30 @@ Completed acceptance units:
 - `just ci` remains green with 85 files policy-scanned, 48 tests, 9
   deterministic hostile-input evals, and 92.75% line coverage.
 
+## Checkpoint H — recursive report and typed artifact contracts
+
+Exact implementation SHA: `86c2aa5ed3aece542c1e491c0381cbfb648410c4`
+(`feat(control): type reports and artifact evidence`).
+
+Completed acceptance units:
+
+- immutable briefs now accept only a bounded, recursively validated JSON-Schema
+  subset with declared object properties, required fields, arrays/items,
+  primitive types, additional-property policy, and a depth limit;
+- worker reports are recursively checked for missing, undeclared, and wrong-type
+  fields before redacted persistence;
+- evidence artifact kinds are an explicit enum and artifact paths must be safe,
+  repository-relative locations;
+- every new artifact is bound to the unit's exact base/candidate SHA, and stale
+  artifact evidence fails closed;
+- schema v4 migrates artifact evidence without discarding prior rows and scopes
+  uniqueness by source SHA, so identical deterministic output can be valid
+  evidence for two distinct revisions;
+- malformed schema, nested wrong type, undeclared field, unsafe path, stale SHA,
+  prior-schema migration, and same-content/new-SHA regressions pass;
+- `just ci` remains green with 85 files policy-scanned, 49 tests, 9
+  deterministic hostile-input evals, and 92.82% line coverage.
+
 Known gaps and external gates:
 
 - GitHub Actions have not run until this branch is pushed and a PR exists.
@@ -181,10 +205,9 @@ Known gaps and external gates:
   drift across an explicit host root; host mutation via deploy, status/new
   scaffolding, and direct `age`/`pass` integration remain before the full §4 CLI
   is complete.
-- Richer report-field typing and typed artifact contracts remain before the
-  control plane's local step-1 scope is complete. Physical profile-home removal
-  remains a scheduler/OS adapter responsibility after the now-audited authority
-  teardown.
+- The control plane's local step-1 repository scope is complete. Physical
+  profile-home removal and resource/network enforcement remain scheduler/OS
+  adapter responsibilities after the now-audited authority teardown.
 - The checked-in research service manifest is a rendering/policy fixture; no
   writable research agent or bot behaviour is enabled.
 - Crate publication was not attempted. The remote repository already supplies
@@ -197,9 +220,10 @@ Known gaps and external gates:
 Next executable action after checkpointing:
 
 ```console
-cargo test -p agent-control
+cargo test -p fleet
 ```
 
-Then add recursive report-field type enforcement and typed artifact contracts
-with malformed-schema, wrong-type, unsafe-path, and stale-SHA negative tests.
-Re-run `just ci` before the next commit.
+Then implement a disposable-host configuration apply adapter behind the proven
+redacted plan contract, including atomic writes, modes, symlink refusal,
+rollback-on-failure tests, and no real service restart. Re-run `just ci` before
+the next commit.
