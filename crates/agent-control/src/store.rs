@@ -245,6 +245,22 @@ impl ControlStore {
                 next: JobState::CandidateReady,
             });
         }
+        let tracked_head: Option<String> = transaction
+            .query_row(
+                "SELECT COALESCE(head_sha, base_sha) FROM branches WHERE unit_id = ?1",
+                [unit_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(current_head) = tracked_head {
+            let current_head = Sha::new(current_head)?;
+            if current_head != *head_sha {
+                return Err(StoreError::StaleBranchHead {
+                    current: current_head,
+                    expected: head_sha.clone(),
+                });
+            }
+        }
         transaction.execute(
             "UPDATE units SET state = 'candidate-ready', candidate_sha = ?1, integration_sha = NULL, updated_at = ?2 WHERE unit_id = ?3",
             params![head_sha.as_str(), now, unit_id.as_str()],
@@ -298,7 +314,7 @@ impl ControlStore {
                 unit_id.as_str(),
                 head_sha.as_str(),
                 passed,
-                serde_json::to_string(evidence)?,
+                serde_json::to_string(&redact_evidence(evidence))?,
                 now
             ],
         )?;
@@ -823,6 +839,84 @@ impl ControlStore {
         Ok(())
     }
 
+    /// Reports whether one exact method remains granted to a job.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if persisted grant methods are invalid JSON or
+    /// the database query fails.
+    pub fn credential_method_is_active(
+        &self,
+        job_id: &JobId,
+        credential_id: &str,
+        method: &str,
+    ) -> Result<bool, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT methods_json FROM credential_grants WHERE job_id = ?1 AND credential_id = ?2 AND revoked_at IS NULL",
+        )?;
+        let rows = statement.query_map(params![job_id.as_str(), credential_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        for row in rows {
+            let methods: Vec<String> = serde_json::from_str(&row?)?;
+            if methods.iter().any(|granted| granted == method) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Revokes every active instance of an opaque credential grant.
+    ///
+    /// Only a live coordinator profile belonging to the same job may perform
+    /// the revocation. Secret material never enters this repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for an unauthorized coordinator, unknown active
+    /// grant, conflicting idempotency key, or database failure.
+    pub fn revoke_credential_grant(
+        &mut self,
+        job_id: &JobId,
+        coordinator: &ProfileId,
+        credential_id: &str,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let authorized: Option<i64> = transaction
+            .query_row(
+                "SELECT 1 FROM profiles WHERE profile_id = ?1 AND job_id = ?2 AND role = ?3 AND destroyed_at IS NULL",
+                params![coordinator.as_str(), job_id.as_str(), Role::Coordinator.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if authorized.is_none() {
+            return Err(StoreError::UnauthorizedCoordinator);
+        }
+        let changed = transaction.execute(
+            "UPDATE credential_grants SET revoked_at = ?1 WHERE job_id = ?2 AND credential_id = ?3 AND revoked_at IS NULL",
+            params![now, job_id.as_str(), credential_id],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::UnknownActiveCredentialGrant(
+                credential_id.to_owned(),
+            ));
+        }
+        append_event_tx(
+            &transaction,
+            job_id,
+            idempotency_key,
+            "credential-revoked",
+            &json!({"credential_id": credential_id, "coordinator": coordinator.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Registers the one branch/worktree assigned to a coding unit.
     ///
     /// # Errors
@@ -854,7 +948,7 @@ impl ControlStore {
             return Err(StoreError::InvalidBranchAssignment);
         }
         transaction.execute(
-            "INSERT INTO branches (unit_id, name, worktree, base_sha) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO branches (unit_id, name, worktree, base_sha, head_sha) VALUES (?1, ?2, ?3, ?4, ?4)",
             params![
                 unit_id.as_str(),
                 name,
@@ -868,6 +962,62 @@ impl ControlStore {
             &format!("branch-registered:{unit_id}"),
             "branch-registered",
             &json!({"unit_id": unit_id.as_str(), "name": name, "base_sha": base_sha.as_str()}),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Advances a registered coding branch using compare-and-swap semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] outside coding states, for an unknown branch, or
+    /// when the caller's expected head is stale.
+    pub fn update_branch_head(
+        &mut self,
+        unit_id: &UnitId,
+        expected_head: &Sha,
+        new_head: &Sha,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (job_id, state) = unit_identity_tx(&transaction, unit_id)?;
+        if !matches!(state, JobState::Implementing | JobState::SelfVerifying) {
+            return Err(StoreError::BranchUpdateOutsideCodingState(state));
+        }
+        let current: Option<String> = transaction
+            .query_row(
+                "SELECT COALESCE(head_sha, base_sha) FROM branches WHERE unit_id = ?1",
+                [unit_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let current = current.ok_or_else(|| StoreError::UnknownBranch(unit_id.to_string()))?;
+        let current = Sha::new(current)?;
+        if current != *expected_head {
+            return Err(StoreError::StaleBranchHead {
+                current,
+                expected: expected_head.clone(),
+            });
+        }
+        transaction.execute(
+            "UPDATE branches SET head_sha = ?1 WHERE unit_id = ?2",
+            params![new_head.as_str(), unit_id.as_str()],
+        )?;
+        append_event_tx(
+            &transaction,
+            &job_id,
+            idempotency_key,
+            "branch-head-updated",
+            &json!({
+                "unit_id": unit_id.as_str(),
+                "previous_head": expected_head.as_str(),
+                "head_sha": new_head.as_str()
+            }),
             now,
         )?;
         transaction.commit()?;
@@ -954,7 +1104,7 @@ impl ControlStore {
         }
         transaction.execute(
             "INSERT INTO review_findings (unit_id, head_sha, reviewer_profile, severity, finding_json, disposition, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?4, ?6)",
-            params![unit_id.as_str(), head_sha.as_str(), reviewer.as_str(), assessment.as_str(), serde_json::to_string(finding)?, now],
+            params![unit_id.as_str(), head_sha.as_str(), reviewer.as_str(), assessment.as_str(), serde_json::to_string(&redact_evidence(finding))?, now],
         )?;
         let finding_id = transaction.last_insert_rowid();
         append_event_tx(
@@ -1072,8 +1222,24 @@ fn append_event_tx(
         return Err(StoreError::InvalidEvent);
     }
     let payload_json = serde_json::to_string(&redact_evidence(payload))?;
+    let existing: Option<(i64, String, String, String)> = transaction
+        .query_row(
+            "SELECT event_id, job_id, event_type, payload_json FROM events WHERE idempotency_key = ?1",
+            [idempotency_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    if let Some((event_id, existing_job, existing_type, existing_payload)) = existing {
+        if existing_job == job_id.as_str()
+            && existing_type == event_type
+            && existing_payload == payload_json
+        {
+            return Ok(event_id);
+        }
+        return Err(StoreError::IdempotencyConflict(idempotency_key.to_owned()));
+    }
     transaction.execute(
-        "INSERT INTO events (job_id, idempotency_key, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(idempotency_key) DO NOTHING",
+        "INSERT INTO events (job_id, idempotency_key, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![job_id.as_str(), idempotency_key, event_type, payload_json, now],
     )?;
     let id = transaction.query_row(
@@ -1208,6 +1374,9 @@ pub enum StoreError {
     /// Append-only event keys and types are required.
     #[error("event idempotency key and type must not be empty")]
     InvalidEvent,
+    /// An idempotency key was reused for a different logical event.
+    #[error("idempotency key was reused with different evidence: {0}")]
+    IdempotencyConflict(String),
     /// Profile home must be an explicit isolated absolute path.
     #[error("profile home must be absolute: {path}", path = .0.display())]
     InvalidProfileHome(std::path::PathBuf),
@@ -1226,6 +1395,26 @@ pub enum StoreError {
     /// Branch namespace and base must derive from the immutable brief.
     #[error("branch name or base SHA does not match the unit assignment")]
     InvalidBranchAssignment,
+    /// A unit has no scheduler-registered coding branch.
+    #[error("unit has no registered branch: {0}")]
+    UnknownBranch(String),
+    /// Branch commits are accepted only during active coding states.
+    #[error("branch head cannot change while unit is {0:?}")]
+    BranchUpdateOutsideCodingState(JobState),
+    /// Branch update or candidate report was based on a stale head.
+    #[error("branch head is {current}; caller expected {expected}")]
+    StaleBranchHead {
+        /// Current scheduler-tracked head.
+        current: Sha,
+        /// Head asserted by the caller.
+        expected: Sha,
+    },
+    /// Only the same-job live coordinator may revoke a credential grant.
+    #[error("profile is not an authorized live coordinator")]
+    UnauthorizedCoordinator,
+    /// The requested grant does not exist or was already revoked.
+    #[error("credential grant is not active: {0}")]
+    UnknownActiveCredentialGrant(String),
     /// Artifact kind and path are required evidence fields.
     #[error("artifact kind and path must not be empty")]
     InvalidArtifact,
@@ -1684,6 +1873,16 @@ mod tests {
             )
             .expect("idempotent append");
         assert_eq!(first, second);
+        assert!(matches!(
+            store.append_event(
+                &brief.job_id,
+                "claim-1",
+                "claim",
+                &json!({"kind": "different"}),
+                3,
+            ),
+            Err(StoreError::IdempotencyConflict(key)) if key == "claim-1"
+        ));
     }
 
     #[test]
@@ -1731,6 +1930,72 @@ mod tests {
         assert!(!stored.contains(&source_token));
         assert_eq!(stored.matches("[REDACTED]").count(), 2);
         assert!(stored.contains("focused test passed"));
+    }
+
+    #[test]
+    fn verdict_and_review_evidence_are_redacted_before_storage() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let unit = brief.unit_id.clone();
+        let candidate = sha('b');
+        store.create_job(&brief, 1).expect("job created");
+        advance_to_self_verifying(&mut store, &unit);
+        store
+            .record_candidate(&unit, &candidate, "candidate-redaction", 7)
+            .expect("candidate recorded");
+        store
+            .transition(
+                &unit,
+                JobState::IndependentlyVerifying,
+                "verify-redaction",
+                8,
+            )
+            .expect("verification starts");
+        let token = "sk-".to_owned() + &"z".repeat(24);
+        store
+            .record_verdict(
+                &unit,
+                &candidate,
+                true,
+                &json!({"provider_token": token, "result": "pass"}),
+                "verdict-redaction",
+                9,
+            )
+            .expect("verdict recorded");
+        let reviewer = ProfileId::new("reviewer-redaction").expect("reviewer id");
+        store
+            .register_profile(
+                &reviewer,
+                &brief.job_id,
+                &unit,
+                Role::VerifierReviewer,
+                std::path::Path::new("/tmp/nswarm-reviewer-redaction"),
+                10,
+            )
+            .expect("reviewer registered");
+        store
+            .record_review(
+                &unit,
+                &reviewer,
+                &candidate,
+                ReviewAssessment::Noted,
+                &json!({"authorization": token, "summary": "reviewed"}),
+                11,
+            )
+            .expect("review recorded");
+
+        for (table, column) in [
+            ("verification_verdicts", "evidence_json"),
+            ("review_findings", "finding_json"),
+        ] {
+            let query = format!("SELECT {column} FROM {table} ORDER BY rowid DESC LIMIT 1");
+            let stored: String = store
+                .connection
+                .query_row(&query, [], |row| row.get(0))
+                .expect("stored evidence");
+            assert!(!stored.contains(&token));
+            assert!(stored.contains("[REDACTED]"));
+        }
     }
 
     #[test]
@@ -1878,6 +2143,140 @@ mod tests {
             ),
             Err(StoreError::ReviewOutsideReviewState)
         ));
+    }
+
+    #[test]
+    fn only_live_same_job_coordinator_can_revoke_credential_grants() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let coordinator = ProfileId::new("coordinator-job-1").expect("coordinator id");
+        let coder = ProfileId::new("coder-job-1").expect("coder id");
+        for (profile, role, home) in [
+            (
+                &coordinator,
+                Role::Coordinator,
+                "/tmp/nswarm-coordinator-job-1",
+            ),
+            (&coder, Role::Coder, "/tmp/nswarm-coder-job-1"),
+        ] {
+            store
+                .register_profile(
+                    profile,
+                    &brief.job_id,
+                    &brief.unit_id,
+                    role,
+                    std::path::Path::new(home),
+                    2,
+                )
+                .expect("profile registered");
+        }
+        let method = "git:push:refs/heads/nswarm/job-1/unit-1";
+        assert!(
+            store
+                .credential_method_is_active(&brief.job_id, "github-job-push", method,)
+                .expect("grant query")
+        );
+        assert!(matches!(
+            store.revoke_credential_grant(
+                &brief.job_id,
+                &coder,
+                "github-job-push",
+                "unauthorized-revoke",
+                3,
+            ),
+            Err(StoreError::UnauthorizedCoordinator)
+        ));
+        store
+            .revoke_credential_grant(
+                &brief.job_id,
+                &coordinator,
+                "github-job-push",
+                "authorized-revoke",
+                4,
+            )
+            .expect("coordinator revokes");
+        assert!(
+            !store
+                .credential_method_is_active(&brief.job_id, "github-job-push", method,)
+                .expect("revoked grant query")
+        );
+        assert!(matches!(
+            store.revoke_credential_grant(
+                &brief.job_id,
+                &coordinator,
+                "github-job-push",
+                "duplicate-revoke",
+                5,
+            ),
+            Err(StoreError::UnknownActiveCredentialGrant(id)) if id == "github-job-push"
+        ));
+    }
+
+    #[test]
+    fn branch_heads_use_cas_and_gate_candidate_sha() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let unit = brief.unit_id.clone();
+        store.create_job(&brief, 1).expect("job created");
+        store
+            .register_branch(
+                &unit,
+                "nswarm/job-1/unit-1",
+                std::path::Path::new("/tmp/nswarm-worktrees/unit-1"),
+                &sha('a'),
+                2,
+            )
+            .expect("branch registered");
+        assert!(matches!(
+            store.update_branch_head(&unit, &sha('a'), &sha('b'), "too-early", 3),
+            Err(StoreError::BranchUpdateOutsideCodingState(
+                JobState::Pending
+            ))
+        ));
+        for (state, timestamp) in [
+            JobState::Leased,
+            JobState::Grounding,
+            JobState::Implementing,
+        ]
+        .into_iter()
+        .zip([4_i64, 5, 6])
+        {
+            store
+                .transition(
+                    &unit,
+                    state,
+                    &format!("branch-advance-{timestamp}"),
+                    timestamp,
+                )
+                .expect("valid transition");
+        }
+        assert!(matches!(
+            store.update_branch_head(&unit, &sha('c'), &sha('b'), "stale-head", 7),
+            Err(StoreError::StaleBranchHead { current, expected })
+                if current == sha('a') && expected == sha('c')
+        ));
+        store
+            .update_branch_head(&unit, &sha('a'), &sha('b'), "branch-update", 8)
+            .expect("head advances");
+        assert!(matches!(
+            store.update_branch_head(&unit, &sha('b'), &sha('c'), "branch-update", 9),
+            Err(StoreError::IdempotencyConflict(key)) if key == "branch-update"
+        ));
+        store
+            .update_branch_head(&unit, &sha('b'), &sha('d'), "branch-update-2", 10)
+            .expect("conflicting idempotency transaction rolled back");
+        store
+            .transition(&unit, JobState::SelfVerifying, "self-verify-branch", 11)
+            .expect("self verification starts");
+        assert!(matches!(
+            store.record_candidate(&unit, &sha('c'), "stale-candidate", 12),
+            Err(StoreError::StaleBranchHead { current, expected })
+                if current == sha('d') && expected == sha('c')
+        ));
+        store
+            .record_candidate(&unit, &sha('d'), "current-candidate", 13)
+            .expect("tracked candidate accepted");
     }
 
     #[test]
