@@ -103,6 +103,26 @@ Completed acceptance units:
 - `just ci` remains green with 85 files policy-scanned, 39 tests, 9
   deterministic hostile-input evals, and 90.88% line coverage.
 
+## Checkpoint E — manifest-derived host planning
+
+Exact implementation SHA: `98d2b1a220bd046405b3fdfd5dc9b679de28bbcc`
+(`feat(fleet): add redacted host planning`).
+
+Completed acceptance units:
+
+- `fleet plan --all` derives its inventory exclusively from `bots/*.toml` and
+  rejects duplicate bot names that would collide on installed paths;
+- an explicit host root is compared against deterministic systemd and per-bot
+  environment artifacts without mutating the host;
+- the strict decrypted-secret parser performs no interpolation or ambient
+  environment fallback and rejects malformed or duplicate entries;
+- environment drift is reported only as clean or redacted replacement, with
+  negative tests proving synthetic values never enter plan output;
+- unreadable manifest directory entries now fail closed rather than being
+  silently omitted;
+- `just ci` remains green with 85 files policy-scanned, 43 tests, 9
+  deterministic hostile-input evals, and 90.99% line coverage.
+
 Known gaps and external gates:
 
 - GitHub Actions have not run until this branch is pushed and a PR exists.
@@ -112,9 +132,10 @@ Known gaps and external gates:
   are configured but were not claimed as executed on this macOS host.
 - The 38 cargo-vet exemptions are explicit bootstrap debt, not completed source
   audits; new dependencies remain fail-closed.
-- `fleet` now validates, inventories, renders, and diffs local installed-unit
-  fixtures; host mutation via deploy, status/new scaffolding, and encrypted
-  secret materialization remain before step 1 is complete.
+- `fleet` now validates, inventories, renders, and plans unit plus redacted env
+  drift across an explicit host root; host mutation via deploy, status/new
+  scaffolding, and direct `age`/`pass` integration remain before the full §4 CLI
+  is complete.
 - Credential revocation, branch-head updates, richer report-field typing and
   artifact schemas, explicit integrator disposition of non-blocking review
   findings, and profile destruction/audit methods remain before the control
@@ -131,9 +152,9 @@ Known gaps and external gates:
 Next executable action after checkpointing:
 
 ```console
-cargo test -p fleet
+cargo test -p agent-control
 ```
 
-Then add fail-closed host-root deployment, status/new scaffolding, and encrypted
-secret materialization around the manifest-derived fleet core. Re-run `just ci`
-before the next commit.
+Then add credential revocation and branch-head update repositories with stale,
+unauthorized, and idempotency negative tests. Re-run `just ci` before the next
+commit.
