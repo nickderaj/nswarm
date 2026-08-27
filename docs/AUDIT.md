@@ -167,6 +167,89 @@ crate has yet been reviewed strongly enough to replace an exemption. Direct and
 security-sensitive dependencies must be inventoried before any exemption is
 removed; no audit may be inferred from a passing build.
 
+## Follow-up independent review disposition
+
+A second independent review was received on 2026-08-27 after checkpoint K.
+The findings below were reproduced against the code rather than accepted from
+the report at face value.
+
+### Critical follow-up findings
+
+- **C-4 — the data model cannot represent a multi-unit job and dependencies
+  fail open.** `jobs.brief_json` contains one unit-specific brief, `job_id` is
+  unique at creation, and the dependency query uses an inner join. A dependency
+  identifier with no matching unit therefore disappears from the unsatisfied
+  count. Repair requires a schema migration that separates job-level identity
+  from immutable unit briefs, foreign-keys both dependency endpoints, and
+  proves two units in one job plus unknown-dependency rejection.
+- **C-5 — verification verdicts are unattributed.** A caller can record a
+  verdict without a live verifier profile, while review findings do carry an
+  actor. Verdict persistence and acceptance must bind evidence to an explicit,
+  live, same-job verifier/reviewer capability at the exact SHA.
+
+### High follow-up findings
+
+- **H-7 — generated unit inventory was incomplete. Repaired in the current
+  worktree.** `scripts/generate.sh` named `research.toml` directly. Generation
+  now derives every bot service from the validated manifest inventory and a
+  two-manifest regression proves omission is impossible.
+- **H-8 — critical coverage selection failed open. Repaired in the current
+  worktree.** The checker used a hand-maintained list of mangled-name
+  substrings, silently treated zero totals as 100%, and had no minimum match
+  count. Source-level `// coverage-critical` markers now define the inventory,
+  at least 30 functions must compile and match structurally, zero branch totals
+  fail, duplicate binary copies are safely aggregated, and every missing
+  outcome is reported with file, line, and function. The fresh local result is
+  232/232 critical outcomes across 34 functions.
+- **H-9 — gateway credential policy used a denylist. Repaired in the current
+  worktree.** Only `OPENROUTER_API_KEY` and `XAI_API_KEY` are accepted; synthetic
+  `ERROR_BOT_TOKEN`, `LOG_BOT_TOKEN`, `GITHUB_TOKEN`, and operational bot-token
+  cases are rejected.
+- **H-10 — Git subprocesses inherit ambient configuration, hooks, and
+  credentials.** Worktree path checks are sound, but provisioning must also
+  clear the environment, disable system/global Git config, credential helpers,
+  hooks, and terminal prompts, with a hostile-hook regression.
+- **H-11 — merge-authorized/integrated recovery paths are incomplete.** The
+  state machine and unique merge-authorization row can strand a unit when a
+  protected merge is rejected or its candidate changes. Exact-SHA
+  invalidation and explicit recovery transitions need durable tests.
+- **H-12 — capabilities are not the store's authorization source of truth.**
+  Some methods still compare role strings directly and some lifecycle methods
+  have no actor. Store authorization must call the typed capability policy;
+  generated coder policy must not advertise deploy authority.
+- **H-13 — topology leases are globally exclusive.** Path and profile resource
+  names may be globally meaningful, but topology ownership must be scoped to a
+  job so independent jobs can integrate concurrently.
+- **H-14 — evals are partially tautological.** The Python runner duplicates
+  simplified redaction/state logic and the corpus contains prose-like snippets
+  instead of driving the Rust implementation. The corpus must invoke named
+  hermetic Rust tests and fail if those implementation tests do not run.
+- **H-15 — host sandbox proof remains incomplete. Partially repaired in the
+  current worktree.** Rendered bot units now add `UMask=0077`,
+  `SystemCallFilter=@system-service`, and systemd IP allow/deny rules that
+  permit loopback Hermes access while denying non-loopback IP traffic. Secret
+  environment values ending in a continuation backslash are rejected, and
+  deny paths cannot be ancestors of writable roots. Socket group/ACL rendering
+  and real systemd enforcement remain unmeasured and must not be claimed.
+
+### Medium follow-up findings
+
+- **M-6 — actionlint is version-tag pinned rather than commit pinned.** The Go
+  invocation must resolve to an immutable upstream commit and the repository
+  policy must enforce that form.
+- **M-7 — CI repeatedly compiles installed tools.** Safe compiler/dependency and
+  version-keyed binary caching is desirable, but may not cache credentials and
+  must not weaken immutable tool selection.
+- **M-8 — several declared future surfaces are placeholders.** Generated
+  profiles, Python runtime policy, and initial skill files are not evidence of
+  runtime wiring. These remain implementation work rather than completed
+  capabilities.
+
+The review's observation that `store.rs` mixes schema, persistence domains,
+redaction, and tests agrees with M-4. Refactoring remains subordinate to the
+multi-unit/verdict migrations: the file will be split only at transactionally
+composable boundaries, with cross-domain invariant tests retained.
+
 ## Positive observations
 
 - Exact full SHA types, branch-head compare-and-swap, exact-SHA verdict lookup,

@@ -58,6 +58,7 @@ impl LocalWorktreeProvisioner {
 }
 
 impl WorktreeProvisioner for LocalWorktreeProvisioner {
+    // coverage-critical
     fn provision(&self, request: &WorktreeRequest) -> Result<(), ProvisionError> {
         let repository = request.repository.canonicalize()?;
         let git_control = repository.join(".git");

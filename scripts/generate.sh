@@ -8,5 +8,5 @@ fi
 
 output_dir=$1
 mkdir -p "$output_dir"
-cargo run --quiet -p fleet -- render bots/research.toml > "$output_dir/research.service"
+cargo run --quiet -p fleet -- render-all . "$output_dir" >/dev/null
 cargo run --quiet -p fleet -- render-gateway config/hermes-gateway.toml > "$output_dir/hermes-gateway.service"

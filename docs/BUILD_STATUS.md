@@ -289,12 +289,14 @@ executable lines, and 100% (56/56) configured critical branch outcomes.
 
 Known gaps and external gates:
 
-- PR #1 exists and all intended PR check names have appeared, but the latest
-  revision is not yet fully green. Protection will not be installed until those
-  names pass, avoiding a repository deadlock; the actual returned protection
-  payload will be saved here afterward.
-- Merge-tier Linux sanitizers, mutation, hosted ARM64, and fuzz jobs are
-  configured but are not claimed as executed on this macOS host.
+- At exact head `47d0f77cc21365f0e215da3efb41ce7b3730494d`,
+  [PR run `33116192616`](https://github.com/nickderaj/nswarm/actions/runs/33116192616)
+  passed all eight PR jobs and
+  [merge-tier run `33116222424`](https://github.com/nickderaj/nswarm/actions/runs/33116222424)
+  passed Miri, AddressSanitizer, LeakSanitizer, hosted ARM64, and mutation. A
+  follow-up independent review arrived before protection was installed and the
+  current repairs will supersede that head; protection remains deferred until
+  the repaired exact head passes, avoiding stale required-check evidence.
 - GitHub reports no registered self-hosted runner. A personal public repository
   cannot restrict a Pi runner to trusted workflows, so physical Pi execution is
   blocked until an organization runner group or equivalent ephemeral external
@@ -325,3 +327,40 @@ git push origin overnight/bootstrap
 
 Then query the new PR workflow run, inspect every complete job log, and repair
 any remaining GitHub-only failure before applying branch protection.
+
+## Checkpoint L — follow-up audit CI and fleet hardening
+
+The independent follow-up findings and their reproduced severity/disposition
+are recorded in [`docs/AUDIT.md`](AUDIT.md). This checkpoint repairs the
+findings that are composable without the pending control-store schema migration:
+
+- systemd generation derives every bot unit from the manifest inventory rather
+  than naming `research.toml`; a two-manifest regression proves complete,
+  deterministic rendering;
+- bot units add `UMask=0077`, `SystemCallFilter=@system-service`, and systemd
+  non-loopback IP denial while retaining loopback Hermes access;
+- gateway credentials use an exact model-provider allowlist, secret environment
+  values cannot end in a continuation backslash, and deny paths cannot contain
+  writable roots as either descendants or ancestors;
+- critical coverage is source-marked instead of substring-selected, requires at
+  least 30 compiled functions, rejects zero totals and structural mismatches,
+  safely aggregates duplicate linked copies, and reports each uncovered branch
+  with source coordinates;
+- new negative tests retain all 34 critical functions and close every newly
+  exposed outcome rather than shrinking the coverage set.
+
+Fresh local evidence before checkpointing: 71 workspace tests pass; strict
+Clippy passes; policy scans 88 files; both profiles validate; the current nine
+eval checks pass; generated output matches the temporary regeneration (the
+pre-commit cleanliness guard correctly reports the intentional checked-in
+service update); repository line coverage is 97.11%, changed executable-line
+coverage is 97.07%, every crate exceeds 90%, and critical branch coverage is
+100% (232/232 across 34 marked functions).
+
+The active blockers before protection remain the current exact-head GitHub
+runs and the unsatisfiable CODEOWNER-review requirement on a repository whose
+only collaborator is the PR author. The multi-unit/dependency schema,
+attributed verdict authority, Git subprocess isolation, recovery transitions,
+capability-backed store authorization, job-scoped topology leases, and real
+Rust-driven eval corpus remain active audit findings; none is claimed repaired
+by this checkpoint.

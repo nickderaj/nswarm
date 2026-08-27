@@ -84,6 +84,7 @@ impl ControlStore {
     /// # Errors
     ///
     /// Returns [`StoreError`] for an unsupported prior version or SQL failure.
+    // coverage-critical
     pub fn migrate(&mut self) -> Result<(), StoreError> {
         self.connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         let version = self
@@ -313,6 +314,7 @@ impl ControlStore {
     /// # Errors
     ///
     /// Returns [`StoreError`] for stale SHA evidence or the wrong state.
+    // coverage-critical
     pub fn record_verdict(
         &mut self,
         unit_id: &UnitId,
@@ -373,6 +375,7 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] when prose is the only evidence or the verdict is
     /// stale or failing.
+    // coverage-critical
     pub fn accept_verdict(
         &mut self,
         unit_id: &UnitId,
@@ -471,6 +474,7 @@ impl ControlStore {
     /// # Errors
     ///
     /// Returns [`StoreError`] for an unverified, stale, or unauthorized SHA.
+    // coverage-critical
     pub fn authorize_merge(
         &mut self,
         unit_id: &UnitId,
@@ -529,6 +533,7 @@ impl ControlStore {
     /// # Errors
     ///
     /// Returns [`StoreError`] for a stale SHA or missing authorization.
+    // coverage-critical
     pub fn record_merged(
         &mut self,
         unit_id: &UnitId,
@@ -588,6 +593,7 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] when another live lease overlaps or expiry is not
     /// in the future.
+    // coverage-critical
     pub fn acquire_lease(
         &mut self,
         job_id: &JobId,
@@ -665,6 +671,7 @@ impl ControlStore {
     ///
     /// Returns [`StoreError::StaleLease`] for missing, released, or expired
     /// leases.
+    // coverage-critical
     pub fn accept_worker_result(
         &mut self,
         unit_id: &UnitId,
@@ -980,6 +987,7 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] for an unauthorized coordinator, unknown active
     /// grant, conflicting idempotency key, or database failure.
+    // coverage-critical
     pub fn revoke_credential_grant(
         &mut self,
         job_id: &JobId,
@@ -1028,6 +1036,7 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] unless branch namespace and base SHA exactly match
     /// the immutable job record and the worktree path is absolute.
+    // coverage-critical
     pub fn register_branch(
         &mut self,
         unit_id: &UnitId,
@@ -1079,6 +1088,7 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] outside coding states, for an unknown branch, or
     /// when the caller's expected head is stale.
+    // coverage-critical
     pub fn update_branch_head(
         &mut self,
         unit_id: &UnitId,
@@ -1135,6 +1145,7 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] for an unsafe path, stale source SHA, duplicate,
     /// or database failure.
+    // coverage-critical
     pub fn record_artifact(
         &mut self,
         unit_id: &UnitId,
@@ -1200,6 +1211,7 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] unless the unit is in review, the SHA is current,
     /// and the profile has the verifier/reviewer role for the same job.
+    // coverage-critical
     pub fn record_review(
         &mut self,
         unit_id: &UnitId,
@@ -1261,6 +1273,7 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] for the wrong state, unauthorized profile, stale
     /// or already-disposed finding, or persistence failure.
+    // coverage-critical
     pub fn dispose_review_finding(
         &mut self,
         unit_id: &UnitId,
@@ -1347,6 +1360,7 @@ fn candidate_sha_tx(
         .ok_or(StoreError::MissingCandidate)
 }
 
+// coverage-critical
 fn require_passing_verdict_tx(
     transaction: &rusqlite::Transaction<'_>,
     unit_id: &UnitId,
@@ -1366,6 +1380,7 @@ fn require_passing_verdict_tx(
     }
 }
 
+// coverage-critical
 fn require_review_gate_tx(
     transaction: &rusqlite::Transaction<'_>,
     unit_id: &UnitId,
@@ -1408,6 +1423,7 @@ fn update_state_tx(
     Ok(())
 }
 
+// coverage-critical
 fn append_event_tx(
     transaction: &rusqlite::Transaction<'_>,
     job_id: &JobId,
@@ -1454,6 +1470,7 @@ fn path_resources_overlap(left: &str, right: &str) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
+// coverage-critical
 fn is_safe_relative_path(path: &Path) -> bool {
     !path.as_os_str().is_empty()
         && !path.is_absolute()
@@ -1462,6 +1479,7 @@ fn is_safe_relative_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+// coverage-critical
 fn is_normalized_absolute_path(path: &Path) -> bool {
     path.is_absolute()
         && !path
@@ -1469,6 +1487,7 @@ fn is_normalized_absolute_path(path: &Path) -> bool {
             .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
 }
 
+// coverage-critical
 fn redact_evidence(value: &Value) -> Value {
     match value {
         Value::Object(object) => Value::Object(
@@ -1511,6 +1530,7 @@ fn redact_evidence(value: &Value) -> Value {
     }
 }
 
+// coverage-critical
 fn contains_secret_shape(text: &str) -> bool {
     let upper = text.to_ascii_uppercase();
     upper.contains("PRIVATE KEY")
@@ -1862,7 +1882,7 @@ mod tests {
 
     use super::{
         ControlStore, FindingDisposition, ReviewAssessment, SCHEMA, StoreError,
-        contains_secret_shape,
+        contains_secret_shape, is_safe_relative_path,
     };
     use crate::{
         ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
@@ -2087,6 +2107,20 @@ mod tests {
     }
 
     #[test]
+    fn migration_refuses_a_newer_unknown_schema() {
+        let connection = rusqlite::Connection::open_in_memory().expect("connection opens");
+        connection
+            .pragma_update(None, "user_version", super::SCHEMA_VERSION + 1)
+            .expect("future version set");
+        let mut store = ControlStore { connection };
+        assert!(matches!(
+            store.migrate(),
+            Err(StoreError::UnsupportedSchema(version))
+                if version == super::SCHEMA_VERSION + 1
+        ));
+    }
+
+    #[test]
     fn missing_brief_fields_refuse_creation() {
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let mut invalid = brief();
@@ -2190,6 +2224,169 @@ mod tests {
                 18,
             ),
             Err(StoreError::InvalidTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn verification_guards_reject_wrong_states_and_failed_evidence() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let unit = brief.unit_id.clone();
+        let candidate = sha('b');
+        store.create_job(&brief, 1).expect("job created");
+        assert!(matches!(
+            store.record_verdict(&unit, &candidate, true, &json!({}), "too-early", 2),
+            Err(StoreError::InvalidTransition { .. })
+        ));
+        assert!(matches!(
+            store.accept_verdict(&unit, "too-early-accept", 2),
+            Err(StoreError::InvalidTransition { .. })
+        ));
+        advance_to_self_verifying(&mut store, &unit);
+        store
+            .record_candidate(&unit, &candidate, "failed-candidate", 7)
+            .expect("candidate recorded");
+        store
+            .transition(
+                &unit,
+                JobState::IndependentlyVerifying,
+                "failed-verification-started",
+                8,
+            )
+            .expect("verification starts");
+        store
+            .record_verdict(
+                &unit,
+                &candidate,
+                false,
+                &json!({"result": "failed"}),
+                "failed-verdict",
+                9,
+            )
+            .expect("failing verdict is durable");
+        assert!(matches!(
+            store.accept_verdict(&unit, "failed-accept", 10),
+            Err(StoreError::MissingPassingVerdict(head)) if head == candidate
+        ));
+
+        let reviewer = ProfileId::new("stale-reviewer").expect("reviewer id");
+        store
+            .register_profile(
+                &reviewer,
+                &brief.job_id,
+                &unit,
+                Role::VerifierReviewer,
+                std::path::Path::new("/tmp/nswarm-stale-reviewer"),
+                10,
+            )
+            .expect("reviewer registered");
+        assert!(matches!(
+            store.record_review(
+                &unit,
+                &reviewer,
+                &sha('c'),
+                ReviewAssessment::Noted,
+                &json!({}),
+                11,
+            ),
+            Err(StoreError::StaleVerification { .. })
+        ));
+    }
+
+    #[test]
+    fn low_risk_and_reverified_integration_paths_are_explicit() {
+        let candidate = sha('b');
+        let mut low_risk = brief();
+        low_risk.risk_class = RiskClass::Low;
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        prepare_reviewing_candidate(&mut store, &low_risk, &candidate);
+        assert_eq!(
+            store
+                .accept_verdict(&low_risk.unit_id, "low-risk-accepted", 10)
+                .expect("low risk needs no reviewer quorum"),
+            JobState::Verified
+        );
+
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        prepare_reviewing_candidate(&mut store, &brief, &candidate);
+        record_two_reviews(&mut store, &brief, &candidate, 10);
+        store
+            .connection
+            .execute(
+                "UPDATE units SET integration_sha = ?1 WHERE unit_id = ?2",
+                rusqlite::params![candidate.as_str(), brief.unit_id.as_str()],
+            )
+            .expect("model a reverified integration candidate");
+        assert_eq!(
+            store
+                .accept_verdict(&brief.unit_id, "integration-reverified", 16)
+                .expect("exact integration SHA is restored"),
+            JobState::Integrated
+        );
+    }
+
+    #[test]
+    fn review_and_path_guards_fail_before_mutation() {
+        assert!(is_safe_relative_path(std::path::Path::new(
+            "crates/assigned"
+        )));
+        for path in ["", "/absolute", "crates/../sibling"] {
+            assert!(!is_safe_relative_path(std::path::Path::new(path)));
+        }
+
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let reviewer = ProfileId::new("early-reviewer").expect("reviewer id");
+        let integrator = ProfileId::new("early-integrator").expect("integrator id");
+        for (profile, role, home) in [
+            (
+                &reviewer,
+                Role::VerifierReviewer,
+                "/tmp/nswarm-early-reviewer",
+            ),
+            (
+                &integrator,
+                Role::Integrator,
+                "/tmp/nswarm-early-integrator",
+            ),
+        ] {
+            store
+                .register_profile(
+                    profile,
+                    &brief.job_id,
+                    &brief.unit_id,
+                    role,
+                    std::path::Path::new(home),
+                    2,
+                )
+                .expect("profile registered");
+        }
+        assert!(matches!(
+            store.record_review(
+                &brief.unit_id,
+                &reviewer,
+                &sha('b'),
+                ReviewAssessment::Noted,
+                &json!({}),
+                3,
+            ),
+            Err(StoreError::ReviewOutsideReviewState)
+        ));
+        assert!(matches!(
+            store.dispose_review_finding(
+                &brief.unit_id,
+                &integrator,
+                &FindingDisposition {
+                    finding_id: 1,
+                    disposition: ReviewAssessment::Noted,
+                    rationale: &json!({}),
+                    idempotency_key: "early-disposition",
+                },
+                3,
+            ),
+            Err(StoreError::ReviewOutsideReviewState)
         ));
     }
 
@@ -2407,6 +2604,31 @@ mod tests {
                 "claim-1",
                 "claim",
                 &json!({"kind": "different"}),
+                3,
+            ),
+            Err(StoreError::IdempotencyConflict(key)) if key == "claim-1"
+        ));
+        assert!(matches!(
+            store.append_event(
+                &brief.job_id,
+                "claim-1",
+                "different-type",
+                &json!({"kind": "direct"}),
+                3,
+            ),
+            Err(StoreError::IdempotencyConflict(key)) if key == "claim-1"
+        ));
+
+        let mut other = brief.clone();
+        other.job_id = JobId::new("job-2").expect("other job");
+        other.unit_id = UnitId::new("unit-2").expect("other unit");
+        store.create_job(&other, 3).expect("other job created");
+        assert!(matches!(
+            store.append_event(
+                &other.job_id,
+                "claim-1",
+                "claim",
+                &json!({"kind": "direct"}),
                 3,
             ),
             Err(StoreError::IdempotencyConflict(key)) if key == "claim-1"
@@ -2889,13 +3111,18 @@ mod tests {
             )
             .expect("integrator registered");
         for (index, finding) in findings.into_iter().enumerate() {
+            let disposition = if index == 0 {
+                ReviewAssessment::Blocking
+            } else {
+                ReviewAssessment::Noted
+            };
             store
                 .dispose_review_finding(
                     &unit,
                     &integrator,
                     &FindingDisposition {
                         finding_id: finding,
-                        disposition: ReviewAssessment::Noted,
+                        disposition,
                         rationale: &json!({"reason": "accepted with evidence"}),
                         idempotency_key: &format!("integrator-disposition-{index}"),
                     },
@@ -2919,12 +3146,14 @@ mod tests {
                 ));
             }
         }
-        assert_eq!(
-            store
-                .accept_verdict(&unit, "disposed-accept", 22)
-                .expect("disposed reviews accepted"),
-            JobState::Verified
-        );
+        assert!(matches!(
+            store.accept_verdict(&unit, "blocking-accept", 22),
+            Err(StoreError::ReviewGateUnsatisfied {
+                reviewers: 2,
+                unresolved: 0,
+                blocking: 1
+            })
+        ));
     }
 
     #[test]

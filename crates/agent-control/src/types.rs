@@ -120,6 +120,7 @@ pub struct PathPolicy {
 impl PathPolicy {
     /// Checks whether a repository-relative path may be read.
     #[must_use]
+    // coverage-critical
     pub fn can_read(&self, path: &Path) -> bool {
         require_safe_relative(path).is_ok()
             && contains_path(&self.readable, path)
@@ -128,6 +129,7 @@ impl PathPolicy {
 
     /// Checks whether a repository-relative path may be written.
     #[must_use]
+    // coverage-critical
     pub fn can_write(&self, path: &Path) -> bool {
         require_safe_relative(path).is_ok()
             && contains_path(&self.writable, path)
@@ -324,6 +326,7 @@ impl JobBrief {
     ///
     /// Returns [`BriefError`] rather than allowing a worker to infer a missing
     /// goal, scope, proof, resource, network, credential, or report contract.
+    // coverage-critical
     pub fn validate(&self) -> Result<(), BriefError> {
         if self.goal.trim().is_empty() {
             return Err(BriefError::EmptyGoal);
@@ -552,6 +555,7 @@ impl ArtifactKind {
 }
 
 /// Validates the bounded JSON-Schema subset accepted for worker reports.
+// coverage-critical
 pub fn validate_report_schema(schema: &Value) -> bool {
     schema.as_object().is_some_and(|object| {
         object.get("type").and_then(Value::as_str) == Some("object")
@@ -560,6 +564,7 @@ pub fn validate_report_schema(schema: &Value) -> bool {
 }
 
 /// Checks a report recursively against a previously validated schema.
+// coverage-critical
 pub fn report_matches_schema(schema: &Value, report: &Value) -> bool {
     matches_schema_node(schema, report, 0)
 }
@@ -701,6 +706,7 @@ fn overlaps_any(roots: &[PathBuf], path: &Path) -> bool {
         .any(|root| path.starts_with(root) || root.starts_with(path))
 }
 
+// coverage-critical
 fn require_safe_relative(path: &Path) -> Result<(), BriefError> {
     if path.as_os_str().is_empty()
         || path.is_absolute()
@@ -854,6 +860,8 @@ mod tests {
         assert!(!policy.can_read(Path::new("crates/assigned/../sibling")));
         assert!(!policy.can_read(Path::new("crates/sibling/src/lib.rs")));
         assert!(!policy.can_write(Path::new("crates/other/src/lib.rs")));
+        assert!(!policy.can_write(Path::new("")));
+        assert!(!policy.can_write(Path::new("/crates/assigned")));
     }
 
     #[test]
@@ -934,6 +942,14 @@ mod tests {
         assert_eq!(brief.validate(), Err(BriefError::InvalidRepository));
 
         let mut brief = valid_brief();
+        brief.repository = "file:///tmp/nswarm-fixture".to_owned();
+        assert!(brief.validate().is_ok());
+
+        let mut brief = valid_brief();
+        brief.repository = "https://example.invalid/has whitespace".to_owned();
+        assert_eq!(brief.validate(), Err(BriefError::InvalidRepository));
+
+        let mut brief = valid_brief();
         brief.paths.readable.clear();
         assert_eq!(brief.validate(), Err(BriefError::EmptyPathPolicy));
 
@@ -961,6 +977,10 @@ mod tests {
 
         let mut brief = valid_brief();
         brief.acceptance_criteria = vec![" ".to_owned()];
+        assert_eq!(brief.validate(), Err(BriefError::EmptyAcceptanceCriteria));
+
+        let mut brief = valid_brief();
+        brief.acceptance_criteria.clear();
         assert_eq!(brief.validate(), Err(BriefError::EmptyAcceptanceCriteria));
 
         let mut brief = valid_brief();

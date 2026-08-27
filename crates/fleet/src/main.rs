@@ -6,7 +6,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use fleet::{
-    BotManifest, GatewayManifest, parse_secret_source, plan_repository, validate_repository,
+    BotManifest, GatewayManifest, parse_secret_source, plan_repository, render_repository_units,
+    validate_repository,
 };
 
 fn main() -> ExitCode {
@@ -24,9 +25,9 @@ fn main() -> ExitCode {
 
 fn run(args: impl Iterator<Item = String>) -> Result<String, String> {
     let args = args.collect::<Vec<_>>();
-    let (command, rest) = args
-        .split_first()
-        .ok_or_else(|| "usage: fleet <check|validate|render|render-gateway|plan> ...".to_owned())?;
+    let (command, rest) = args.split_first().ok_or_else(|| {
+        "usage: fleet <check|validate|render|render-all|render-gateway|plan> ...".to_owned()
+    })?;
     match command.as_str() {
         "check" if rest.len() <= 1 => {
             let root = rest.first().map_or(".", String::as_str);
@@ -56,6 +57,17 @@ fn run(args: impl Iterator<Item = String>) -> Result<String, String> {
                 .and_then(|manifest| manifest.render_diff(&installed))
                 .map_err(|error| error.to_string())
         }
+        "render-all" if rest.len() == 2 => {
+            let output = Path::new(&rest[1]);
+            fs::create_dir_all(output).map_err(|error| error.to_string())?;
+            let units =
+                render_repository_units(Path::new(&rest[0])).map_err(|error| error.to_string())?;
+            for (name, unit) in &units {
+                fs::write(output.join(format!("{name}.service")), unit)
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(format!("{} unit(s) rendered\n", units.len()))
+        }
         "render-gateway" if rest.len() == 1 => {
             let source = read(&rest[0])?;
             GatewayManifest::parse(&source)
@@ -68,7 +80,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<String, String> {
             plan_repository(Path::new(&rest[1]), Path::new(&rest[2]), &secrets)
                 .map_err(|error| error.to_string())
         }
-        "check" | "validate" | "render" | "render-gateway" | "plan" => {
+        "check" | "validate" | "render" | "render-all" | "render-gateway" | "plan" => {
             Err(format!("unexpected arguments for {command}"))
         }
         _ => Err(format!("unknown command: {command}")),
@@ -203,6 +215,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
                 "--wrong",
                 path.to_str().expect("UTF-8 path"),
             ],
+            vec!["render-all", ".", ".", "extra"],
             vec![
                 "plan",
                 "--wrong",
@@ -226,6 +239,17 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         let output = run(["check".to_owned(), root.display().to_string()].into_iter())
             .expect("fleet check succeeds");
         assert_eq!(output, "1 manifest(s): research\n");
+
+        let rendered = TempDir::new().expect("temporary rendered directory");
+        let output = run([
+            "render-all".to_owned(),
+            root.display().to_string(),
+            rendered.path().display().to_string(),
+        ]
+        .into_iter())
+        .expect("all units render");
+        assert_eq!(output, "1 unit(s) rendered\n");
+        assert!(rendered.path().join("research.service").is_file());
     }
 
     #[test]

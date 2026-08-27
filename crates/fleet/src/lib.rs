@@ -129,6 +129,7 @@ impl BotManifest {
     ///
     /// Returns [`ManifestError`] when identity, path, ACL, secret, governance,
     /// or resource policy is invalid.
+    // coverage-critical
     pub fn validate(&self) -> Result<(), ManifestError> {
         validate_identifier("bot.name", &self.bot.name)?;
         validate_identifier("bot.crate", &self.bot.crate_name)?;
@@ -148,7 +149,11 @@ impl BotManifest {
         }
         for path in &self.sandbox.deny_paths {
             require_absolute("sandbox.deny_paths", path)?;
-            if path.starts_with(&self.bot.state) || path.starts_with(&self.bot.data) {
+            if path.starts_with(&self.bot.state)
+                || self.bot.state.starts_with(path)
+                || path.starts_with(&self.bot.data)
+                || self.bot.data.starts_with(path)
+            {
                 return Err(ManifestError::DeniedWritableRoot(path.clone()));
             }
         }
@@ -215,6 +220,7 @@ impl BotManifest {
             "RuntimeDirectoryMode=0750".to_owned(),
             "Restart=on-failure".to_owned(),
             "RestartSec=5s".to_owned(),
+            "UMask=0077".to_owned(),
             "NoNewPrivileges=true".to_owned(),
             "CapabilityBoundingSet=".to_owned(),
             "AmbientCapabilities=".to_owned(),
@@ -231,7 +237,10 @@ impl BotManifest {
             "MemoryDenyWriteExecute=true".to_owned(),
             "RestrictRealtime=true".to_owned(),
             "SystemCallArchitectures=native".to_owned(),
+            "SystemCallFilter=@system-service".to_owned(),
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6".to_owned(),
+            "IPAddressDeny=any".to_owned(),
+            "IPAddressAllow=localhost".to_owned(),
             format!("MemoryMax={}", self.sandbox.memory_max),
             format!("CPUQuota={}", self.sandbox.cpu_quota),
             format!(
@@ -291,6 +300,7 @@ impl BotManifest {
     ///
     /// Returns [`ManifestError`] for a missing variable or a value containing a
     /// newline or NUL byte.
+    // coverage-critical
     pub fn render_environment(
         &self,
         source: &BTreeMap<String, String>,
@@ -303,7 +313,7 @@ impl BotManifest {
             let value = source
                 .get(&name)
                 .ok_or_else(|| ManifestError::MissingSecret(name.clone()))?;
-            if value.contains(['\n', '\r', '\0']) {
+            if value.contains(['\n', '\r', '\0']) || value.ends_with('\\') {
                 return Err(ManifestError::UnsafeSecretValue(name));
             }
             rendered.push(format!("{name}={value}"));
@@ -367,6 +377,7 @@ impl BotManifest {
 ///
 /// Returns [`ManifestError`] for malformed lines, duplicate names, or invalid
 /// portable environment names.
+// coverage-critical
 pub fn parse_secret_source(source: &str) -> Result<BTreeMap<String, String>, ManifestError> {
     let mut values = BTreeMap::new();
     for (index, line) in source.lines().enumerate() {
@@ -425,6 +436,24 @@ pub fn discover_manifests(
         }
     }
     Ok(manifests)
+}
+
+/// Renders every discovered bot unit in deterministic manifest order.
+///
+/// # Errors
+///
+/// Returns [`ManifestError`] if inventory discovery or any manifest/render
+/// contract fails.
+pub fn render_repository_units(
+    repository_root: &Path,
+) -> Result<Vec<(String, String)>, ManifestError> {
+    discover_manifests(repository_root)?
+        .into_iter()
+        .map(|(_, manifest)| {
+            let name = manifest.bot.name.clone();
+            Ok((name, manifest.render_unit()?))
+        })
+        .collect()
 }
 
 /// Plans every manifest against an explicit host root without mutation.
@@ -540,6 +569,7 @@ impl GatewayManifest {
     /// # Errors
     ///
     /// Returns [`ManifestError`] when the gateway would be over-privileged.
+    // coverage-critical
     pub fn validate(&self) -> Result<(), ManifestError> {
         validate_identifier("user", &self.user)?;
         if self.user != "hermes-gateway" {
@@ -578,6 +608,7 @@ impl GatewayManifest {
     }
 }
 
+// coverage-critical
 fn validate_identifier(field: &'static str, value: &str) -> Result<(), ManifestError> {
     if value.is_empty()
         || !value
@@ -602,6 +633,7 @@ fn require_absolute(field: &'static str, path: &Path) -> Result<(), ManifestErro
     Ok(())
 }
 
+// coverage-critical
 fn require_safe_relative(field: &'static str, path: &Path) -> Result<(), ManifestError> {
     if path.is_absolute()
         || path.as_os_str().is_empty()
@@ -625,21 +657,9 @@ fn is_environment_name(value: &str) -> bool {
         && value.as_bytes()[0].is_ascii_uppercase()
 }
 
+// coverage-critical
 fn is_model_credential(value: &str) -> bool {
-    const FORBIDDEN_FRAGMENTS: [&str; 8] = [
-        "TELEGRAM",
-        "DATABASE",
-        "TRADING",
-        "DATABENTO",
-        "WIREGUARD",
-        "QBITTORRENT",
-        "SSH",
-        "OWNER",
-    ];
-    !FORBIDDEN_FRAGMENTS
-        .iter()
-        .any(|fragment| value.contains(fragment))
-        && (value.ends_with("API_KEY") || value.ends_with("TOKEN"))
+    matches!(value, "OPENROUTER_API_KEY" | "XAI_API_KEY")
 }
 
 /// Manifest parsing and policy failures.
@@ -744,7 +764,7 @@ mod tests {
 
     use super::{
         BotManifest, GatewayManifest, ManifestError, discover_manifests, parse_secret_source,
-        plan_repository, validate_repository,
+        plan_repository, render_repository_units, validate_repository,
     };
 
     const MANIFEST: &str = r#"
@@ -793,6 +813,10 @@ deny_paths = ["/srv/nswarm/tutor"]
             "NoNewPrivileges=true",
             "CapabilityBoundingSet=",
             "ProtectSystem=strict",
+            "UMask=0077",
+            "SystemCallFilter=@system-service",
+            "IPAddressDeny=any",
+            "IPAddressAllow=localhost",
             "ReadWritePaths=/var/lib/gym-agent /srv/nswarm/gym",
             "InaccessiblePaths=/srv/nswarm/tutor",
         ] {
@@ -848,6 +872,17 @@ deny_paths = ["/srv/nswarm/tutor"]
                 Err(ManifestError::DeniedWritableRoot(path)) if path == denied
             ));
         }
+        for denied_parent in [
+            manifest.bot.state.parent().expect("state parent"),
+            manifest.bot.data.parent().expect("data parent"),
+        ] {
+            let mut candidate = manifest.clone();
+            candidate.sandbox.deny_paths = vec![denied_parent.to_path_buf()];
+            assert!(matches!(
+                candidate.validate(),
+                Err(ManifestError::DeniedWritableRoot(path)) if path == denied_parent
+            ));
+        }
         for resource in ["memory", "cpu"] {
             let mut candidate = manifest.clone();
             match resource {
@@ -887,6 +922,35 @@ deny_paths = ["/srv/nswarm/tutor"]
     }
 
     #[test]
+    fn manifest_identity_and_collection_guards_are_independent() {
+        let manifest = BotManifest::parse(MANIFEST).expect("manifest validates");
+        let mut candidate = manifest.clone();
+        candidate.bot.data = candidate.bot.state.clone();
+        assert!(matches!(
+            candidate.validate(),
+            Err(ManifestError::OverlappingWritableRoots)
+        ));
+        let mut candidate = manifest.clone();
+        candidate.agent.toolsets.clear();
+        assert!(matches!(
+            candidate.validate(),
+            Err(ManifestError::EmptyToolsets)
+        ));
+        let mut candidate = manifest.clone();
+        candidate.secrets.allow = vec!["MODEL_TOKEN".to_owned(), "MODEL_TOKEN".to_owned()];
+        assert!(matches!(
+            candidate.validate(),
+            Err(ManifestError::DuplicateSecretName(name)) if name == "MODEL_TOKEN"
+        ));
+        let mut candidate = manifest;
+        candidate.bot.name = "boss".to_owned();
+        candidate.surface.peers.clear();
+        candidate
+            .validate()
+            .expect("boss has no required upstream peer");
+    }
+
+    #[test]
     fn worker_cannot_gain_a_sibling_peer() {
         let source = MANIFEST.replace(
             "peers = [\"boss-agent\"]",
@@ -912,6 +976,15 @@ secrets_allow = ["OPENROUTER_API_KEY", "TELEGRAM_BOT_TOKEN"]
             GatewayManifest::parse(source),
             Err(ManifestError::InvalidGatewaySecret(secret)) if secret == "TELEGRAM_BOT_TOKEN"
         ));
+        for secret in ["ERROR_BOT_TOKEN", "LOG_BOT_TOKEN", "GITHUB_TOKEN"] {
+            let source = source
+                .replace("OPENROUTER_API_KEY", secret)
+                .replace(", \"TELEGRAM_BOT_TOKEN\"", "");
+            assert!(matches!(
+                GatewayManifest::parse(&source),
+                Err(ManifestError::InvalidGatewaySecret(rejected)) if rejected == secret
+            ));
+        }
 
         for revision in ["main", "master", "release-*"] {
             let source = source
@@ -922,13 +995,28 @@ secrets_allow = ["OPENROUTER_API_KEY", "TELEGRAM_BOT_TOKEN"]
                 Err(ManifestError::UnpinnedRevision)
             ));
         }
-        let source = source
+        let invalid_source = source
             .replace("v2026.8.19", "v1")
             .replace("OPENROUTER_API_KEY", "invalid-name")
             .replace(", \"TELEGRAM_BOT_TOKEN\"", "");
         assert!(matches!(
-            GatewayManifest::parse(&source),
+            GatewayManifest::parse(&invalid_source),
             Err(ManifestError::InvalidGatewaySecret(secret)) if secret == "invalid-name"
+        ));
+        let source = source
+            .replace("OPENROUTER_API_KEY", "XAI_API_KEY")
+            .replace(", \"TELEGRAM_BOT_TOKEN\"", "");
+        GatewayManifest::parse(&source).expect("XAI is an explicitly allowed model credential");
+
+        let wrong_user = source.replace("user = \"hermes-gateway\"", "user = \"model-gateway\"");
+        assert!(matches!(
+            GatewayManifest::parse(&wrong_user),
+            Err(ManifestError::InvalidGatewayUser)
+        ));
+        let invalid_port = source.replace("port = 8642", "port = 0");
+        assert!(matches!(
+            GatewayManifest::parse(&invalid_port),
+            Err(ManifestError::InvalidGatewayPort)
         ));
     }
 
@@ -998,6 +1086,73 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             parse_secret_source("VALID=unsafe\rvalue\n"),
             Err(ManifestError::UnsafeSecretValue(name)) if name == "VALID"
         ));
+        assert_eq!(
+            parse_secret_source("\nVALID=value\n\n").expect("empty lines are ignored")["VALID"],
+            "value"
+        );
+        let manifest = BotManifest::parse(MANIFEST).expect("manifest validates");
+        let values = BTreeMap::from([
+            ("GYM_BOT_TOKEN".to_owned(), "continued\\".to_owned()),
+            ("OPENROUTER_API_KEY".to_owned(), "safe".to_owned()),
+        ]);
+        assert!(matches!(
+            manifest.render_environment(&values),
+            Err(ManifestError::UnsafeSecretValue(name)) if name == "GYM_BOT_TOKEN"
+        ));
+        for unsafe_value in ["embedded\nnewline", "embedded\0nul"] {
+            let values = BTreeMap::from([
+                ("GYM_BOT_TOKEN".to_owned(), unsafe_value.to_owned()),
+                ("OPENROUTER_API_KEY".to_owned(), "safe".to_owned()),
+            ]);
+            assert!(matches!(
+                manifest.render_environment(&values),
+                Err(ManifestError::UnsafeSecretValue(name)) if name == "GYM_BOT_TOKEN"
+            ));
+        }
+        let mut no_secrets = manifest;
+        no_secrets.secrets.allow.clear();
+        assert_eq!(
+            no_secrets
+                .render_environment(&BTreeMap::new())
+                .expect("empty allowlist renders no environment"),
+            ""
+        );
+    }
+
+    #[test]
+    fn repository_unit_rendering_cannot_omit_a_manifest() {
+        let repository = TempDir::new().expect("temporary repository");
+        let bots = repository.path().join("bots");
+        fs::create_dir(&bots).expect("create bot inventory");
+        fs::write(bots.join("gym.toml"), MANIFEST).expect("write gym manifest");
+        fs::write(
+            bots.join("coach.toml"),
+            MANIFEST
+                .replace("name = \"gym\"", "name = \"coach\"")
+                .replace("user = \"gym-agent\"", "user = \"coach-agent\"")
+                .replace("prefix = \"/opt/gym\"", "prefix = \"/opt/coach\"")
+                .replace(
+                    "state = \"/var/lib/gym-agent\"",
+                    "state = \"/var/lib/coach-agent\"",
+                )
+                .replace("data = \"/srv/nswarm/gym\"", "data = \"/srv/nswarm/coach\"")
+                .replace(
+                    "socket = \"/run/gym/mcp.sock\"",
+                    "socket = \"/run/coach/mcp.sock\"",
+                )
+                .replace("profile = \"gym\"", "profile = \"coach\""),
+        )
+        .expect("write coach manifest");
+        let rendered = render_repository_units(repository.path()).expect("render inventory");
+        assert_eq!(
+            rendered
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["coach", "gym"]
+        );
+        assert!(rendered[0].1.contains("Description=nswarm coach bot"));
+        assert!(rendered[1].1.contains("Description=nswarm gym bot"));
     }
 
     #[test]
