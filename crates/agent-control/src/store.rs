@@ -1,15 +1,16 @@
-use std::path::Path;
+use std::path::{Component, Path};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::types::BriefError;
+use crate::types::{BriefError, report_matches_schema};
 use crate::{
-    JobBrief, JobId, JobState, LeaseKind, ProfileId, RiskClass, Role, SessionId, Sha, UnitId,
+    ArtifactKind, JobBrief, JobId, JobState, LeaseKind, ProfileId, RiskClass, Role, SessionId, Sha,
+    UnitId,
 };
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Reviewer assessment recorded against one exact candidate SHA.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +116,15 @@ impl ControlStore {
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(MIGRATION_3)?;
+            transaction.pragma_update(None, "user_version", 3_i64)?;
+            transaction.commit()?;
+            version = 3;
+        }
+        if version == 3 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(MIGRATION_4)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
         }
@@ -746,19 +756,7 @@ impl ControlStore {
             |row| row.get(0),
         )?;
         let brief: JobBrief = serde_json::from_str(&brief_json)?;
-        let report_object = report
-            .as_object()
-            .ok_or(StoreError::ReportSchemaViolation)?;
-        let required = brief
-            .report_schema
-            .get("required")
-            .and_then(Value::as_array)
-            .ok_or(StoreError::ReportSchemaViolation)?;
-        if required.iter().any(|field| {
-            field
-                .as_str()
-                .is_none_or(|name| !report_object.contains_key(name))
-        }) {
+        if !report_matches_schema(&brief.report_schema, report) {
             return Err(StoreError::ReportSchemaViolation);
         }
         let id = append_event_tx(
@@ -1120,25 +1118,47 @@ impl ControlStore {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] for blank kind/path or database failure.
+    /// Returns [`StoreError`] for an unsafe path, stale source SHA, duplicate,
+    /// or database failure.
     pub fn record_artifact(
         &mut self,
         unit_id: &UnitId,
-        kind: &str,
+        kind: ArtifactKind,
         path: &Path,
+        head_sha: &Sha,
         digest: &Sha,
         now: i64,
     ) -> Result<i64, StoreError> {
-        if kind.trim().is_empty() || path.as_os_str().is_empty() {
+        if path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
             return Err(StoreError::InvalidArtifact);
         }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (job_id, _) = unit_identity_tx(&transaction, unit_id)?;
+        let current: String = transaction.query_row(
+            "SELECT COALESCE(candidate_sha, base_sha) FROM units WHERE unit_id = ?1",
+            [unit_id.as_str()],
+            |row| row.get(0),
+        )?;
+        let current = Sha::new(current)?;
+        if current != *head_sha {
+            return Err(StoreError::StaleArtifact {
+                current,
+                artifact: head_sha.clone(),
+            });
+        }
         transaction.execute(
-            "INSERT INTO artifacts (unit_id, kind, path, digest, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![unit_id.as_str(), kind, path.to_string_lossy(), digest.as_str(), now],
+            "INSERT INTO artifacts (unit_id, kind, path, digest, created_at, head_sha) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![unit_id.as_str(), kind.as_str(), path.to_string_lossy(), digest.as_str(), now, head_sha.as_str()],
         )?;
         let artifact_id = transaction.last_insert_rowid();
         append_event_tx(
@@ -1146,7 +1166,13 @@ impl ControlStore {
             &job_id,
             &format!("artifact-recorded:{artifact_id}"),
             "artifact-recorded",
-            &json!({"unit_id": unit_id.as_str(), "artifact_id": artifact_id, "digest": digest.as_str()}),
+            &json!({
+                "unit_id": unit_id.as_str(),
+                "artifact_id": artifact_id,
+                "kind": kind.as_str(),
+                "head_sha": head_sha.as_str(),
+                "digest": digest.as_str()
+            }),
             now,
         )?;
         transaction.commit()?;
@@ -1575,9 +1601,17 @@ pub enum StoreError {
     /// The requested grant does not exist or was already revoked.
     #[error("credential grant is not active: {0}")]
     UnknownActiveCredentialGrant(String),
-    /// Artifact kind and path are required evidence fields.
-    #[error("artifact kind and path must not be empty")]
+    /// Artifact paths are safe repository-relative evidence locations.
+    #[error("artifact path must be safe and repository-relative")]
     InvalidArtifact,
+    /// Artifact evidence belongs to a different source revision.
+    #[error("artifact SHA {artifact} is stale; current unit SHA is {current}")]
+    StaleArtifact {
+        /// Current base or candidate revision.
+        current: Sha,
+        /// Revision asserted by the artifact.
+        artifact: Sha,
+    },
     /// Reviews are accepted only during the explicit review state.
     #[error("review was submitted outside the reviewing state")]
     ReviewOutsideReviewState,
@@ -1750,6 +1784,26 @@ ALTER TABLE sessions
 ADD COLUMN destroyed_at INTEGER;
 ";
 
+const MIGRATION_4: &str = r"
+ALTER TABLE artifacts RENAME TO artifacts_v3;
+
+CREATE TABLE artifacts (
+    artifact_id INTEGER PRIMARY KEY,
+    unit_id TEXT NOT NULL REFERENCES units(unit_id),
+    kind TEXT NOT NULL,
+    path TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    head_sha TEXT,
+    UNIQUE (unit_id, path, digest, head_sha)
+) STRICT;
+
+INSERT INTO artifacts (artifact_id, unit_id, kind, path, digest, created_at)
+SELECT artifact_id, unit_id, kind, path, digest, created_at FROM artifacts_v3;
+
+DROP TABLE artifacts_v3;
+";
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1758,9 +1812,9 @@ mod tests {
 
     use super::{ControlStore, FindingDisposition, ReviewAssessment, SCHEMA, StoreError};
     use crate::{
-        CredentialGrant, JobBrief, JobId, JobState, LeaseKind, NetworkMode, NetworkPolicy,
-        PathPolicy, ProfileId, ResourceLimits, RiskClass, Role, SessionId, Sha, UnitId,
-        VerificationCommand,
+        ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
+        NetworkMode, NetworkPolicy, PathPolicy, ProfileId, ResourceLimits, RiskClass, Role,
+        SessionId, Sha, UnitId, VerificationCommand,
     };
 
     fn sha(character: char) -> Sha {
@@ -1801,7 +1855,30 @@ mod tests {
                 credential_id: "github-job-push".to_owned(),
                 methods: vec!["git:push:refs/heads/nswarm/job-1/unit-1".to_owned()],
             }],
-            report_schema: json!({"type": "object", "required": ["head_sha", "evidence"]}),
+            report_schema: json!({
+                "type": "object",
+                "required": ["head_sha", "evidence"],
+                "additionalProperties": false,
+                "properties": {
+                    "head_sha": {"type": "string"},
+                    "evidence": {
+                        "type": "object",
+                        "required": ["checks"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "checks": {
+                                "type": "array",
+                                "items": {"type": "string"}
+                            },
+                            "details": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": true
+                            }
+                        }
+                    }
+                }
+            }),
             standing_policy_version: "v1".to_owned(),
         }
     }
@@ -1947,6 +2024,16 @@ mod tests {
         let mut invalid = brief();
         invalid.verification_commands.clear();
         assert!(store.create_job(&invalid, 1).is_err());
+        let mut invalid = brief();
+        invalid.report_schema = json!({
+            "type": "object",
+            "required": ["head_sha"],
+            "properties": {"head_sha": {"type": "executable"}}
+        });
+        assert!(matches!(
+            store.create_job(&invalid, 2),
+            Err(StoreError::Brief(BriefError::InvalidReportSchema))
+        ));
     }
 
     #[test]
@@ -2159,6 +2246,28 @@ mod tests {
             ),
             Err(StoreError::ReportSchemaViolation)
         ));
+        assert!(matches!(
+            store.record_report(
+                &brief.unit_id,
+                &json!({"head_sha": sha('b').as_str(), "evidence": "not-an-object"}),
+                "wrong-type-report",
+                2,
+            ),
+            Err(StoreError::ReportSchemaViolation)
+        ));
+        assert!(matches!(
+            store.record_report(
+                &brief.unit_id,
+                &json!({
+                    "head_sha": sha('b').as_str(),
+                    "evidence": {"checks": [1]},
+                    "undeclared": true
+                }),
+                "recursive-wrong-type-report",
+                2,
+            ),
+            Err(StoreError::ReportSchemaViolation)
+        ));
 
         let provider_token = "sk-".to_owned() + &"x".repeat(24);
         let source_token = "ghp_".to_owned() + &"y".repeat(30);
@@ -2168,9 +2277,11 @@ mod tests {
                 &json!({
                     "head_sha": sha('b').as_str(),
                     "evidence": {
-                        "OPENROUTER_API_KEY": provider_token,
-                        "nested": [{"authorization": source_token}],
-                        "note": "focused test passed"
+                        "checks": ["focused test passed"],
+                        "details": {
+                            "OPENROUTER_API_KEY": provider_token,
+                            "nested": [{"authorization": source_token}]
+                        }
                     }
                 }),
                 "complete-report",
@@ -2467,13 +2578,37 @@ mod tests {
         let artifact = store
             .record_artifact(
                 &brief.unit_id,
-                "test-report",
+                ArtifactKind::TestReport,
                 std::path::Path::new("artifacts/report.json"),
+                &brief.base_sha,
                 &sha('d'),
                 5,
             )
             .expect("artifact recorded");
         assert!(artifact > 0);
+        assert!(matches!(
+            store.record_artifact(
+                &brief.unit_id,
+                ArtifactKind::Log,
+                std::path::Path::new("../sibling/secret.log"),
+                &brief.base_sha,
+                &sha('e'),
+                6,
+            ),
+            Err(StoreError::InvalidArtifact)
+        ));
+        assert!(matches!(
+            store.record_artifact(
+                &brief.unit_id,
+                ArtifactKind::Log,
+                std::path::Path::new("artifacts/stale.log"),
+                &sha('b'),
+                &sha('e'),
+                6,
+            ),
+            Err(StoreError::StaleArtifact { current, artifact })
+                if current == brief.base_sha && artifact == sha('b')
+        ));
         assert!(matches!(
             store.record_review(
                 &brief.unit_id,
@@ -2485,6 +2620,40 @@ mod tests {
             ),
             Err(StoreError::ReviewOutsideReviewState)
         ));
+    }
+
+    #[test]
+    fn identical_artifact_content_is_scoped_to_exact_source_sha() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let artifact_path = std::path::Path::new("artifacts/repeatable.json");
+        let digest = sha('d');
+        store.create_job(&brief, 1).expect("job created");
+        store
+            .record_artifact(
+                &brief.unit_id,
+                ArtifactKind::TestReport,
+                artifact_path,
+                &brief.base_sha,
+                &digest,
+                2,
+            )
+            .expect("base artifact recorded");
+        advance_to_self_verifying(&mut store, &brief.unit_id);
+        let candidate = sha('b');
+        store
+            .record_candidate(&brief.unit_id, &candidate, "artifact-candidate", 7)
+            .expect("candidate recorded");
+        store
+            .record_artifact(
+                &brief.unit_id,
+                ArtifactKind::TestReport,
+                artifact_path,
+                &candidate,
+                &digest,
+                8,
+            )
+            .expect("same content is distinct evidence for a new SHA");
     }
 
     #[test]
@@ -2732,5 +2901,14 @@ mod tests {
             )
             .expect("session column query");
         assert_eq!(destroyed_session_column, 1);
+        let artifact_head_column: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('artifacts') WHERE name = 'head_sha'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("artifact column query");
+        assert_eq!(artifact_head_column, 1);
     }
 }

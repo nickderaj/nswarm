@@ -352,20 +352,7 @@ impl JobBrief {
         for grant in &self.credential_grants {
             grant.validate()?;
         }
-        let Value::Object(schema) = &self.report_schema else {
-            return Err(BriefError::InvalidReportSchema);
-        };
-        if schema.get("type").and_then(Value::as_str) != Some("object") {
-            return Err(BriefError::InvalidReportSchema);
-        }
-        let Some(required) = schema.get("required").and_then(Value::as_array) else {
-            return Err(BriefError::InvalidReportSchema);
-        };
-        if required.is_empty()
-            || required
-                .iter()
-                .any(|field| field.as_str().is_none_or(|name| name.trim().is_empty()))
-        {
+        if !validate_report_schema(&self.report_schema) {
             return Err(BriefError::InvalidReportSchema);
         }
         if self.standing_policy_version.trim().is_empty() {
@@ -525,6 +512,164 @@ pub enum LeaseKind {
     Topology,
     /// One worker owns a mutable profile home.
     Profile,
+}
+
+/// Repository evidence artifact classes accepted by the control plane.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArtifactKind {
+    /// Focused or repository-wide test output.
+    TestReport,
+    /// Coverage summary or machine-readable coverage artifact.
+    CoverageReport,
+    /// Exact candidate diff or patch evidence.
+    Diff,
+    /// Structured execution log.
+    Log,
+    /// Research claim/source manifest.
+    ClaimManifest,
+    /// Durable worker handoff.
+    Handoff,
+}
+
+impl ArtifactKind {
+    /// Stable database representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TestReport => "test-report",
+            Self::CoverageReport => "coverage-report",
+            Self::Diff => "diff",
+            Self::Log => "log",
+            Self::ClaimManifest => "claim-manifest",
+            Self::Handoff => "handoff",
+        }
+    }
+}
+
+/// Validates the bounded JSON-Schema subset accepted for worker reports.
+pub fn validate_report_schema(schema: &Value) -> bool {
+    validate_schema_node(schema, 0, true)
+}
+
+/// Checks a report recursively against a previously validated schema.
+pub fn report_matches_schema(schema: &Value, report: &Value) -> bool {
+    matches_schema_node(schema, report, 0)
+}
+
+fn validate_schema_node(schema: &Value, depth: usize, root: bool) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+    let allowed = [
+        "type",
+        "required",
+        "properties",
+        "items",
+        "additionalProperties",
+    ];
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return false;
+    }
+    match object.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            if object.contains_key("items") {
+                return false;
+            }
+            let Some(properties) = object.get("properties").and_then(Value::as_object) else {
+                return false;
+            };
+            if !properties
+                .values()
+                .all(|property| validate_schema_node(property, depth + 1, false))
+            {
+                return false;
+            }
+            if object
+                .get("additionalProperties")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return false;
+            }
+            let required = object.get("required").and_then(Value::as_array);
+            if root && required.is_none_or(Vec::is_empty) {
+                return false;
+            }
+            let mut names = std::collections::BTreeSet::new();
+            required.is_none_or(|fields| {
+                fields.iter().all(|field| {
+                    field.as_str().is_some_and(|name| {
+                        !name.is_empty() && properties.contains_key(name) && names.insert(name)
+                    })
+                })
+            })
+        }
+        Some("array") => {
+            object
+                .keys()
+                .all(|key| matches!(key.as_str(), "type" | "items"))
+                && object
+                    .get("items")
+                    .is_some_and(|items| validate_schema_node(items, depth + 1, false))
+        }
+        Some("string" | "boolean" | "integer" | "number" | "null") => object.len() == 1,
+        _ => false,
+    }
+}
+
+fn matches_schema_node(schema: &Value, value: &Value, depth: usize) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    let Some(schema) = schema.as_object() else {
+        return false;
+    };
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let (Some(value), Some(properties)) = (
+                value.as_object(),
+                schema.get("properties").and_then(Value::as_object),
+            ) else {
+                return false;
+            };
+            let required_present =
+                schema
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_none_or(|fields| {
+                        fields.iter().all(|field| {
+                            field.as_str().is_some_and(|name| value.contains_key(name))
+                        })
+                    });
+            let known_fields_match = value.iter().all(|(name, field)| {
+                properties
+                    .get(name)
+                    .is_none_or(|field_schema| matches_schema_node(field_schema, field, depth + 1))
+            });
+            let extras_allowed = schema
+                .get("additionalProperties")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+                || value.keys().all(|name| properties.contains_key(name));
+            required_present && known_fields_match && extras_allowed
+        }
+        Some("array") => value.as_array().is_some_and(|items| {
+            schema.get("items").is_some_and(|item_schema| {
+                items
+                    .iter()
+                    .all(|item| matches_schema_node(item_schema, item, depth + 1))
+            })
+        }),
+        Some("string") => value.is_string(),
+        Some("boolean") => value.is_boolean(),
+        Some("integer") => value.as_i64().is_some() || value.as_u64().is_some(),
+        Some("number") => value.is_number(),
+        Some("null") => value.is_null(),
+        _ => false,
+    }
 }
 
 impl LeaseKind {

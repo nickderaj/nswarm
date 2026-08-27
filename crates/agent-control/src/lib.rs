@@ -12,6 +12,7 @@ pub use provisioner::{
 };
 pub use store::{ControlStore, FindingDisposition, ReviewAssessment, StoreError};
 pub use types::{
-    BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind, NetworkMode, NetworkPolicy,
-    PathPolicy, ProfileId, ResourceLimits, RiskClass, SessionId, Sha, UnitId, VerificationCommand,
+    ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind, NetworkMode,
+    NetworkPolicy, PathPolicy, ProfileId, ResourceLimits, RiskClass, SessionId, Sha, UnitId,
+    VerificationCommand,
 };
