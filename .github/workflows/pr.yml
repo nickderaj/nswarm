@@ -1,0 +1,187 @@
+name: PR
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup show
+      - run: cargo install cargo-nextest --version 0.9.128 --locked
+      - run: cargo install cargo-hack --version 0.6.45 --locked
+      - name: Workflow syntax
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
+      - run: python3 scripts/policy_check.py
+      - run: python3 scripts/validate_profiles.py
+      - run: python3 scripts/run_evals.py
+      - run: ./scripts/check_generated.sh
+      - run: cargo fmt --all --check
+      - run: cargo check --workspace --all-targets --all-features
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo nextest run --workspace --all-features --profile ci
+      - run: cargo test --workspace --doc --all-features
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+      - run: |
+          cargo hack check --workspace --feature-powerset --depth 2
+          cargo hack check --workspace --each-feature
+          cargo hack check --workspace --no-default-features
+      - name: Upload JUnit
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: nextest-junit-${{ github.event.pull_request.number }}-${{ github.sha }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  dependencies:
+    name: dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: cargo install cargo-deny --version 0.20.2 --locked
+      - run: cargo install cargo-vet --version 0.10.2 --locked
+      - run: cargo install cargo-machete --version 0.9.2 --locked
+      - run: cargo install cargo-semver-checks --version 0.46.0 --locked
+      - run: cargo deny check
+      - run: cargo vet check
+      - run: cargo machete
+      - name: Semver compatibility
+        run: |
+          if git cat-file -e origin/main:Cargo.toml 2>/dev/null; then
+            cargo semver-checks check-release --workspace --baseline-rev origin/main
+          else
+            echo "Initial public API baseline will be established by this merge"
+          fi
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install nightly-2025-09-18 --profile minimal --component llvm-tools-preview
+      - run: cargo install cargo-nextest --version 0.9.128 --locked
+      - run: cargo install cargo-llvm-cov --version 0.9.0 --locked
+      - name: Measure line and branch coverage
+        run: |
+          cargo +nightly-2025-09-18 llvm-cov --branch --fail-under-lines 90 --json --output-path coverage.json nextest --workspace --all-features --profile ci
+          cargo +nightly-2025-09-18 llvm-cov report --branch --lcov --output-path lcov.info
+          python3 scripts/check_coverage.py coverage.json origin/main
+      - name: Upload coverage
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: coverage-${{ github.event.pull_request.number }}-${{ github.sha }}
+          path: |
+            coverage.json
+            lcov.info
+            target/nextest/ci/junit.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: rustc --version | grep '1.90.0'
+      - run: cargo check --workspace --all-targets --all-features --locked
+
+  current-stable:
+    name: current-stable
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: rustup update stable --no-self-update
+      - run: cargo +stable check --workspace --all-targets --all-features
+
+  aarch64-compile:
+    name: aarch64-compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+      - env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+        run: cargo check --workspace --all-targets --all-features --locked --target aarch64-unknown-linux-gnu
+
+  bounded-fuzz:
+    name: bounded-fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly-2025-09-18 --profile minimal
+      - run: cargo +nightly-2025-09-18 install cargo-fuzz --version 0.13.2 --locked
+      - working-directory: fuzz
+        run: cargo +nightly-2025-09-18 fuzz run manifest -- -max_total_time=60
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr-fuzz-${{ github.event.pull_request.number }}-${{ github.sha }}
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+
+  reproducibility:
+    name: reproducibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Compare two clean release builds
+        run: |
+          cargo clean
+          cargo build --workspace --release --locked
+          sha256sum target/release/fleet target/release/research-bot > /tmp/first-build.sha256
+          cargo clean
+          cargo build --workspace --release --locked
+          sha256sum target/release/fleet target/release/research-bot > /tmp/second-build.sha256
+          diff -u /tmp/first-build.sha256 /tmp/second-build.sha256

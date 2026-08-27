@@ -1,0 +1,89 @@
+name: Merge queue
+
+on:
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: merge-${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sanitizers:
+    name: sanitizers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly-2025-09-18 --profile minimal --component rust-src
+      - name: AddressSanitizer
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          RUSTDOCFLAGS: -Zsanitizer=address
+          CARGO_TARGET_DIR: target/asan
+        run: cargo +nightly-2025-09-18 test -Zbuild-std --workspace --all-features --locked --target x86_64-unknown-linux-gnu
+      - name: LeakSanitizer
+        env:
+          RUSTFLAGS: -Zsanitizer=leak
+          RUSTDOCFLAGS: -Zsanitizer=leak
+          CARGO_TARGET_DIR: target/lsan
+        run: cargo +nightly-2025-09-18 test -Zbuild-std --workspace --all-features --locked --target x86_64-unknown-linux-gnu
+
+  miri:
+    name: miri
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly-2025-09-18 --profile minimal --component miri
+      - name: Pure control-plane policy and type contracts
+        run: |
+          cargo +nightly-2025-09-18 miri test -p agent-control policy::
+          cargo +nightly-2025-09-18 miri test -p agent-control types::
+      - name: Transport-neutral bot contracts
+        run: cargo +nightly-2025-09-18 miri test -p botkit
+
+  mutation:
+    name: mutation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: cargo install cargo-mutants --version 27.1.0 --locked
+      - run: cargo mutants --workspace
+      - name: Upload mutation report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: merge-mutation-${{ github.sha }}
+          path: mutants.out
+          if-no-files-found: error
+          retention-days: 14
+
+  aarch64-hosted:
+    name: aarch64-hosted
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: cargo test --workspace --all-features --locked
