@@ -349,7 +349,7 @@ findings that are composable without the pending control-store schema migration:
 - new negative tests retain all 34 critical functions and close every newly
   exposed outcome rather than shrinking the coverage set.
 
-Fresh local evidence before checkpointing: 71 workspace tests pass; strict
+Fresh local evidence before checkpointing: 72 workspace tests pass; strict
 Clippy passes; policy scans 88 files; both profiles validate; the current nine
 eval checks pass; generated output matches the temporary regeneration (the
 pre-commit cleanliness guard correctly reports the intentional checked-in
@@ -364,3 +364,26 @@ attributed verdict authority, Git subprocess isolation, recovery transitions,
 capability-backed store authorization, job-scoped topology leases, and real
 Rust-driven eval corpus remain active audit findings; none is claimed repaired
 by this checkpoint.
+
+## Checkpoint M — subprocess and capability boundary repair
+
+Follow-up audit repairs now isolate Git worktree creation from ambient process
+and user configuration, disable hooks, fsmonitor, credential helpers, prompts,
+and file transport, and prove a hostile repository checkout hook cannot run.
+Existing actor-bearing control-store operations authorize through the typed
+role-to-capability map rather than duplicated SQL role literals. The structured
+profile vocabulary now exactly matches the Rust capability enum. Topology
+leases conflict within a job while independent jobs may integrate concurrently.
+The actionlint Go module is pinned to the full official `v1.7.12` commit, and
+repository policy enforces immutable Go tool revisions.
+
+Focused local evidence: all 48 `agent-control` tests pass, including the new
+hook and independent-topology regressions; strict workspace Clippy, profile
+validation, policy validation, and immutable-commit actionlint pass. Fresh
+workspace coverage runs 73 tests and reports 97.08% repository lines, 97.23%
+changed executable lines, every crate above 90%, and 100% (232/232) branch
+outcomes across 35 marked critical functions.
+
+This checkpoint does not claim that every lifecycle method has actor identity.
+Attributed exact-SHA verification remains the next critical control-store
+repair, alongside the multi-unit job/dependency migration.

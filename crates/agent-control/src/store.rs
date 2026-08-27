@@ -6,8 +6,8 @@ use thiserror::Error;
 
 use crate::types::{BriefError, report_matches_schema};
 use crate::{
-    ArtifactKind, JobBrief, JobId, JobState, LeaseKind, ProfileId, RiskClass, Role, SessionId, Sha,
-    UnitId,
+    ArtifactKind, Capability, JobBrief, JobId, JobState, LeaseKind, ProfileId, RiskClass, Role,
+    SessionId, Sha, UnitId,
 };
 
 const SCHEMA_VERSION: i64 = 4;
@@ -493,14 +493,8 @@ impl ControlStore {
                 next: JobState::MergeAuthorized,
             });
         }
-        let authorized: Option<i64> = transaction
-            .query_row(
-                "SELECT 1 FROM profiles WHERE profile_id = ?1 AND job_id = ?2 AND role = ?3 AND destroyed_at IS NULL",
-                params![authorized_by.as_str(), job_id.as_str(), Role::Shipper.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if authorized.is_none() {
+        if !live_profile_has_capability_tx(&transaction, authorized_by, &job_id, Capability::Merge)?
+        {
             return Err(StoreError::UnauthorizedShipper);
         }
         let candidate = candidate_sha_tx(&transaction, unit_id)?;
@@ -629,18 +623,22 @@ impl ControlStore {
             [now],
         )?;
         let mut statement = transaction.prepare(
-            "SELECT resource FROM leases WHERE kind = ?1 AND released_at IS NULL AND expires_at > ?2",
+            "SELECT job_id, resource FROM leases WHERE kind = ?1 AND released_at IS NULL AND expires_at > ?2",
         )?;
         let resources = statement
-            .query_map(params![kind.as_str(), now], |row| row.get::<_, String>(0))?
+            .query_map(params![kind.as_str(), now], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         let overlaps = match kind {
             LeaseKind::Path => resources
                 .iter()
-                .any(|active| path_resources_overlap(active, resource)),
-            LeaseKind::Topology => !resources.is_empty(),
-            LeaseKind::Profile => resources.iter().any(|active| active == resource),
+                .any(|(_, active)| path_resources_overlap(active, resource)),
+            LeaseKind::Topology => resources
+                .iter()
+                .any(|(active_job, _)| active_job == job_id.as_str()),
+            LeaseKind::Profile => resources.iter().any(|(_, active)| active == resource),
         };
         if overlaps {
             return Err(StoreError::LeaseConflict(resource.to_owned()));
@@ -913,14 +911,12 @@ impl ControlStore {
             .optional()?;
         let (job_id, unit_id) =
             target_record.ok_or_else(|| StoreError::UnknownLiveProfile(target.to_string()))?;
-        let authorized: Option<i64> = transaction
-            .query_row(
-                "SELECT 1 FROM profiles WHERE profile_id = ?1 AND job_id = ?2 AND role = ?3 AND destroyed_at IS NULL",
-                params![coordinator.as_str(), &job_id, Role::Coordinator.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if authorized.is_none() {
+        if !live_profile_has_capability_tx(
+            &transaction,
+            coordinator,
+            &JobId::new(job_id.clone())?,
+            Capability::Coordinate,
+        )? {
             return Err(StoreError::UnauthorizedCoordinator);
         }
         transaction.execute(
@@ -999,14 +995,12 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let authorized: Option<i64> = transaction
-            .query_row(
-                "SELECT 1 FROM profiles WHERE profile_id = ?1 AND job_id = ?2 AND role = ?3 AND destroyed_at IS NULL",
-                params![coordinator.as_str(), job_id.as_str(), Role::Coordinator.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if authorized.is_none() {
+        if !live_profile_has_capability_tx(
+            &transaction,
+            coordinator,
+            job_id,
+            Capability::Coordinate,
+        )? {
             return Err(StoreError::UnauthorizedCoordinator);
         }
         let changed = transaction.execute(
@@ -1235,16 +1229,7 @@ impl ControlStore {
                 verdict: head_sha.clone(),
             });
         }
-        let reviewer_record: Option<(String, String)> = transaction
-            .query_row(
-                "SELECT job_id, role FROM profiles WHERE profile_id = ?1 AND destroyed_at IS NULL",
-                [reviewer.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if !reviewer_record.as_ref().is_some_and(|(review_job, role)| {
-            review_job == job_id.as_str() && role == Role::VerifierReviewer.as_str()
-        }) {
+        if !live_profile_has_capability_tx(&transaction, reviewer, &job_id, Capability::Verify)? {
             return Err(StoreError::UnauthorizedReviewer);
         }
         transaction.execute(
@@ -1288,14 +1273,12 @@ impl ControlStore {
         if state != JobState::Reviewing {
             return Err(StoreError::ReviewOutsideReviewState);
         }
-        let authorized: Option<i64> = transaction
-            .query_row(
-                "SELECT 1 FROM profiles WHERE profile_id = ?1 AND job_id = ?2 AND role = ?3 AND destroyed_at IS NULL",
-                params![integrator.as_str(), job_id.as_str(), Role::Integrator.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if authorized.is_none() {
+        if !live_profile_has_capability_tx(
+            &transaction,
+            integrator,
+            &job_id,
+            Capability::Integrate,
+        )? {
             return Err(StoreError::UnauthorizedIntegrator);
         }
         let candidate = candidate_sha_tx(&transaction, unit_id)?;
@@ -1328,6 +1311,26 @@ impl ControlStore {
         transaction.commit()?;
         Ok(())
     }
+}
+
+// coverage-critical
+fn live_profile_has_capability_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    profile_id: &ProfileId,
+    job_id: &JobId,
+    capability: Capability,
+) -> Result<bool, StoreError> {
+    let role: Option<String> = transaction
+        .query_row(
+            "SELECT role FROM profiles WHERE profile_id = ?1 AND job_id = ?2 AND destroyed_at IS NULL",
+            params![profile_id.as_str(), job_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(role
+        .as_deref()
+        .and_then(Role::from_name)
+        .is_some_and(|role| role.can(capability)))
 }
 
 fn unit_identity_tx(
@@ -2416,6 +2419,20 @@ mod tests {
             ),
             Err(StoreError::LeaseConflict(_))
         ));
+        let mut other = brief.clone();
+        other.job_id = JobId::new("job-2").expect("other job");
+        other.unit_id = UnitId::new("unit-2").expect("other unit");
+        store.create_job(&other, 4).expect("other job created");
+        store
+            .acquire_lease(
+                &other.job_id,
+                &other.unit_id,
+                LeaseKind::Topology,
+                "independent-integration-stack",
+                100,
+                5,
+            )
+            .expect("independent jobs may own topology concurrently");
 
         let mut reverse_store = ControlStore::open_in_memory().expect("reverse store");
         reverse_store

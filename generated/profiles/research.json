@@ -8,8 +8,7 @@
     "repository-write",
     "branch-push",
     "integrate",
-    "merge",
-    "deploy"
+    "merge"
   ],
   "governance": {
     "background_review": false,

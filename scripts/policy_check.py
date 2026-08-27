@@ -115,6 +115,11 @@ def main() -> int:
                 match = re.search(r"\buses:\s*([^\s#]+)", line)
                 if match and not re.search(r"@[0-9a-f]{40}$", match.group(1)):
                     errors.append(f"{relative}:{line_number}: action must use a full commit SHA")
+                go_tool = re.search(r"\bgo\s+(?:run|install)\s+[^\s@]+@([^\s]+)", line)
+                if go_tool and not re.fullmatch(r"[0-9a-f]{40}", go_tool.group(1)):
+                    errors.append(
+                        f"{relative}:{line_number}: Go tool must use a full commit SHA"
+                    )
 
     if errors:
         for error in errors:

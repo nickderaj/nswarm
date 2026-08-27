@@ -56,6 +56,20 @@ impl Role {
         }
     }
 
+    /// Parses the stable database and generated-policy representation.
+    #[must_use]
+    pub fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "research" => Some(Self::Research),
+            "coordinator" => Some(Self::Coordinator),
+            "coder" => Some(Self::Coder),
+            "verifier-reviewer" => Some(Self::VerifierReviewer),
+            "integrator" => Some(Self::Integrator),
+            "shipper" => Some(Self::Shipper),
+            _ => None,
+        }
+    }
+
     /// Returns the complete immutable capability set for this role.
     #[must_use]
     pub const fn capabilities(self) -> &'static [Capability] {
@@ -135,5 +149,16 @@ mod tests {
         assert_eq!(Role::Research.as_str(), "research");
         assert_eq!(Role::Coder.as_str(), "coder");
         assert_eq!(Role::Shipper.as_str(), "shipper");
+        for role in [
+            Role::Research,
+            Role::Coordinator,
+            Role::Coder,
+            Role::VerifierReviewer,
+            Role::Integrator,
+            Role::Shipper,
+        ] {
+            assert_eq!(Role::from_name(role.as_str()), Some(role));
+        }
+        assert_eq!(Role::from_name("deploy"), None);
     }
 }

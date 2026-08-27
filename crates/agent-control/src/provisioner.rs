@@ -55,6 +55,34 @@ impl LocalWorktreeProvisioner {
             allowed_root: allowed_root.as_ref().canonicalize()?,
         })
     }
+
+    fn isolated_git(repository: &Path) -> Command {
+        let mut command = Command::new("git");
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", "/dev/null")
+            .env("XDG_CONFIG_HOME", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "/bin/false")
+            .env("SSH_ASKPASS", "/bin/false")
+            .env("GCM_INTERACTIVE", "Never")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "credential.helper=",
+                "-c",
+                "protocol.file.allow=never",
+                "-C",
+            ])
+            .arg(repository);
+        command
+    }
 }
 
 impl WorktreeProvisioner for LocalWorktreeProvisioner {
@@ -89,9 +117,7 @@ impl WorktreeProvisioner for LocalWorktreeProvisioner {
                 request.destination.clone(),
             ));
         }
-        let status = Command::new("git")
-            .args(["-C"])
-            .arg(&repository)
+        let status = Self::isolated_git(&repository)
             .args(["worktree", "add", "-b"])
             .arg(request.branch_name())
             .arg(&request.destination)
@@ -174,7 +200,7 @@ pub enum ProvisionError {
 mod tests {
     use std::fs;
     #[cfg(unix)]
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::Command;
 
     use tempfile::TempDir;
@@ -267,6 +293,33 @@ mod tests {
             git(&destination, &["branch", "--show-current"]),
             "nswarm/job-1/unit-1"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_provisioner_disables_repository_checkout_hooks() {
+        let (repository, base_sha) = repository();
+        let root = TempDir::new().expect("worktree root");
+        let marker = root.path().join("hook-executed");
+        let hook = repository.path().join(".git/hooks/post-checkout");
+        fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display()))
+            .expect("write hostile hook");
+        let mut permissions = fs::metadata(&hook).expect("hook metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).expect("make hook executable");
+
+        let request = WorktreeRequest {
+            repository: repository.path().to_path_buf(),
+            destination: root.path().join("unit-1"),
+            job_id: JobId::new("job-1").expect("valid job"),
+            unit_id: UnitId::new("unit-1").expect("valid unit"),
+            base_sha,
+        };
+        LocalWorktreeProvisioner::new(root.path())
+            .expect("provisioner")
+            .provision(&request)
+            .expect("worktree provisioned without repository hooks");
+        assert!(!marker.exists(), "repository hook escaped isolation");
     }
 
     #[test]

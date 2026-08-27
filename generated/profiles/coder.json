@@ -9,8 +9,7 @@
     "coordinate",
     "verify",
     "integrate",
-    "merge",
-    "deploy"
+    "merge"
   ],
   "governance": {
     "background_review": false,

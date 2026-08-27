@@ -22,7 +22,7 @@ EXPECTED = {
             "show-your-evidence",
         },
         "capabilities": {"repository-read", "network-read", "evidence-write"},
-        "forbidden": {"repository-write", "branch-push", "integrate", "merge", "deploy"},
+        "forbidden": {"repository-write", "branch-push", "integrate", "merge"},
     },
     "coder": {
         "skills": {
@@ -39,7 +39,7 @@ EXPECTED = {
             "pause-and-handoff",
         },
         "capabilities": {"repository-read", "repository-write", "evidence-write", "branch-push"},
-        "forbidden": {"coordinate", "verify", "integrate", "merge", "deploy"},
+        "forbidden": {"coordinate", "verify", "integrate", "merge"},
     },
 }
 

@@ -205,21 +205,26 @@ the report at face value.
   worktree.** Only `OPENROUTER_API_KEY` and `XAI_API_KEY` are accepted; synthetic
   `ERROR_BOT_TOKEN`, `LOG_BOT_TOKEN`, `GITHUB_TOKEN`, and operational bot-token
   cases are rejected.
-- **H-10 — Git subprocesses inherit ambient configuration, hooks, and
-  credentials.** Worktree path checks are sound, but provisioning must also
-  clear the environment, disable system/global Git config, credential helpers,
-  hooks, and terminal prompts, with a hostile-hook regression.
+- **H-10 — Git subprocesses inherited ambient configuration, hooks, and
+  credentials. Repaired in the current worktree.** Provisioning now clears the
+  process environment, supplies only a fixed system path and inert home/config
+  locations, disables system/global Git config, credential helpers, prompts,
+  hooks, and fsmonitor, and prohibits the file transport. A hostile executable
+  `post-checkout` hook is proven not to run.
 - **H-11 — merge-authorized/integrated recovery paths are incomplete.** The
   state machine and unique merge-authorization row can strand a unit when a
   protected merge is rejected or its candidate changes. Exact-SHA
   invalidation and explicit recovery transitions need durable tests.
-- **H-12 — capabilities are not the store's authorization source of truth.**
-  Some methods still compare role strings directly and some lifecycle methods
-  have no actor. Store authorization must call the typed capability policy;
-  generated coder policy must not advertise deploy authority.
-- **H-13 — topology leases are globally exclusive.** Path and profile resource
-  names may be globally meaningful, but topology ownership must be scoped to a
-  job so independent jobs can integrate concurrently.
+- **H-12 — capabilities were not the store's authorization source of truth.
+  Partially repaired in the current worktree.** Existing actor-bearing merge,
+  coordinator, reviewer, and integrator operations now resolve a live profile's
+  persisted role through the typed `Role` parser and capability map. Structured
+  profile policy no longer invents a `deploy` token absent from the Rust enum.
+  Lifecycle methods without actors and verdict attribution remain active under
+  C-5.
+- **H-13 — topology leases were globally exclusive. Repaired in the current
+  worktree.** Topology conflicts are now job-scoped; same-job concurrent owners
+  fail while two independent jobs can hold integration topology concurrently.
 - **H-14 — evals are partially tautological.** The Python runner duplicates
   simplified redaction/state logic and the corpus contains prose-like snippets
   instead of driving the Rust implementation. The corpus must invoke named
@@ -234,9 +239,10 @@ the report at face value.
 
 ### Medium follow-up findings
 
-- **M-6 — actionlint is version-tag pinned rather than commit pinned.** The Go
-  invocation must resolve to an immutable upstream commit and the repository
-  policy must enforce that form.
+- **M-6 — actionlint was version-tag pinned rather than commit pinned. Repaired
+  in the current worktree.** Official tag `v1.7.12` resolves to upstream commit
+  `914e7df21a07ef503a81201c76d2b11c789d3fca`; the workflow uses that immutable
+  revision and policy rejects non-40-hex Go tool revisions.
 - **M-7 — CI repeatedly compiles installed tools.** Safe compiler/dependency and
   version-keyed binary caching is desirable, but may not cache credentials and
   must not weaken immutable tool selection.
