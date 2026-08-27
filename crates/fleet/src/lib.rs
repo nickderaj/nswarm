@@ -738,6 +738,7 @@ pub enum ManifestError {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::PathBuf;
 
     use tempfile::TempDir;
 
@@ -836,6 +837,56 @@ deny_paths = ["/srv/nswarm/tutor"]
     }
 
     #[test]
+    fn every_manifest_validation_clause_is_independently_enforced() {
+        let manifest = BotManifest::parse(MANIFEST).expect("manifest validates");
+
+        for denied in [manifest.bot.state.clone(), manifest.bot.data.clone()] {
+            let mut candidate = manifest.clone();
+            candidate.sandbox.deny_paths = vec![denied.clone()];
+            assert!(matches!(
+                candidate.validate(),
+                Err(ManifestError::DeniedWritableRoot(path)) if path == denied
+            ));
+        }
+        for resource in ["memory", "cpu"] {
+            let mut candidate = manifest.clone();
+            match resource {
+                "memory" => candidate.sandbox.memory_max.clear(),
+                "cpu" => candidate.sandbox.cpu_quota.clear(),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                candidate.validate(),
+                Err(ManifestError::EmptyResourceLimit)
+            ));
+        }
+        for path in ["", "/absolute", "profiles/../sibling"] {
+            let mut candidate = manifest.clone();
+            candidate.agent.soul = PathBuf::from(path);
+            assert!(matches!(
+                candidate.validate(),
+                Err(ManifestError::UnsafeRepositoryPath { .. })
+            ));
+        }
+        for identifier in ["", "Uppercase", "has space"] {
+            let mut candidate = manifest.clone();
+            candidate.bot.name = identifier.to_owned();
+            assert!(matches!(
+                candidate.validate(),
+                Err(ManifestError::InvalidIdentifier { .. })
+            ));
+        }
+        for secret in ["", "1TOKEN", "lowercase", "BAD-NAME"] {
+            let mut candidate = manifest.clone();
+            candidate.secrets.allow = vec![secret.to_owned()];
+            assert!(matches!(
+                candidate.validate(),
+                Err(ManifestError::InvalidSecretName(name)) if name == secret
+            ));
+        }
+    }
+
+    #[test]
     fn worker_cannot_gain_a_sibling_peer() {
         let source = MANIFEST.replace(
             "peers = [\"boss-agent\"]",
@@ -860,6 +911,24 @@ secrets_allow = ["OPENROUTER_API_KEY", "TELEGRAM_BOT_TOKEN"]
         assert!(matches!(
             GatewayManifest::parse(source),
             Err(ManifestError::InvalidGatewaySecret(secret)) if secret == "TELEGRAM_BOT_TOKEN"
+        ));
+
+        for revision in ["main", "master", "release-*"] {
+            let source = source
+                .replace("v2026.8.19", revision)
+                .replace(", \"TELEGRAM_BOT_TOKEN\"", "");
+            assert!(matches!(
+                GatewayManifest::parse(&source),
+                Err(ManifestError::UnpinnedRevision)
+            ));
+        }
+        let source = source
+            .replace("v2026.8.19", "v1")
+            .replace("OPENROUTER_API_KEY", "invalid-name")
+            .replace(", \"TELEGRAM_BOT_TOKEN\"", "");
+        assert!(matches!(
+            GatewayManifest::parse(&source),
+            Err(ManifestError::InvalidGatewaySecret(secret)) if secret == "invalid-name"
         ));
     }
 
@@ -920,6 +989,14 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         assert!(matches!(
             parse_secret_source("export OPENROUTER_API_KEY=value\n"),
             Err(ManifestError::InvalidSecretName(_))
+        ));
+        assert!(matches!(
+            parse_secret_source("VALID=value\nmissing-separator\n"),
+            Err(ManifestError::InvalidSecretSourceLine(2))
+        ));
+        assert!(matches!(
+            parse_secret_source("VALID=unsafe\rvalue\n"),
+            Err(ManifestError::UnsafeSecretValue(name)) if name == "VALID"
         ));
     }
 

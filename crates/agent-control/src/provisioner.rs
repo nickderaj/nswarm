@@ -61,11 +61,12 @@ impl WorktreeProvisioner for LocalWorktreeProvisioner {
     fn provision(&self, request: &WorktreeRequest) -> Result<(), ProvisionError> {
         let repository = request.repository.canonicalize()?;
         let git_control = repository.join(".git");
-        let git_metadata = match git_control.symlink_metadata() {
-            Ok(metadata) if !metadata.file_type().is_symlink() => metadata,
-            _ => return Err(ProvisionError::NotRepository(repository)),
+        let Ok(git_metadata) = git_control.symlink_metadata() else {
+            return Err(ProvisionError::NotRepository(repository));
         };
-        if !(git_metadata.is_dir() || git_metadata.is_file()) {
+        if git_metadata.file_type().is_symlink()
+            || !(git_metadata.is_dir() || git_metadata.is_file())
+        {
             return Err(ProvisionError::NotRepository(repository));
         }
         match request.destination.symlink_metadata() {

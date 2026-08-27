@@ -121,13 +121,17 @@ impl PathPolicy {
     /// Checks whether a repository-relative path may be read.
     #[must_use]
     pub fn can_read(&self, path: &Path) -> bool {
-        contains_path(&self.readable, path) && !contains_path(&self.forbidden, path)
+        require_safe_relative(path).is_ok()
+            && contains_path(&self.readable, path)
+            && !contains_path(&self.forbidden, path)
     }
 
     /// Checks whether a repository-relative path may be written.
     #[must_use]
     pub fn can_write(&self, path: &Path) -> bool {
-        contains_path(&self.writable, path) && !contains_path(&self.forbidden, path)
+        require_safe_relative(path).is_ok()
+            && contains_path(&self.writable, path)
+            && !contains_path(&self.forbidden, path)
     }
 
     fn validate(&self) -> Result<(), BriefError> {
@@ -846,8 +850,68 @@ mod tests {
             forbidden: vec!["crates/sibling".into()],
         };
         assert!(policy.can_write(Path::new("crates/assigned/src/lib.rs")));
+        assert!(policy.can_read(Path::new("crates/assigned/src/lib.rs")));
+        assert!(!policy.can_read(Path::new("crates/assigned/../sibling")));
         assert!(!policy.can_read(Path::new("crates/sibling/src/lib.rs")));
         assert!(!policy.can_write(Path::new("crates/other/src/lib.rs")));
+    }
+
+    #[test]
+    fn every_compound_policy_clause_is_independently_enforced() {
+        for empty in ["readable", "writable", "forbidden"] {
+            let mut brief = valid_brief();
+            match empty {
+                "readable" => brief.paths.readable.clear(),
+                "writable" => brief.paths.writable.clear(),
+                "forbidden" => brief.paths.forbidden.clear(),
+                _ => unreachable!(),
+            }
+            assert_eq!(brief.validate(), Err(BriefError::EmptyPathPolicy));
+        }
+        for unsafe_path in ["", "/absolute", "crates/../sibling"] {
+            let mut brief = valid_brief();
+            brief.paths.readable = vec![PathBuf::from(unsafe_path)];
+            assert!(matches!(brief.validate(), Err(BriefError::UnsafePath(_))));
+        }
+
+        for destination in ["", "*", "host/path", "two hosts"] {
+            let mut brief = valid_brief();
+            brief.network = NetworkPolicy {
+                mode: NetworkMode::AllowList,
+                destinations: vec![destination.to_owned()],
+            };
+            assert_eq!(brief.validate(), Err(BriefError::InvalidNetworkDestination));
+        }
+        let mut brief = valid_brief();
+        brief.network = NetworkPolicy {
+            mode: NetworkMode::AllowList,
+            destinations: vec!["api.example.invalid".to_owned()],
+        };
+        assert!(brief.validate().is_ok());
+
+        for zero_field in ["wall", "memory", "disk", "process"] {
+            let mut brief = valid_brief();
+            match zero_field {
+                "wall" => brief.limits.wall_seconds = 0,
+                "memory" => brief.limits.memory_bytes = 0,
+                "disk" => brief.limits.disk_bytes = 0,
+                "process" => brief.limits.process_count = 0,
+                _ => unreachable!(),
+            }
+            assert_eq!(brief.validate(), Err(BriefError::ZeroResourceLimit));
+        }
+
+        for invalid_grant in ["id", "methods", "blank-method", "wildcard"] {
+            let mut brief = valid_brief();
+            match invalid_grant {
+                "id" => brief.credential_grants[0].credential_id.clear(),
+                "methods" => brief.credential_grants[0].methods.clear(),
+                "blank-method" => brief.credential_grants[0].methods = vec![" ".to_owned()],
+                "wildcard" => brief.credential_grants[0].methods = vec!["*".to_owned()],
+                _ => unreachable!(),
+            }
+            assert_eq!(brief.validate(), Err(BriefError::InvalidCredentialGrant));
+        }
     }
 
     #[test]
@@ -968,6 +1032,81 @@ mod tests {
             "type": "object",
             "required": ["status", "status"],
             "properties": {"status": {"type": "string"}}
+        })));
+    }
+
+    #[test]
+    fn report_schema_depth_and_primitive_contracts_are_exact() {
+        let schema = json!({
+            "type": "object",
+            "required": ["boolean", "integer", "number", "null", "array"],
+            "properties": {
+                "boolean": {"type": "boolean"},
+                "integer": {"type": "integer"},
+                "number": {"type": "number"},
+                "null": {"type": "null"},
+                "array": {"type": "array", "items": {"type": "string"}}
+            },
+            "additionalProperties": false
+        });
+        assert!(validate_report_schema(&schema));
+        assert!(report_matches_schema(
+            &schema,
+            &json!({
+                "boolean": true,
+                "integer": -1,
+                "number": 1.5,
+                "null": null,
+                "array": ["value"]
+            })
+        ));
+        for (field, wrong) in [
+            ("boolean", json!("true")),
+            ("integer", json!(1.5)),
+            ("number", json!("1.5")),
+            ("null", json!(false)),
+            ("array", json!([1])),
+        ] {
+            let mut report = json!({
+                "boolean": true,
+                "integer": 1,
+                "number": 1.5,
+                "null": null,
+                "array": ["value"]
+            });
+            report[field] = wrong;
+            assert!(!report_matches_schema(&schema, &report), "accepted {field}");
+        }
+
+        let nested = |arrays: usize| {
+            let mut node = json!({"type": "string"});
+            for _ in 0..arrays {
+                node = json!({"type": "array", "items": node});
+            }
+            json!({
+                "type": "object",
+                "required": ["value"],
+                "properties": {"value": node},
+                "additionalProperties": false
+            })
+        };
+        let nested_value = |arrays: usize| {
+            let mut value = json!("leaf");
+            for _ in 0..arrays {
+                value = json!([value]);
+            }
+            json!({"value": value})
+        };
+        let boundary = nested(15);
+        assert!(validate_report_schema(&boundary));
+        assert!(report_matches_schema(&boundary, &nested_value(15)));
+        assert!(!validate_report_schema(&nested(16)));
+        assert!(!report_matches_schema(&nested(16), &nested_value(16)));
+
+        assert!(!validate_report_schema(&json!({
+            "type": "object",
+            "required": ["value"],
+            "properties": {"value": {"type": "array", "items": {"type": "string"}, "properties": {}}}
         })));
     }
 

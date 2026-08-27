@@ -265,6 +265,28 @@ contract pass. A macOS fuzz process can build but does not honor the requested
 libFuzzer time/run bound on this host, so execution is not claimed locally; the
 superseding GitHub Linux run is the authoritative execution check.
 
+## Checkpoint K — exact-head CI and mutation repair
+
+[PR run `33079285064`](https://github.com/nickderaj/nswarm/actions/runs/33079285064)
+passed all eight PR jobs at exact head
+`d407502f338a0ec9315964b51159736a54686e9c`. The matching
+[merge-tier run `33079316077`](https://github.com/nickderaj/nswarm/actions/runs/33079316077)
+proved hosted aarch64 execution, the selected Miri suites, AddressSanitizer,
+and LeakSanitizer. Its strict mutation job tested 435 mutants and correctly
+failed on 60 survivors rather than treating report generation as success.
+
+The repair adds independent negative cases for each compound policy, path,
+schema, lease, idempotency, artifact, reviewer, redaction, manifest, gateway,
+and CLI operand identified by that report. It also fixes a newly exposed
+runtime scope defect: `PathPolicy::can_read` and `can_write` now reject unsafe
+lexical paths instead of relying only on brief-time validation. Redundant
+event validation and empty-output branches were removed instead of exempted.
+The local full run reduced the result to 299 caught, 135 unviable, and two
+redundant survivors; after removing those branches, a deterministic iterate
+run tested all 129 affected/new mutants with 85 caught, 44 unviable, and zero
+missed. `just ci` passes with 66 tests, 96.59% repository lines, 96.28% changed
+executable lines, and 100% (56/56) configured critical branch outcomes.
+
 Known gaps and external gates:
 
 - PR #1 exists and all intended PR check names have appeared, but the latest

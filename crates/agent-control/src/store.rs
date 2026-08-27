@@ -729,9 +729,6 @@ impl ControlStore {
         payload: &Value,
         now: i64,
     ) -> Result<i64, StoreError> {
-        if idempotency_key.trim().is_empty() || event_type.trim().is_empty() {
-            return Err(StoreError::InvalidEvent);
-        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1863,7 +1860,10 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{ControlStore, FindingDisposition, ReviewAssessment, SCHEMA, StoreError};
+    use super::{
+        ControlStore, FindingDisposition, ReviewAssessment, SCHEMA, StoreError,
+        contains_secret_shape,
+    };
     use crate::{
         ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
         NetworkMode, NetworkPolicy, PathPolicy, ProfileId, ResourceLimits, RiskClass, Role,
@@ -2411,6 +2411,211 @@ mod tests {
             ),
             Err(StoreError::IdempotencyConflict(key)) if key == "claim-1"
         ));
+
+        for (key, event_type) in [("", "claim"), ("claim-2", " ")] {
+            assert!(matches!(
+                store.append_event(&brief.job_id, key, event_type, &json!({}), 4),
+                Err(StoreError::InvalidEvent)
+            ));
+        }
+    }
+
+    #[test]
+    fn compound_store_guards_reject_each_invalid_operand() {
+        assert_eq!(ReviewAssessment::Blocking.as_str(), "blocking");
+        assert_eq!(ReviewAssessment::Consider.as_str(), "consider");
+        assert_eq!(ReviewAssessment::Noted.as_str(), "noted");
+        assert_eq!(ReviewAssessment::Dismissed.as_str(), "dismissed");
+
+        let brief = brief();
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        store.create_job(&brief, 1).expect("job created");
+
+        store
+            .acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                "profile-one",
+                100,
+                2,
+            )
+            .expect("first profile lease");
+        assert!(matches!(
+            store.acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                "profile-one",
+                100,
+                3,
+            ),
+            Err(StoreError::LeaseConflict(resource)) if resource == "profile-one"
+        ));
+        store
+            .acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                "profile-two",
+                100,
+                3,
+            )
+            .expect("different profile lease");
+    }
+
+    #[test]
+    fn branch_and_artifact_guards_reject_each_invalid_operand() {
+        let brief = brief();
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        store.create_job(&brief, 1).expect("job created");
+        for worktree in ["relative/worktree", "/tmp/../escape"] {
+            assert!(matches!(
+                store.register_branch(
+                    &brief.unit_id,
+                    "nswarm/job-1/unit-1",
+                    std::path::Path::new(worktree),
+                    &brief.base_sha,
+                    4,
+                ),
+                Err(StoreError::InvalidWorktree(_))
+            ));
+        }
+        for (name, base) in [
+            ("nswarm/wrong/unit-1", brief.base_sha.clone()),
+            ("nswarm/job-1/unit-1", sha('b')),
+        ] {
+            assert!(matches!(
+                store.register_branch(
+                    &brief.unit_id,
+                    name,
+                    std::path::Path::new("/tmp/nswarm-worktrees/unit-1"),
+                    &base,
+                    4,
+                ),
+                Err(StoreError::InvalidBranchAssignment)
+            ));
+        }
+        store
+            .register_branch(
+                &brief.unit_id,
+                "nswarm/job-1/unit-1",
+                std::path::Path::new("/tmp/nswarm-worktrees/unit-1"),
+                &brief.base_sha,
+                4,
+            )
+            .expect("valid branch registration");
+        for artifact_path in ["", "/absolute/report.json", "artifacts/../secret"] {
+            assert!(matches!(
+                store.record_artifact(
+                    &brief.unit_id,
+                    ArtifactKind::Log,
+                    std::path::Path::new(artifact_path),
+                    &brief.base_sha,
+                    &sha('d'),
+                    5,
+                ),
+                Err(StoreError::InvalidArtifact)
+            ));
+        }
+
+        for state in [
+            JobState::Leased,
+            JobState::Grounding,
+            JobState::Implementing,
+        ] {
+            store
+                .transition(
+                    &brief.unit_id,
+                    state,
+                    &format!("state-{}", state.as_str()),
+                    6,
+                )
+                .expect("coding state advances");
+        }
+        assert!(matches!(
+            store.update_branch_head(&brief.unit_id, &brief.base_sha, &sha('b'), "", 7),
+            Err(StoreError::InvalidEvent)
+        ));
+    }
+
+    #[test]
+    fn secret_shape_detection_covers_each_supported_token_family() {
+        let secrets = [
+            format!("-----BEGIN {}-----", "PRIVATE KEY"),
+            "Bearer abcdefghijklmnopqrst".to_owned(),
+            "ghp_".to_owned() + &"a".repeat(32),
+            "gho_".to_owned() + &"b".repeat(32),
+            "ghu_".to_owned() + &"c".repeat(32),
+            "ghs_".to_owned() + &"d".repeat(32),
+            "ghr_".to_owned() + &"e".repeat(32),
+            "github_pat_".to_owned() + &"f".repeat(32),
+            "sk-".to_owned() + &"g".repeat(21),
+            "sk_".to_owned() + &"h".repeat(21),
+            "AKIA".to_owned() + &"I".repeat(16),
+        ];
+        for secret in secrets {
+            assert!(contains_secret_shape(&secret), "missed {secret}");
+        }
+        for ordinary in [
+            "Bearer abcdefghijklmnopqrs",
+            "ghp_short",
+            "sk-short",
+            "AKIAABCDEFGHIJKLMNO",
+            "ordinary evidence",
+        ] {
+            assert!(!contains_secret_shape(ordinary), "redacted {ordinary}");
+        }
+    }
+
+    #[test]
+    fn review_authorization_requires_both_job_and_role() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let candidate = sha('b');
+        prepare_reviewing_candidate(&mut store, &brief, &candidate);
+
+        let same_job_coder = ProfileId::new("same-job-coder").expect("profile id");
+        store
+            .register_profile(
+                &same_job_coder,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::Coder,
+                std::path::Path::new("/tmp/nswarm-same-job-coder"),
+                10,
+            )
+            .expect("same-job coder registered");
+
+        let mut other = brief.clone();
+        other.job_id = JobId::new("job-2").expect("other job");
+        other.unit_id = UnitId::new("unit-2").expect("other unit");
+        store.create_job(&other, 10).expect("other job created");
+        let other_job_reviewer = ProfileId::new("other-job-reviewer").expect("profile id");
+        store
+            .register_profile(
+                &other_job_reviewer,
+                &other.job_id,
+                &other.unit_id,
+                Role::VerifierReviewer,
+                std::path::Path::new("/tmp/nswarm-other-job-reviewer"),
+                11,
+            )
+            .expect("other-job reviewer registered");
+
+        for reviewer in [&same_job_coder, &other_job_reviewer] {
+            assert!(matches!(
+                store.record_review(
+                    &brief.unit_id,
+                    reviewer,
+                    &candidate,
+                    ReviewAssessment::Noted,
+                    &json!({"summary": "must not be accepted"}),
+                    12,
+                ),
+                Err(StoreError::UnauthorizedReviewer)
+            ));
+        }
     }
 
     #[test]

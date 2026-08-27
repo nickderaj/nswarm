@@ -12,9 +12,7 @@ use fleet::{
 fn main() -> ExitCode {
     match run(env::args().skip(1)) {
         Ok(output) => {
-            if !output.is_empty() {
-                print!("{output}");
-            }
+            print!("{output}");
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -191,6 +189,32 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         let unknown = run(["unknown".to_owned(), path.display().to_string()].into_iter())
             .expect_err("unknown command must fail");
         assert!(unknown.contains("unknown command"));
+
+        for args in [
+            vec!["check", ".", "extra"],
+            vec![
+                "render-gateway",
+                path.to_str().expect("UTF-8 path"),
+                "extra",
+            ],
+            vec![
+                "render",
+                path.to_str().expect("UTF-8 path"),
+                "--wrong",
+                path.to_str().expect("UTF-8 path"),
+            ],
+            vec![
+                "plan",
+                "--wrong",
+                ".",
+                ".",
+                path.to_str().expect("UTF-8 path"),
+            ],
+        ] {
+            let error = run(args.into_iter().map(str::to_owned))
+                .expect_err("invalid argument shape must fail before dispatch");
+            assert!(error.contains("unexpected"), "unexpected error: {error}");
+        }
     }
 
     #[test]
