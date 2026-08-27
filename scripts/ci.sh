@@ -27,7 +27,9 @@ cargo hack check --workspace --feature-powerset --depth 2
 cargo deny check
 cargo vet check
 cargo machete
-cargo llvm-cov --fail-under-lines 90 nextest --workspace --all-features
+cargo +nightly-2025-09-18 llvm-cov --branch --fail-under-lines 90 --json \
+  --output-path target/coverage.json nextest --workspace --all-features
+python3 scripts/check_coverage.py target/coverage.json origin/main
 
 if git cat-file -e origin/main:Cargo.toml 2>/dev/null; then
   require_command cargo-semver-checks

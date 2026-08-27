@@ -44,6 +44,16 @@ EXPECTED = {
 }
 
 
+def repository_path(value: str, *, kind: str) -> Path:
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts or "." in relative.parts:
+        fail(f"{kind}: unsafe repository-relative path {value!r}")
+    path = ROOT / relative
+    if path.is_symlink():
+        fail(f"{kind}: symlinks are prohibited")
+    return path
+
+
 def fail(message: str) -> None:
     raise ValueError(message)
 
@@ -114,13 +124,13 @@ def validate_profile(name: str, expected: dict[str, set[str]]) -> None:
     if profile["network"] != {"default": "deny", "brief_allow_list_required": True}:
         fail(f"{name}: network policy must default deny")
 
-    soul_path = ROOT / profile["soul"]
+    soul_path = repository_path(profile["soul"], kind=f"{name} soul")
     soul = soul_path.read_text(encoding="utf-8").lower()
     for phrase in ("immutable", "untrusted attributed", "cannot", "evidence"):
         if phrase not in soul:
             fail(f"{name}: SOUL missing required mechanism {phrase!r}")
 
-    skill_root = ROOT / profile["skills"]
+    skill_root = repository_path(profile["skills"], kind=f"{name} skills")
     actual_skills = {path.parent.name for path in skill_root.glob("*/SKILL.md")}
     if actual_skills != expected["skills"]:
         fail(f"{name}: skill inventory drift")
@@ -129,7 +139,8 @@ def validate_profile(name: str, expected: dict[str, set[str]]) -> None:
         if metadata["name"] != skill:
             fail(f"{name}/{skill}: name must match directory")
 
-    validate_memory(ROOT / profile["memory"] / "MEMORY.md")
+    memory_root = repository_path(profile["memory"], kind=f"{name} memory")
+    validate_memory(memory_root / "MEMORY.md")
 
     canonical = json.dumps(profile, indent=2, sort_keys=True) + "\n"
     generated_path = ROOT / "generated" / "profiles" / f"{name}.json"
@@ -141,6 +152,17 @@ def validate_profile(name: str, expected: dict[str, set[str]]) -> None:
 
 def main() -> int:
     try:
+        for root_name in ("profiles", "generated/profiles"):
+            root = ROOT / root_name
+            symlinks = [path for path in root.rglob("*") if path.is_symlink()]
+            if symlinks:
+                fail(f"{symlinks[0].relative_to(ROOT)}: symlinks are prohibited")
+        expected_generated = {f"{name}.json" for name in EXPECTED}
+        actual_generated = {
+            path.name for path in (ROOT / "generated" / "profiles").iterdir() if path.is_file()
+        }
+        if actual_generated != expected_generated:
+            fail("generated profile inventory drift")
         for profile_name, expected in EXPECTED.items():
             validate_profile(profile_name, expected)
     except (OSError, ValueError, tomllib.TOMLDecodeError, json.JSONDecodeError) as error:

@@ -250,4 +250,49 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn identifiers_and_required_text_fail_closed() {
+        for invalid in ["", "Telegram", "bad_surface", "has space"] {
+            assert!(matches!(
+                SurfaceId::new(invalid),
+                Err(ValidationError::InvalidSurface(value)) if value == invalid
+            ));
+        }
+        let surface = SurfaceId::new("telegram-bot1").expect("portable surface");
+        assert_eq!(surface.to_string(), "telegram-bot1");
+        assert_eq!(
+            UpdateKey::new(surface, "  "),
+            Err(ValidationError::EmptyExternalId)
+        );
+
+        let mut request = ConversationRequest {
+            conversation_id: String::new(),
+            text: "hello".to_owned(),
+            context: Vec::new(),
+        };
+        assert_eq!(
+            request.validate(),
+            Err(ValidationError::EmptyConversationId)
+        );
+        request.conversation_id = "chat-1".to_owned();
+        request.text = "  ".to_owned();
+        assert_eq!(request.validate(), Err(ValidationError::EmptyText));
+    }
+
+    #[test]
+    fn provider_startup_errors_are_redacted_for_callers() {
+        let request = ConversationRequest {
+            conversation_id: "chat-1".to_owned(),
+            text: String::new(),
+            context: Vec::new(),
+        };
+        let Err(error) = FakeProvider.stream(&request) else {
+            panic!("blank request must fail before streaming");
+        };
+        assert_eq!(
+            error.to_string(),
+            "provider unavailable: conversation text must not be empty"
+        );
+    }
 }

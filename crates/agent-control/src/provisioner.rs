@@ -60,13 +60,22 @@ impl LocalWorktreeProvisioner {
 impl WorktreeProvisioner for LocalWorktreeProvisioner {
     fn provision(&self, request: &WorktreeRequest) -> Result<(), ProvisionError> {
         let repository = request.repository.canonicalize()?;
-        if !repository.join(".git").exists() {
+        let git_control = repository.join(".git");
+        let git_metadata = match git_control.symlink_metadata() {
+            Ok(metadata) if !metadata.file_type().is_symlink() => metadata,
+            _ => return Err(ProvisionError::NotRepository(repository)),
+        };
+        if !(git_metadata.is_dir() || git_metadata.is_file()) {
             return Err(ProvisionError::NotRepository(repository));
         }
-        if request.destination.exists() {
-            return Err(ProvisionError::DestinationExists(
-                request.destination.clone(),
-            ));
+        match request.destination.symlink_metadata() {
+            Ok(_) => {
+                return Err(ProvisionError::DestinationExists(
+                    request.destination.clone(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         let parent = request
             .destination
@@ -162,6 +171,8 @@ pub enum ProvisionError {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::process::Command;
 
     use tempfile::TempDir;
@@ -290,12 +301,93 @@ mod tests {
         let request = WorktreeRequest {
             repository: not_repository.path().to_path_buf(),
             destination: root.path().join("unit-2"),
-            base_sha,
+            base_sha: base_sha.clone(),
             ..request
         };
         assert!(matches!(
             provisioner.provision(&request),
             Err(ProvisionError::NotRepository(_))
+        ));
+
+        fs::write(not_repository.path().join(".git"), "gitdir: missing\n")
+            .expect("write invalid git control file");
+        let request = WorktreeRequest {
+            destination: root.path().join("unit-3"),
+            base_sha,
+            ..request
+        };
+        assert!(matches!(
+            provisioner.provision(&request),
+            Err(ProvisionError::GitFailed(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_provisioner_rejects_a_dangling_destination_symlink() {
+        let (repository, base_sha) = repository();
+        let root = TempDir::new().expect("worktree root");
+        let destination = root.path().join("unit-1");
+        symlink(root.path().join("missing-target"), &destination).expect("dangling symlink");
+        let request = WorktreeRequest {
+            repository: repository.path().to_path_buf(),
+            destination,
+            job_id: JobId::new("job-1").expect("valid job"),
+            unit_id: UnitId::new("unit-1").expect("valid unit"),
+            base_sha,
+        };
+        let error = LocalWorktreeProvisioner::new(root.path())
+            .expect("provisioner")
+            .provision(&request)
+            .expect_err("dangling symlink must not be followed");
+        assert!(matches!(error, ProvisionError::DestinationExists(_)));
+
+        let symlink_repository = TempDir::new().expect("symlink repository");
+        symlink(
+            repository.path().join(".git"),
+            symlink_repository.path().join(".git"),
+        )
+        .expect("git control symlink");
+        let request = WorktreeRequest {
+            repository: symlink_repository.path().to_path_buf(),
+            destination: root.path().join("unit-2"),
+            ..request
+        };
+        assert!(matches!(
+            LocalWorktreeProvisioner::new(root.path())
+                .expect("provisioner")
+                .provision(&request),
+            Err(ProvisionError::NotRepository(_))
+        ));
+
+        let special_repository = TempDir::new().expect("special repository");
+        let status = Command::new("mkfifo")
+            .arg(special_repository.path().join(".git"))
+            .status()
+            .expect("mkfifo launches");
+        assert!(status.success());
+        let request = WorktreeRequest {
+            repository: special_repository.path().to_path_buf(),
+            destination: root.path().join("unit-3"),
+            ..request
+        };
+        assert!(matches!(
+            LocalWorktreeProvisioner::new(root.path())
+                .expect("provisioner")
+                .provision(&request),
+            Err(ProvisionError::NotRepository(_))
+        ));
+
+        let request = WorktreeRequest {
+            repository: repository.path().to_path_buf(),
+            destination: root.path().join("x".repeat(4096)),
+            ..request
+        };
+        assert!(matches!(
+            LocalWorktreeProvisioner::new(root.path())
+                .expect("provisioner")
+                .provision(&request),
+            Err(ProvisionError::Io(_))
         ));
     }
 }

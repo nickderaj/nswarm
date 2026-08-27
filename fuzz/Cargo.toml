@@ -9,6 +9,10 @@ license = "MIT"
 [package.metadata]
 cargo-fuzz = true
 
+[lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"
+
 [dependencies]
 fleet = { path = "../crates/fleet" }
 libfuzzer-sys = { version = "=0.4.13", default-features = false, features = ["arbitrary-derive"] }

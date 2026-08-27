@@ -549,7 +549,10 @@ impl ArtifactKind {
 
 /// Validates the bounded JSON-Schema subset accepted for worker reports.
 pub fn validate_report_schema(schema: &Value) -> bool {
-    validate_schema_node(schema, 0, true)
+    schema.as_object().is_some_and(|object| {
+        object.get("type").and_then(Value::as_str) == Some("object")
+            && validate_schema_node(schema, 0, true)
+    })
 }
 
 /// Checks a report recursively against a previously validated schema.
@@ -776,9 +779,59 @@ pub enum BriefError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::{JobState, PathPolicy, Sha};
+    use serde_json::json;
+
+    use super::{
+        ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
+        NetworkMode, NetworkPolicy, PathPolicy, ResourceLimits, RiskClass, Sha, UnitId,
+        VerificationCommand, report_matches_schema, validate_report_schema,
+    };
+
+    fn valid_brief() -> JobBrief {
+        JobBrief {
+            job_id: JobId::new("job-1").expect("valid job id"),
+            unit_id: UnitId::new("unit-1").expect("valid unit id"),
+            goal: "implement the scoped unit".to_owned(),
+            repository: "https://example.invalid/repository.git".to_owned(),
+            base_sha: Sha::new("a".repeat(40)).expect("valid SHA"),
+            paths: PathPolicy {
+                readable: vec![PathBuf::from("crates/assigned")],
+                writable: vec![PathBuf::from("crates/assigned")],
+                forbidden: vec![PathBuf::from("secrets")],
+            },
+            dependencies: Vec::new(),
+            acceptance_criteria: vec!["the focused tests pass".to_owned()],
+            verification_commands: vec![VerificationCommand {
+                program: "cargo".to_owned(),
+                arguments: vec!["test".to_owned()],
+            }],
+            risk_class: RiskClass::Medium,
+            limits: ResourceLimits {
+                wall_seconds: 60,
+                memory_bytes: 1_048_576,
+                disk_bytes: 1_048_576,
+                process_count: 8,
+                cost_microunits: 0,
+            },
+            network: NetworkPolicy {
+                mode: NetworkMode::DenyAll,
+                destinations: Vec::new(),
+            },
+            credential_grants: vec![CredentialGrant {
+                credential_id: "git-push-job-1".to_owned(),
+                methods: vec!["git:push:refs/heads/nswarm/job-1/unit-1".to_owned()],
+            }],
+            report_schema: json!({
+                "type": "object",
+                "required": ["status"],
+                "properties": {"status": {"type": "string"}},
+                "additionalProperties": false
+            }),
+            standing_policy_version: "v1".to_owned(),
+        }
+    }
 
     #[test]
     fn abbreviated_sha_is_rejected() {
@@ -802,5 +855,159 @@ mod tests {
         assert!(!JobState::Implementing.can_transition_to(JobState::Verified));
         assert!(!JobState::CandidateReady.can_transition_to(JobState::Merged));
         assert!(!JobState::Verified.can_transition_to(JobState::Merged));
+    }
+
+    #[test]
+    fn every_brief_boundary_fails_closed() {
+        assert!(valid_brief().validate().is_ok());
+
+        let mut brief = valid_brief();
+        brief.goal = "  ".to_owned();
+        assert_eq!(brief.validate(), Err(BriefError::EmptyGoal));
+
+        let mut brief = valid_brief();
+        brief.repository = "ssh://example.invalid/repository".to_owned();
+        assert_eq!(brief.validate(), Err(BriefError::InvalidRepository));
+
+        let mut brief = valid_brief();
+        brief.paths.readable.clear();
+        assert_eq!(brief.validate(), Err(BriefError::EmptyPathPolicy));
+
+        let mut brief = valid_brief();
+        brief.paths.readable = vec![PathBuf::from("../escape")];
+        assert!(matches!(brief.validate(), Err(BriefError::UnsafePath(_))));
+
+        let mut brief = valid_brief();
+        brief.paths.writable = vec![PathBuf::from("crates/other")];
+        assert!(matches!(
+            brief.validate(),
+            Err(BriefError::WritableNotReadable(_))
+        ));
+
+        let mut brief = valid_brief();
+        brief.paths.forbidden = vec![PathBuf::from("crates")];
+        assert!(matches!(
+            brief.validate(),
+            Err(BriefError::WritableForbidden(_))
+        ));
+
+        let mut brief = valid_brief();
+        brief.dependencies.push(brief.unit_id.clone());
+        assert_eq!(brief.validate(), Err(BriefError::SelfDependency));
+
+        let mut brief = valid_brief();
+        brief.acceptance_criteria = vec![" ".to_owned()];
+        assert_eq!(brief.validate(), Err(BriefError::EmptyAcceptanceCriteria));
+
+        let mut brief = valid_brief();
+        brief.verification_commands.clear();
+        assert_eq!(brief.validate(), Err(BriefError::EmptyVerificationCommands));
+
+        let mut brief = valid_brief();
+        brief.verification_commands[0].program = "cargo test".to_owned();
+        assert_eq!(
+            brief.validate(),
+            Err(BriefError::InvalidVerificationCommand)
+        );
+
+        let mut brief = valid_brief();
+        brief.limits.wall_seconds = 0;
+        assert_eq!(brief.validate(), Err(BriefError::ZeroResourceLimit));
+
+        let mut brief = valid_brief();
+        brief
+            .network
+            .destinations
+            .push("example.invalid".to_owned());
+        assert_eq!(brief.validate(), Err(BriefError::DestinationsWithDenyAll));
+
+        let mut brief = valid_brief();
+        brief.network.mode = NetworkMode::AllowList;
+        assert_eq!(brief.validate(), Err(BriefError::EmptyNetworkAllowList));
+
+        let mut brief = valid_brief();
+        brief.network.mode = NetworkMode::AllowList;
+        brief.network.destinations.push("*".to_owned());
+        assert_eq!(brief.validate(), Err(BriefError::InvalidNetworkDestination));
+
+        let mut brief = valid_brief();
+        brief.credential_grants[0].methods = vec!["*".to_owned()];
+        assert_eq!(brief.validate(), Err(BriefError::InvalidCredentialGrant));
+
+        let mut brief = valid_brief();
+        brief.report_schema = json!({"type": "array", "items": {"type": "string"}});
+        assert_eq!(brief.validate(), Err(BriefError::InvalidReportSchema));
+
+        let mut brief = valid_brief();
+        brief.standing_policy_version = " ".to_owned();
+        assert_eq!(brief.validate(), Err(BriefError::EmptyPolicyVersion));
+    }
+
+    #[test]
+    fn report_schema_is_bounded_and_enforced() {
+        let schema = valid_brief().report_schema;
+        assert!(validate_report_schema(&schema));
+        assert!(report_matches_schema(&schema, &json!({"status": "ok"})));
+        assert!(!report_matches_schema(&schema, &json!({})));
+        assert!(!report_matches_schema(
+            &schema,
+            &json!({"status": "ok", "unreviewed": true})
+        ));
+        assert!(!report_matches_schema(&schema, &json!({"status": 1})));
+        assert!(!validate_report_schema(&json!({
+            "type": "object",
+            "required": [],
+            "properties": {}
+        })));
+        assert!(!validate_report_schema(&json!({
+            "type": "object",
+            "required": ["missing"],
+            "properties": {}
+        })));
+        assert!(!validate_report_schema(&json!({
+            "type": "object",
+            "required": ["status", "status"],
+            "properties": {"status": {"type": "string"}}
+        })));
+    }
+
+    #[test]
+    fn stable_state_and_artifact_encodings_are_complete() {
+        let states = [
+            JobState::Pending,
+            JobState::Leased,
+            JobState::Grounding,
+            JobState::Implementing,
+            JobState::SelfVerifying,
+            JobState::CandidateReady,
+            JobState::IndependentlyVerifying,
+            JobState::Reviewing,
+            JobState::Verified,
+            JobState::Integrating,
+            JobState::Integrated,
+            JobState::MergeAuthorized,
+            JobState::Merged,
+            JobState::Blocked,
+            JobState::FixRequired,
+            JobState::Superseded,
+            JobState::Abandoned,
+            JobState::Quarantined,
+        ];
+        for state in states {
+            assert_eq!(JobState::try_from(state.as_str()), Ok(state));
+        }
+        assert!(matches!(
+            JobState::try_from("invented"),
+            Err(BriefError::UnknownState(_))
+        ));
+        assert_eq!(LeaseKind::Path.as_str(), "path");
+        assert_eq!(LeaseKind::Topology.as_str(), "topology");
+        assert_eq!(LeaseKind::Profile.as_str(), "profile");
+        assert_eq!(ArtifactKind::TestReport.as_str(), "test-report");
+        assert_eq!(ArtifactKind::CoverageReport.as_str(), "coverage-report");
+        assert_eq!(ArtifactKind::Diff.as_str(), "diff");
+        assert_eq!(ArtifactKind::Log.as_str(), "log");
+        assert_eq!(ArtifactKind::ClaimManifest.as_str(), "claim-manifest");
+        assert_eq!(ArtifactKind::Handoff.as_str(), "handoff");
     }
 }

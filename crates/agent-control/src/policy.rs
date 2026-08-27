@@ -118,4 +118,22 @@ mod tests {
         assert!(!Role::Shipper.can(Capability::RepositoryRead));
         assert!(!Role::Shipper.can(Capability::RepositoryWrite));
     }
+
+    #[test]
+    fn control_roles_receive_only_their_declared_authority() {
+        assert_eq!(Role::Coordinator.as_str(), "coordinator");
+        assert!(Role::Coordinator.can(Capability::Coordinate));
+        assert!(!Role::Coordinator.can(Capability::RepositoryWrite));
+
+        assert_eq!(Role::VerifierReviewer.as_str(), "verifier-reviewer");
+        assert!(Role::VerifierReviewer.can(Capability::Verify));
+        assert!(!Role::VerifierReviewer.can(Capability::Integrate));
+
+        assert_eq!(Role::Integrator.as_str(), "integrator");
+        assert!(Role::Integrator.can(Capability::Integrate));
+        assert!(!Role::Integrator.can(Capability::Merge));
+        assert_eq!(Role::Research.as_str(), "research");
+        assert_eq!(Role::Coder.as_str(), "coder");
+        assert_eq!(Role::Shipper.as_str(), "shipper");
+    }
 }

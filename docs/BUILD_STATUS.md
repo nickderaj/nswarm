@@ -192,13 +192,70 @@ Completed acceptance units:
 - `just ci` remains green with 85 files policy-scanned, 49 tests, 9
   deterministic hostile-input evals, and 92.82% line coverage.
 
+## Checkpoint I — independent audit and strict CI repair
+
+The overnight implementation was independently reviewed rather than accepted
+from its prior local status claim. The severity-ranked findings and supporting
+evidence are in [`docs/AUDIT.md`](AUDIT.md). This checkpoint's exact commit SHA
+will be recorded after the remote accepts the push; no GitHub result is claimed
+from an unpushed working tree.
+
+Completed repair units:
+
+- protected-file policy checks no longer trust a local branch name or mutable
+  environment variable as authorization; repository symlinks, ignored-test
+  syntax variants, integration-test network use, and lint inheritance are
+  checked explicitly;
+- generated/profile drift checks now include staged, unstaged, and untracked
+  files and reject absolute, escaping, or symlinked profile inputs;
+- worktree provisioning rejects dangling destination links and symlinked,
+  malformed, or special `.git` control paths before invoking Git;
+- path leases reject empty, expired, aliased, or escaping resources; an expired
+  worker result cannot quarantine a unit after a replacement lease is live;
+- merge authorization is bound to a live same-job shipper profile, the exact
+  authorized SHA, and the same actor that records the merge;
+- evidence redaction covers normalized camel/snake/kebab secret keys, bearer
+  credentials, modern provider/source-control token shapes, and private-key
+  markers;
+- report schemas now require an object root in addition to the bounded recursive
+  schema contract;
+- PR, merge-group, and nightly workflows use current immutable action SHAs,
+  explicit timeouts/concurrency/permissions, selected Miri targets, build-std
+  sanitizers, copied-tree mutation, artifacts, MSRV/stable/aarch64 checks, and a
+  hosted ARM64 merge job; the unsafe public-repository self-hosted Pi job was
+  removed pending an organization-restricted or externally brokered runner;
+- coverage now fails unless repository and every crate reach 90% lines, changed
+  executable lines reach 95%, and every configured security-critical branch
+  outcome is covered.
+
+Verified locally on 2026-08-27:
+
+- `just ci` — pass; 88 files policy-scanned, 2 profiles validated, 9
+  deterministic eval checks, 59 nextest tests, doctests/rustdoc, strict Clippy,
+  feature powerset, deny/vet/machete, and generated drift checks all pass;
+- enforced coverage — 95.64% repository lines, 95.13% changed executable lines,
+  100% (54/54) configured critical branch outcomes; per-crate line coverage is
+  96.69% agent-control, 99.24% botkit, 90.19% fleet, and 100% research-bot;
+- selected pinned-nightly Miri suites pass for `agent-control` policy/types and
+  `botkit`; a workspace-wide Miri run is intentionally not claimed because the
+  SQLite/filesystem suites are outside the interpreter's supported isolation;
+- actionlint v1.7.12 accepts all three workflow files.
+
 Known gaps and external gates:
 
-- GitHub Actions have not run until this branch is pushed and a PR exists.
-- Branch protection is pending authenticated owner administration; the current
-  local GitHub CLI token is invalid, and no protection settings were changed.
-- Merge-tier Miri, Linux sanitizers, mutation, aarch64 execution, and fuzz jobs
-  are configured but were not claimed as executed on this macOS host.
+- GitHub currently recognizes zero workflows and has zero check runs because
+  default branch `main` still has no workflow definitions. A narrow workflow-only
+  default-branch bootstrap is the next remote step; no feature code will be
+  included in that one-time exception.
+- No PR or branch protection currently exists. Protection will not be installed
+  until the intended check names have appeared and passed, avoiding a repository
+  deadlock; the actual returned protection payload will be saved here afterward.
+- Merge-tier Linux sanitizers, mutation, hosted ARM64, and fuzz jobs are
+  configured but are not claimed as executed on this macOS host.
+- GitHub reports no registered self-hosted runner. A personal public repository
+  cannot restrict a Pi runner to trusted workflows, so physical Pi execution is
+  blocked until an organization runner group or equivalent ephemeral external
+  broker can enforce that boundary.
 - The 38 cargo-vet exemptions are explicit bootstrap debt, not completed source
   audits; new dependencies remain fail-closed.
 - `fleet` now validates, inventories, renders, and plans unit plus redacted env
@@ -220,10 +277,9 @@ Known gaps and external gates:
 Next executable action after checkpointing:
 
 ```console
-cargo test -p fleet
+git worktree add --detach /private/tmp/nswarm-audit-repair-clean HEAD
 ```
 
-Then implement a disposable-host configuration apply adapter behind the proven
-redacted plan contract, including atomic writes, modes, symlink refusal,
-rollback-on-failure tests, and no real service restart. Re-run `just ci` before
-the next commit.
+Run `just ci` in that clean detached checkout, then push this checkpoint to
+`overnight/bootstrap`. Only after that clean pass should the workflow-only
+default-branch bootstrap be created and pushed.

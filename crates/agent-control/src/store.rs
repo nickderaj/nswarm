@@ -475,13 +475,10 @@ impl ControlStore {
         &mut self,
         unit_id: &UnitId,
         head_sha: &Sha,
-        authorized_by: &str,
+        authorized_by: &ProfileId,
         idempotency_key: &str,
         now: i64,
     ) -> Result<(), StoreError> {
-        if authorized_by.trim().is_empty() {
-            return Err(StoreError::MissingAuthorizer);
-        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -491,6 +488,16 @@ impl ControlStore {
                 current,
                 next: JobState::MergeAuthorized,
             });
+        }
+        let authorized: Option<i64> = transaction
+            .query_row(
+                "SELECT 1 FROM profiles WHERE profile_id = ?1 AND job_id = ?2 AND role = ?3 AND destroyed_at IS NULL",
+                params![authorized_by.as_str(), job_id.as_str(), Role::Shipper.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if authorized.is_none() {
+            return Err(StoreError::UnauthorizedShipper);
         }
         let candidate = candidate_sha_tx(&transaction, unit_id)?;
         if candidate != *head_sha {
@@ -502,7 +509,7 @@ impl ControlStore {
         require_passing_verdict_tx(&transaction, unit_id, head_sha)?;
         transaction.execute(
             "INSERT INTO merge_authorizations (unit_id, head_sha, authorized_by, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![unit_id.as_str(), head_sha.as_str(), authorized_by, now],
+            params![unit_id.as_str(), head_sha.as_str(), authorized_by.as_str(), now],
         )?;
         update_state_tx(&transaction, unit_id, JobState::MergeAuthorized, now)?;
         append_event_tx(
@@ -510,7 +517,7 @@ impl ControlStore {
             &job_id,
             idempotency_key,
             "merge-authorized",
-            &json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str(), "authorized_by": authorized_by}),
+            &json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str(), "authorized_by": authorized_by.as_str()}),
             now,
         )?;
         transaction.commit()?;
@@ -526,6 +533,7 @@ impl ControlStore {
         &mut self,
         unit_id: &UnitId,
         head_sha: &Sha,
+        merged_by: &ProfileId,
         idempotency_key: &str,
         now: i64,
     ) -> Result<(), StoreError> {
@@ -539,22 +547,24 @@ impl ControlStore {
                 next: JobState::Merged,
             });
         }
-        let authorized: Option<String> = transaction
+        let authorized: Option<(String, String)> = transaction
             .query_row(
-                "SELECT head_sha FROM merge_authorizations WHERE unit_id = ?1",
+                "SELECT head_sha, authorized_by FROM merge_authorizations WHERE unit_id = ?1",
                 [unit_id.as_str()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if authorized.as_deref() != Some(head_sha.as_str()) {
-            let expected = authorized
-                .map(Sha::new)
-                .transpose()?
-                .ok_or(StoreError::MissingMergeAuthorization)?;
+        let (authorized_sha, authorized_actor) =
+            authorized.ok_or(StoreError::MissingMergeAuthorization)?;
+        let expected = Sha::new(authorized_sha)?;
+        if expected != *head_sha {
             return Err(StoreError::UnauthorizedSha {
                 expected,
                 actual: head_sha.clone(),
             });
+        }
+        if authorized_actor != merged_by.as_str() {
+            return Err(StoreError::UnauthorizedShipper);
         }
         update_state_tx(&transaction, unit_id, JobState::Merged, now)?;
         append_event_tx(
@@ -562,7 +572,7 @@ impl ControlStore {
             &job_id,
             idempotency_key,
             "merged",
-            &json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str()}),
+            &json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str(), "merged_by": merged_by.as_str()}),
             now,
         )?;
         transaction.commit()?;
@@ -587,7 +597,10 @@ impl ControlStore {
         expires_at: i64,
         now: i64,
     ) -> Result<i64, StoreError> {
-        if resource.trim().is_empty() || expires_at <= now {
+        if resource.trim().is_empty()
+            || expires_at <= now
+            || (kind == LeaseKind::Path && !is_safe_relative_path(Path::new(resource)))
+        {
             return Err(StoreError::InvalidLease);
         }
         let transaction = self
@@ -672,7 +685,12 @@ impl ControlStore {
             .optional()?
             .unwrap_or(false);
         if !live {
-            if current.can_transition_to(JobState::Quarantined) {
+            let replacement_live: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM leases WHERE unit_id = ?1 AND released_at IS NULL AND expires_at > ?2)",
+                params![unit_id.as_str(), now],
+                |row| row.get(0),
+            )?;
+            if !replacement_live && current.can_transition_to(JobState::Quarantined) {
                 update_state_tx(&transaction, unit_id, JobState::Quarantined, now)?;
             }
             append_event_tx(
@@ -786,7 +804,7 @@ impl ControlStore {
         home: &Path,
         now: i64,
     ) -> Result<(), StoreError> {
-        if !home.is_absolute() {
+        if !is_normalized_absolute_path(home) {
             return Err(StoreError::InvalidProfileHome(home.to_path_buf()));
         }
         let transaction = self
@@ -1021,7 +1039,7 @@ impl ControlStore {
         base_sha: &Sha,
         now: i64,
     ) -> Result<(), StoreError> {
-        if !worktree.is_absolute() {
+        if !is_normalized_absolute_path(worktree) {
             return Err(StoreError::InvalidWorktree(worktree.to_path_buf()));
         }
         let transaction = self
@@ -1439,24 +1457,44 @@ fn path_resources_overlap(left: &str, right: &str) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
+fn is_safe_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn is_normalized_absolute_path(path: &Path) -> bool {
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+}
+
 fn redact_evidence(value: &Value) -> Value {
     match value {
         Value::Object(object) => Value::Object(
             object
                 .iter()
                 .map(|(key, item)| {
-                    let upper = key.to_ascii_uppercase();
+                    let normalized = key
+                        .chars()
+                        .filter(char::is_ascii_alphanumeric)
+                        .flat_map(char::to_lowercase)
+                        .collect::<String>();
                     let secret_field = [
-                        "KEY",
-                        "TOKEN",
-                        "PASSWORD",
-                        "SECRET",
-                        "CREDENTIAL",
-                        "AUTHORIZATION",
-                        "COOKIE",
+                        "key",
+                        "token",
+                        "password",
+                        "passphrase",
+                        "secret",
+                        "credential",
+                        "authorization",
+                        "cookie",
                     ]
                     .iter()
-                    .any(|name| upper == *name || upper.ends_with(&format!("_{name}")));
+                    .any(|name| normalized == *name || normalized.ends_with(name));
                     (
                         key.clone(),
                         if secret_field {
@@ -1477,14 +1515,29 @@ fn redact_evidence(value: &Value) -> Value {
 }
 
 fn contains_secret_shape(text: &str) -> bool {
-    text.to_ascii_uppercase().contains("PRIVATE KEY")
+    let upper = text.to_ascii_uppercase();
+    upper.contains("PRIVATE KEY")
+        || upper.split("BEARER ").skip(1).any(|remainder| {
+            remainder
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .count()
+                >= 20
+        })
         || text
             .split(|character: char| {
                 !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
             })
             .any(|word| {
-                (word.starts_with("ghp_") && word.len() >= 30)
-                    || (word.starts_with("sk-") && word.len() >= 20)
+                ((word.starts_with("ghp_")
+                    || word.starts_with("gho_")
+                    || word.starts_with("ghu_")
+                    || word.starts_with("ghs_")
+                    || word.starts_with("ghr_")
+                    || word.starts_with("github_pat_"))
+                    && word.len() >= 30)
+                    || ((word.starts_with("sk-") || word.starts_with("sk_")) && word.len() >= 20)
+                    || (word.starts_with("AKIA") && word.len() == 20)
             })
 }
 
@@ -1539,9 +1592,9 @@ pub enum StoreError {
         /// Refused requested SHA.
         actual: Sha,
     },
-    /// Authorization must be attributable.
-    #[error("merge authorizer must not be empty")]
-    MissingAuthorizer,
+    /// Merge authorization requires a live same-job shipper profile.
+    #[error("profile is not an authorized live shipper")]
+    UnauthorizedShipper,
     /// Shipper attempted merge without a recorded capability grant.
     #[error("merge authorization is missing")]
     MissingMergeAuthorization,
@@ -1975,6 +2028,21 @@ mod tests {
         }
     }
 
+    fn register_shipper(store: &mut ControlStore, brief: &JobBrief, now: i64) -> ProfileId {
+        let shipper = ProfileId::new("shipper-job-1").expect("shipper id");
+        store
+            .register_profile(
+                &shipper,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::Shipper,
+                std::path::Path::new("/tmp/nswarm-shipper-job-1"),
+                now,
+            )
+            .expect("shipper profile registered");
+        shipper
+    }
+
     fn record_unresolved_reviews(
         store: &mut ControlStore,
         brief: &JobBrief,
@@ -2114,7 +2182,13 @@ mod tests {
             JobState::CandidateReady
         );
         assert!(matches!(
-            store.authorize_merge(&unit, &sha('c'), "owner", "authorize", 18),
+            store.authorize_merge(
+                &unit,
+                &sha('c'),
+                &ProfileId::new("shipper-job-1").expect("shipper id"),
+                "authorize",
+                18,
+            ),
             Err(StoreError::InvalidTransition { .. })
         ));
     }
@@ -2145,6 +2219,42 @@ mod tests {
             ),
             Err(StoreError::LeaseConflict(_))
         ));
+
+        let mut reverse_store = ControlStore::open_in_memory().expect("reverse store");
+        reverse_store
+            .create_job(&brief, 1)
+            .expect("reverse job created");
+        reverse_store
+            .acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Path,
+                "crates/assigned/src",
+                100,
+                2,
+            )
+            .expect("child path leased");
+        assert!(matches!(
+            reverse_store.acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Path,
+                "crates/assigned",
+                100,
+                3,
+            ),
+            Err(StoreError::LeaseConflict(_))
+        ));
+        store
+            .acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Path,
+                "crates/other",
+                100,
+                3,
+            )
+            .expect("disjoint path lease");
         store
             .acquire_lease(
                 &brief.job_id,
@@ -2165,6 +2275,48 @@ mod tests {
                 4,
             ),
             Err(StoreError::LeaseConflict(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_path_leases_and_job_aliases_are_rejected() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        assert!(matches!(
+            store.acquire_lease(
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Path,
+                "crates/other/../assigned",
+                100,
+                3,
+            ),
+            Err(StoreError::InvalidLease)
+        ));
+        for (resource, expires_at) in [("", 100), ("crates/other", 3)] {
+            assert!(matches!(
+                store.acquire_lease(
+                    &brief.job_id,
+                    &brief.unit_id,
+                    LeaseKind::Path,
+                    resource,
+                    expires_at,
+                    3,
+                ),
+                Err(StoreError::InvalidLease)
+            ));
+        }
+        assert!(matches!(
+            store.acquire_lease(
+                &JobId::new("job-2").expect("other job"),
+                &brief.unit_id,
+                LeaseKind::Path,
+                "crates/other",
+                100,
+                3,
+            ),
+            Err(StoreError::JobUnitMismatch)
         ));
     }
 
@@ -2194,6 +2346,35 @@ mod tests {
             store.state(&brief.unit_id).expect("state"),
             JobState::Quarantined
         );
+        assert!(matches!(
+            store.accept_worker_result(&brief.unit_id, lease, &sha('c'), 11),
+            Err(StoreError::StaleLease(id)) if id == lease
+        ));
+    }
+
+    #[test]
+    fn lease_refuses_unsatisfied_dependencies() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let prerequisite = brief();
+        store
+            .create_job(&prerequisite, 1)
+            .expect("prerequisite created");
+        let mut dependent = brief();
+        dependent.job_id = JobId::new("job-2").expect("dependent job");
+        dependent.unit_id = UnitId::new("unit-2").expect("dependent unit");
+        dependent.dependencies = vec![prerequisite.unit_id.clone()];
+        store.create_job(&dependent, 2).expect("dependent created");
+        assert!(matches!(
+            store.acquire_lease(
+                &dependent.job_id,
+                &dependent.unit_id,
+                LeaseKind::Path,
+                "crates/dependent",
+                100,
+                3,
+            ),
+            Err(StoreError::DependenciesUnsatisfied(1))
+        ));
     }
 
     #[test]
@@ -2271,6 +2452,9 @@ mod tests {
 
         let provider_token = "sk-".to_owned() + &"x".repeat(24);
         let source_token = "ghp_".to_owned() + &"y".repeat(30);
+        let modern_token = "github_pat_".to_owned() + &"z".repeat(32);
+        let bearer_token = "t0k3n".to_owned() + &"q".repeat(27);
+        let private_marker = format!("-----BEGIN {} {}-----", "PRIVATE", "KEY");
         store
             .record_report(
                 &brief.unit_id,
@@ -2280,7 +2464,13 @@ mod tests {
                         "checks": ["focused test passed"],
                         "details": {
                             "OPENROUTER_API_KEY": provider_token,
-                            "nested": [{"authorization": source_token}]
+                            "apiKey": "synthetic-camel-case-key",
+                            "nested": [
+                                {"authorization": source_token},
+                                {"note": modern_token},
+                                {"privateMaterial": private_marker},
+                                {"header": format!("Bearer {bearer_token}")}
+                            ]
                         }
                     }
                 }),
@@ -2299,7 +2489,11 @@ mod tests {
             .expect("stored report");
         assert!(!stored.contains(&provider_token));
         assert!(!stored.contains(&source_token));
-        assert_eq!(stored.matches("[REDACTED]").count(), 2);
+        assert!(!stored.contains(&modern_token));
+        assert!(!stored.contains(&bearer_token));
+        assert!(!stored.contains("BEGIN PRIVATE KEY"));
+        assert!(!stored.contains("synthetic-camel-case-key"));
+        assert_eq!(stored.matches("[REDACTED]").count(), 6);
         assert!(stored.contains("focused test passed"));
     }
 
@@ -2409,19 +2603,39 @@ mod tests {
                 .expect("unchanged integration remains verified"),
             JobState::Integrated
         );
+        let unregistered = ProfileId::new("unregistered-shipper").expect("shipper id");
         assert!(matches!(
-            store.authorize_merge(&unit, &sha('c'), "owner", "wrong-auth", 18),
+            store.authorize_merge(&unit, &candidate, &unregistered, "untrusted-auth", 18),
+            Err(StoreError::UnauthorizedShipper)
+        ));
+        let shipper = register_shipper(&mut store, &brief, 18);
+        assert!(matches!(
+            store.record_merged(&unit, &candidate, &shipper, "premature-merge", 19),
+            Err(StoreError::InvalidTransition { .. })
+        ));
+        assert!(matches!(
+            store.authorize_merge(&unit, &sha('c'), &shipper, "wrong-auth", 19),
             Err(StoreError::UnauthorizedSha { .. })
         ));
         store
-            .authorize_merge(&unit, &candidate, "owner", "authorize-full", 19)
+            .authorize_merge(&unit, &candidate, &shipper, "authorize-full", 20)
             .expect("exact SHA authorized");
         assert!(matches!(
-            store.record_merged(&unit, &sha('c'), "wrong-merge", 20),
+            store.record_merged(
+                &unit,
+                &candidate,
+                &ProfileId::new("different-shipper").expect("different shipper"),
+                "wrong-shipper",
+                21,
+            ),
+            Err(StoreError::UnauthorizedShipper)
+        ));
+        assert!(matches!(
+            store.record_merged(&unit, &sha('c'), &shipper, "wrong-merge", 21),
             Err(StoreError::UnauthorizedSha { .. })
         ));
         store
-            .record_merged(&unit, &candidate, "merged-full", 21)
+            .record_merged(&unit, &candidate, &shipper, "merged-full", 22)
             .expect("exact SHA merged");
         assert_eq!(store.state(&unit).expect("state"), JobState::Merged);
     }
@@ -2540,6 +2754,17 @@ mod tests {
             )
             .expect("expired lease is closed before replacement");
         assert_ne!(first, second);
+        assert!(matches!(
+            store.accept_worker_result(&brief.unit_id, first, &sha('c'), 12),
+            Err(StoreError::StaleLease(id)) if id == first
+        ));
+        assert_eq!(
+            store.state(&brief.unit_id).expect("state"),
+            JobState::Leased
+        );
+        store
+            .accept_worker_result(&brief.unit_id, second, &sha('c'), 12)
+            .expect("replacement lease remains authoritative");
     }
 
     #[test]
