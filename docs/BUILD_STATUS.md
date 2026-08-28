@@ -647,3 +647,79 @@ tooling remains relevant to produced artifacts even when it does not execute in
 the service. `cargo vet check` remains in `just ci`, so newly resolved versions
 continue to fail closed. `scripts/inventory_vet.py` regenerates the table from
 the vet configuration, Cargo's graph, and crates.io exact-version records.
+
+## Checkpoint V — final exact-head evidence and protected main
+
+The repaired content head is
+`8ce78f1f2bf543a45b27c89d72b131ba7bac5849`. A brand-new target directory
+(`/private/tmp/nswarm-clean-target.9rHl8b`) passed the complete `just ci` gate,
+followed by the ordinary repository target passing the same gate. Both runs
+executed 90/90 tests with none skipped, retained all policy, generated,
+supply-chain, documentation, feature-power-set, and coverage checks, and
+reported 97.18% repository and changed executable-line coverage with 292/292
+critical branch outcomes.
+
+All eight jobs passed at that exact SHA in
+[PR run `33209535355`](https://github.com/nickderaj/nswarm/actions/runs/33209535355).
+The complete 16,942-line log contains no Actions error/warning annotations or
+failure markers. It records 90/90 tests, five production-backed evals, 91
+policy-scanned files, two profiles, 38 explicit cargo-vet exemptions, clean
+deny/vet/machete results, reproducible release outputs, MSRV 1.90, current
+stable, aarch64 compilation, 1,688,062 bounded fuzz executions, 97.18%
+repository and changed-line coverage, and 292/292 critical branch outcomes.
+
+All four jobs then passed against the same exact SHA in
+[merge-tier run `33210099911`](https://github.com/nickderaj/nswarm/actions/runs/33210099911).
+The complete 1,849-line log contains no Actions error/warning annotations or
+failure markers. Hosted aarch64 ran all 90 tests, Miri and Address/Leak
+Sanitizer passed, and mutation tested 494 candidates with 342 caught, 152
+unviable, and zero survivors.
+
+After those results, `main` protection was applied and queried back through the
+GitHub API. The material returned configuration is:
+
+```json
+{
+  "required_status_checks": {
+    "strict": true,
+    "checks": [
+      {"context":"PR / quality","app_id":15368},
+      {"context":"PR / dependencies","app_id":15368},
+      {"context":"PR / coverage","app_id":15368},
+      {"context":"PR / msrv","app_id":15368},
+      {"context":"PR / current-stable","app_id":15368},
+      {"context":"PR / aarch64-compile","app_id":15368},
+      {"context":"PR / bounded-fuzz","app_id":15368},
+      {"context":"PR / reproducibility","app_id":15368},
+      {"context":"Merge queue / sanitizers","app_id":15368},
+      {"context":"Merge queue / miri","app_id":15368},
+      {"context":"Merge queue / mutation","app_id":15368},
+      {"context":"Merge queue / aarch64-hosted","app_id":15368}
+    ]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": true,
+    "require_code_owner_reviews": true,
+    "require_last_push_approval": true,
+    "required_approving_review_count": 1
+  },
+  "required_linear_history": true,
+  "required_conversation_resolution": true,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "block_creations": false,
+  "allow_fork_syncing": false,
+  "restrictions": null
+}
+```
+
+PR #1 is correctly blocked with `REVIEW_REQUIRED`: its author and last pusher
+is `nickderaj`, there are no reviews, the only collaborator is `nickderaj`, and
+every protected CODEOWNERS path also names only `@nickderaj`. A second trusted
+Write/Maintain collaborator must accept access, become the relevant CODEOWNER,
+and approve a head they did not push. The branch also contains merge commit
+`c119086`; protected `main` requires linear history while the bootstrap request
+forbids squash and history rewriting. The recommended narrow resolution is an
+explicit owner authorization to squash-merge PR #1 after trusted approval. No
+merge has been performed.

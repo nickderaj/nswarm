@@ -1,8 +1,10 @@
 # Branch protection
 
-GitHub administration is an external, owner-authorized step. Until an
-authenticated administrator applies `scripts/configure_branch_protection.sh`,
-the repository configuration is **pending** even when all local checks pass.
+An authenticated administrator applied `scripts/configure_branch_protection.sh`
+to `main` on 2026-08-28 after the repaired exact head passed every PR and
+merge-tier job. The configuration was then read back through GitHub's API; the
+returned state is recorded in `docs/BUILD_STATUS.md` rather than inferred from
+this template.
 
 Required policy for `main`:
 
@@ -23,6 +25,11 @@ does not support GitHub merge queues; GitHub documents that public-repository
 merge queues require organization ownership. Until the repository moves to an
 organization, the same merge-tier workflow is dispatched manually at the exact
 PR head SHA and remains required by branch protection.
+
+The API rejects an empty legacy `contexts` array when an app-bound `checks`
+array is supplied, so the template uses only `checks`. GitHub reports
+`allow_fork_syncing` disabled for this branch; the template matches that actual
+state.
 
 Required signed commits are not enabled in this bootstrap. The existing
 `overnight/bootstrap` history predates a signing policy and contains unsigned
