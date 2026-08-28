@@ -857,19 +857,35 @@ mod tests {
     }
 
     #[test]
-    fn sibling_path_is_not_visible() {
-        let policy = PathPolicy {
-            readable: vec!["crates/assigned".into()],
-            writable: vec!["crates/assigned".into()],
-            forbidden: vec!["crates/sibling".into()],
-        };
-        assert!(policy.can_write(Path::new("crates/assigned/src/lib.rs")));
-        assert!(policy.can_read(Path::new("crates/assigned/src/lib.rs")));
-        assert!(!policy.can_read(Path::new("crates/assigned/../sibling")));
-        assert!(!policy.can_read(Path::new("crates/sibling/src/lib.rs")));
-        assert!(!policy.can_write(Path::new("crates/other/src/lib.rs")));
-        assert!(!policy.can_write(Path::new("")));
-        assert!(!policy.can_write(Path::new("/crates/assigned")));
+    fn eval_path_corpus_enforces_containment() {
+        let case: serde_json::Value =
+            serde_json::from_str(include_str!("../../../eval/corpus/path-containment.json"))
+                .expect("path eval corpus parses");
+        let policy: PathPolicy = serde_json::from_value(case["input"]["policy"].clone())
+            .expect("path policy uses the production schema");
+        let probes = case["input"]["probes"]
+            .as_array()
+            .expect("path probes are an array");
+        assert_eq!(
+            probes.len() as u64,
+            case["expected"]["probe_count"]
+                .as_u64()
+                .expect("expected probe count")
+        );
+        for probe in probes {
+            let path = Path::new(probe["path"].as_str().expect("probe path is text"));
+            let allowed = match probe["operation"].as_str().expect("operation is text") {
+                "read" => policy.can_read(path),
+                "write" => policy.can_write(path),
+                operation => panic!("unknown path operation: {operation}"),
+            };
+            assert_eq!(
+                allowed,
+                probe["allowed"].as_bool().expect("allowed is a boolean"),
+                "unexpected path decision for {}",
+                path.display()
+            );
+        }
     }
 
     #[test]
@@ -931,10 +947,32 @@ mod tests {
     }
 
     #[test]
-    fn prose_cannot_skip_verification_states() {
-        assert!(!JobState::Implementing.can_transition_to(JobState::Verified));
-        assert!(!JobState::CandidateReady.can_transition_to(JobState::Merged));
-        assert!(!JobState::Verified.can_transition_to(JobState::Merged));
+    fn eval_transition_policy_corpus_fails_closed() {
+        let case: serde_json::Value =
+            serde_json::from_str(include_str!("../../../eval/corpus/transition-policy.json"))
+                .expect("transition eval corpus parses");
+        let transitions = case["input"]["transitions"]
+            .as_array()
+            .expect("transitions are an array");
+        assert_eq!(
+            transitions.len() as u64,
+            case["expected"]["transition_count"]
+                .as_u64()
+                .expect("expected transition count")
+        );
+        for transition in transitions {
+            let source: JobState = serde_json::from_value(transition["from"].clone())
+                .expect("source state uses the production encoding");
+            let target: JobState = serde_json::from_value(transition["to"].clone())
+                .expect("target state uses the production encoding");
+            assert_eq!(
+                source.can_transition_to(target),
+                transition["allowed"]
+                    .as_bool()
+                    .expect("allowed is a boolean"),
+                "unexpected transition decision for {source:?} -> {target:?}"
+            );
+        }
     }
 
     #[test]

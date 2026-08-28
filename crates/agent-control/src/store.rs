@@ -2832,7 +2832,7 @@ mod tests {
     use super::{
         ControlStore, FindingDisposition, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5,
         MIGRATION_6, MIGRATION_7, ReviewAssessment, SCHEMA, StoreError, VerificationVerdict,
-        command_replay_tx, contains_secret_shape, is_safe_relative_path,
+        command_replay_tx, contains_secret_shape, is_safe_relative_path, redact_evidence,
     };
     use crate::{
         ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
@@ -3331,14 +3331,40 @@ mod tests {
     }
 
     #[test]
-    fn changed_sha_invalidates_verification() {
+    fn eval_exact_sha_corpus_invalidates_stale_verification() {
+        let case: serde_json::Value =
+            serde_json::from_str(include_str!("../../../eval/corpus/exact-sha.json"))
+                .expect("exact-SHA eval corpus parses");
+        let candidate = Sha::new(
+            case["input"]["candidate_sha"]
+                .as_str()
+                .expect("candidate SHA is text"),
+        )
+        .expect("candidate is a full SHA");
+        let stale = Sha::new(
+            case["input"]["stale_sha"]
+                .as_str()
+                .expect("stale SHA is text"),
+        )
+        .expect("stale value is a full SHA");
+        assert_eq!(
+            Sha::new(
+                case["input"]["abbreviated_sha"]
+                    .as_str()
+                    .expect("abbreviated SHA is text")
+            )
+            .is_ok(),
+            case["expected"]["abbreviated_sha_accepted"]
+                .as_bool()
+                .expect("abbreviated expectation is a boolean")
+        );
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let brief = brief();
         let unit = brief.unit_id.clone();
         store.create_job(&brief, 1).expect("job created");
         let coder = advance_to_self_verifying(&mut store, &brief);
         store
-            .record_candidate(&coder, &unit, &sha('b'), "candidate", 7)
+            .record_candidate(&coder, &unit, &candidate, "candidate", 7)
             .expect("candidate recorded");
         let verifier = register_verifier(&mut store, &brief, "changed-sha", 8);
         store
@@ -3350,20 +3376,25 @@ mod tests {
                 8,
             )
             .expect("verification starts");
-        assert!(matches!(
-            store.record_verdict(
+        let stale_accepted = store
+            .record_verdict(
                 &unit,
                 &VerificationVerdict {
                     verifier: &verifier,
-                    head_sha: &sha('c'),
+                    head_sha: &stale,
                     passed: true,
                     evidence: &json!({}),
                     idempotency_key: "stale",
                 },
                 9,
-            ),
-            Err(StoreError::StaleVerification { .. })
-        ));
+            )
+            .is_ok();
+        assert_eq!(
+            stale_accepted,
+            case["expected"]["stale_verdict_accepted"]
+                .as_bool()
+                .expect("stale verdict expectation is a boolean")
+        );
     }
 
     #[test]
@@ -4426,6 +4457,23 @@ mod tests {
         ] {
             assert!(!contains_secret_shape(ordinary), "redacted {ordinary}");
         }
+    }
+
+    #[test]
+    fn eval_redaction_corpus_uses_production_filter() {
+        let case: serde_json::Value =
+            serde_json::from_str(include_str!("../../../eval/corpus/redaction.json"))
+                .expect("redaction eval corpus parses");
+        let mut evidence = case["input"]["evidence"].clone();
+        evidence["nested"][1]["note"] = serde_json::Value::String(
+            case["input"]["token_fragments"]
+                .as_array()
+                .expect("token fragments are an array")
+                .iter()
+                .map(|fragment| fragment.as_str().expect("token fragment is text"))
+                .collect(),
+        );
+        assert_eq!(redact_evidence(&evidence), case["expected"]["evidence"]);
     }
 
     #[test]

@@ -251,10 +251,15 @@ the report at face value.
 - **H-13 — topology leases were globally exclusive. Repaired in the current
   worktree.** Topology conflicts are now job-scoped; same-job concurrent owners
   fail while two independent jobs can hold integration topology concurrently.
-- **H-14 — evals are partially tautological.** The Python runner duplicates
-  simplified redaction/state logic and the corpus contains prose-like snippets
-  instead of driving the Rust implementation. The corpus must invoke named
-  hermetic Rust tests and fail if those implementation tests do not run.
+- **H-14 — evals were partially tautological. Repaired in the current
+  worktree.** The versioned corpus now has an exact fail-closed schema and a
+  required five-case set covering capability boundaries, exact-SHA binding,
+  path containment, evidence redaction, and lifecycle policy. Named hermetic
+  Rust tests consume those committed inputs and expected decisions through the
+  production types, capability map, state machine, redaction filter, and
+  transactional store. The Python runner contains no duplicate security
+  decision logic: it validates corpus identity, runs each package with Cargo's
+  locked offline mode, and fails unless every exact named test reports success.
 - **H-15 — host sandbox proof remains incomplete. Partially repaired in the
   current worktree.** Rendered bot units now add `UMask=0077`,
   `SystemCallFilter=@system-service`, and systemd IP allow/deny rules that

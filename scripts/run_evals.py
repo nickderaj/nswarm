@@ -1,98 +1,139 @@
 #!/usr/bin/env python3
-"""Deterministic, model-free containment and evidence evaluation corpus."""
+"""Run the committed evaluation corpus against named production Rust tests."""
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import re
+import subprocess
 import sys
-import tomllib
 
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = ROOT / "eval" / "corpus"
-REQUIRED_BRIEF_FIELDS = {
-    "job_id",
-    "unit_id",
-    "goal",
-    "repository",
-    "base_sha",
-    "paths",
-    "dependencies",
-    "acceptance_criteria",
-    "verification_commands",
-    "risk_class",
-    "limits",
-    "network",
-    "credential_grants",
-    "report_schema",
-    "standing_policy_version",
+CASE_FIELDS = {"schema_version", "id", "package", "test", "input", "expected"}
+REQUIRED_CASES = {
+    "capability-boundaries",
+    "exact-sha",
+    "path-containment",
+    "redaction",
+    "transition-policy",
 }
-SECRET_FRAGMENTS = ("KEY", "TOKEN", "PASSWORD", "SECRET", "CREDENTIAL")
+IDENTIFIER = re.compile(r"[a-z][a-z0-9-]*\Z")
+TEST_NAME = re.compile(r"[a-z_][a-z0-9_]*(?:::[a-z_][a-z0-9_]*)+\Z")
 
 
-def load_json(name: str):
-    return json.loads((CORPUS / name).read_text(encoding="utf-8"))
+class EvalError(Exception):
+    """A readable corpus or execution failure."""
 
 
-def profile(name: str) -> dict:
-    path = ROOT / "profiles" / name / "profile.toml"
-    return tomllib.loads(path.read_text(encoding="utf-8"))
+def load_cases() -> list[dict]:
+    paths = sorted(CORPUS.glob("*.json"))
+    if not paths:
+        raise EvalError("no JSON cases found")
+
+    cases: list[dict] = []
+    ids: set[str] = set()
+    tests: set[tuple[str, str]] = set()
+    for path in paths:
+        try:
+            case = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise EvalError(f"{path.relative_to(ROOT)}: {error}") from error
+        if not isinstance(case, dict) or set(case) != CASE_FIELDS:
+            raise EvalError(
+                f"{path.relative_to(ROOT)}: expected exactly {sorted(CASE_FIELDS)}"
+            )
+        case_id = case["id"]
+        package = case["package"]
+        test = case["test"]
+        if type(case["schema_version"]) is not int or case["schema_version"] != 1:
+            raise EvalError(f"{path.relative_to(ROOT)}: unsupported schema_version")
+        if not isinstance(case_id, str) or not IDENTIFIER.fullmatch(case_id):
+            raise EvalError(f"{path.relative_to(ROOT)}: invalid id")
+        if path.stem != case_id:
+            raise EvalError(f"{path.relative_to(ROOT)}: id must match the file name")
+        if not isinstance(package, str) or not IDENTIFIER.fullmatch(package):
+            raise EvalError(f"{path.relative_to(ROOT)}: invalid package")
+        if (
+            not isinstance(test, str)
+            or not TEST_NAME.fullmatch(test)
+            or "::eval_" not in test
+        ):
+            raise EvalError(f"{path.relative_to(ROOT)}: invalid named eval test")
+        if not isinstance(case["input"], dict) or not isinstance(case["expected"], dict):
+            raise EvalError(f"{path.relative_to(ROOT)}: input and expected must be objects")
+        if case_id in ids:
+            raise EvalError(f"duplicate case id: {case_id}")
+        if (package, test) in tests:
+            raise EvalError(f"duplicate named test: {package} {test}")
+        ids.add(case_id)
+        tests.add((package, test))
+        cases.append(case)
+    if ids != REQUIRED_CASES:
+        raise EvalError(
+            f"required case set mismatch: expected {sorted(REQUIRED_CASES)}, got {sorted(ids)}"
+        )
+    return cases
 
 
-def redact(value):
-    if isinstance(value, dict):
-        return {
-            key: "[REDACTED]" if any(fragment in key.upper() for fragment in SECRET_FRAGMENTS) else redact(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [redact(item) for item in value]
-    return value
+def run_package(package: str, expected_tests: list[str]) -> None:
+    command = [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "--color",
+        "never",
+        "-p",
+        package,
+        "--lib",
+        "--",
+        "--nocapture",
+    ]
+    environment = os.environ.copy()
+    environment["CARGO_NET_OFFLINE"] = "true"
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise EvalError(f"{package}: Rust tests exceeded 300 seconds") from error
+    output = completed.stdout + completed.stderr
+    if completed.returncode != 0:
+        sys.stderr.write(output)
+        raise EvalError(f"{package}: Rust tests failed with exit {completed.returncode}")
 
-
-def check(condition: bool, message: str) -> None:
-    if not condition:
-        raise AssertionError(message)
+    for test in expected_tests:
+        success = re.compile(rf"^test {re.escape(test)} \.\.\. ok$", re.MULTILINE)
+        if not success.search(output):
+            sys.stderr.write(output)
+            raise EvalError(f"{package}: named test did not report success: {test}")
 
 
 def main() -> int:
-    checks = 0
     try:
-        research = profile("research")
-        coder = profile("coder")
-        check("repository-write" not in research["capabilities"], "research gained write")
-        checks += 1
-        check(not {"merge", "deploy", "integrate"} & set(coder["capabilities"]), "coder gained release authority")
-        checks += 1
-
-        hostile = load_json("retrieved-prompt-injection.json")
-        before = tuple(coder["capabilities"])
-        attributed_context = {"source": hostile["source"], "content": hostile["content"]}
-        check(tuple(coder["capabilities"]) == before and attributed_context["source"], "retrieval changed policy")
-        checks += 1
-
-        incomplete = load_json("missing-brief.json")
-        check(REQUIRED_BRIEF_FIELDS - set(incomplete), "incomplete brief was accepted")
-        checks += 1
-
-        check(research["network"] == {"default": "deny", "brief_allow_list_required": True}, "research egress fails open")
-        check(coder["network"] == {"default": "deny", "brief_allow_list_required": True}, "coder egress fails open")
-        checks += 2
-
-        redacted = redact(load_json("secret-evidence.json"))
-        check(redacted["OPENROUTER_API_KEY"] == "[REDACTED]", "secret evidence was retained")
-        checks += 1
-
-        claims = load_json("research-claims.json")
-        for claim in claims:
-            check(claim["kind"] in {"direct", "inferred", "contradicted", "unknown"}, "invalid claim kind")
-            check(claim["kind"] != "direct" or bool(claim["citations"]), "direct claim lacks citation")
-        checks += 2
-    except (AssertionError, OSError, KeyError, json.JSONDecodeError, tomllib.TOMLDecodeError) as error:
+        cases = load_cases()
+        packages: dict[str, list[str]] = {}
+        for case in cases:
+            packages.setdefault(case["package"], []).append(case["test"])
+        for package, tests in sorted(packages.items()):
+            run_package(package, tests)
+    except EvalError as error:
         print(f"eval corpus: {error}", file=sys.stderr)
         return 1
-    print(f"eval corpus: {checks} deterministic checks passed")
+    print(
+        f"eval corpus: {len(cases)} production-backed named Rust tests passed "
+        f"across {len(packages)} package(s)"
+    )
     return 0
 
 

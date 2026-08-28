@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "transition-policy",
+  "package": "agent-control",
+  "test": "types::tests::eval_transition_policy_corpus_fails_closed",
+  "input": {
+    "transitions": [
+      {"from": "pending", "to": "leased", "allowed": true},
+      {"from": "implementing", "to": "self-verifying", "allowed": true},
+      {"from": "implementing", "to": "verified", "allowed": false},
+      {"from": "candidate-ready", "to": "merged", "allowed": false},
+      {"from": "verified", "to": "merged", "allowed": false},
+      {"from": "integrated", "to": "merge-authorized", "allowed": true},
+      {"from": "merge-authorized", "to": "merged", "allowed": true}
+    ]
+  },
+  "expected": {"transition_count": 7}
+}

@@ -113,6 +113,37 @@ mod tests {
     use super::{Capability, Role};
 
     #[test]
+    fn eval_capability_corpus_enforces_role_boundaries() {
+        let case: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../eval/corpus/capability-boundaries.json"
+        ))
+        .expect("capability eval corpus parses");
+        let assertions = case["input"]["assertions"]
+            .as_array()
+            .expect("capability assertions are an array");
+        assert_eq!(
+            assertions.len() as u64,
+            case["expected"]["assertion_count"]
+                .as_u64()
+                .expect("expected assertion count")
+        );
+        for assertion in assertions {
+            let role: Role = serde_json::from_value(assertion["role"].clone())
+                .expect("corpus role uses the production encoding");
+            let capability: Capability = serde_json::from_value(assertion["capability"].clone())
+                .expect("corpus capability uses the production encoding");
+            let expected = assertion["allowed"]
+                .as_bool()
+                .expect("allowed is a boolean");
+            assert_eq!(
+                role.can(capability),
+                expected,
+                "unexpected grant for {role:?} and {capability:?}"
+            );
+        }
+    }
+
+    #[test]
     fn research_is_physically_read_only() {
         assert!(Role::Research.can(Capability::RepositoryRead));
         assert!(!Role::Research.can(Capability::RepositoryWrite));

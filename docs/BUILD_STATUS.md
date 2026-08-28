@@ -530,3 +530,42 @@ profiles, keeps all 38 cargo-vet exemptions explicit, and reports 97.70%
 `agent-control`, 97.17% repository, and 96.76% changed executable-line
 coverage. Critical branch coverage is 288/288 across 37 marked functions.
 Exact-head GitHub PR and merge-tier evidence remain pending for checkpoint Q.
+
+The committed checkpoint is
+`b128fa8dfd9aa1aba99a02f957b8b4d21d9b481b`. All eight PR jobs passed in
+[run `33183866332`](https://github.com/nickderaj/nswarm/actions/runs/33183866332),
+including 85/85 tests with none skipped, all policy/profile/eval/generated
+gates, deny/vet/machete, reproducibility, bounded fuzzing, MSRV, current stable,
+hosted aarch64 compilation, 97.17% repository coverage, 97.20% PR
+changed-line coverage, and 288/288 critical branch outcomes. The complete
+17,427-line log contains no Actions error or warning annotations. Exact-head
+merge-tier evidence is not yet claimed here.
+
+## Checkpoint R — production-backed evaluation corpus
+
+The eval gate no longer makes simplified Python copies of Rust security
+decisions. Five committed schema-v1 cases supply adversarial inputs and expected
+decisions for role capabilities, exact-SHA verification binding, repository
+path containment, recursive evidence redaction, and lifecycle transition
+policy. Each case names one Rust unit test that parses the same committed JSON
+and exercises production `Role`, `Capability`, `PathPolicy`, `JobState`, `Sha`,
+redaction, and transactional store behavior.
+
+The Python runner enforces the exact case schema, file/id agreement, unique
+case and test identities, and the required security-case set. It invokes Cargo
+without a shell using `--locked --offline`, caps execution time, prints Rust
+failure output, and verifies that every exact named test emitted an `ok` result.
+It contains no competing redaction, capability, SHA, path, or transition
+implementation and cannot pass merely because Cargo exited successfully after
+filtering out an intended test. Synthetic token fragments are assembled only
+inside the Rust test so the committed corpus does not itself resemble a usable
+credential.
+
+Fresh pre-checkpoint local evidence: the corpus runner reports all five named
+Rust tests, strict Clippy passes, and the complete `just ci` gate executes 87
+workspace tests with none skipped. Policy scans 89 files, both profiles and the
+manifest validate, all 38 cargo-vet exemptions remain explicit, and coverage is
+97.66% for `agent-control`, 97.15% repository-wide, and 97.11% across changed
+executable lines. All 288 critical branch outcomes across 37 marked functions
+remain covered. Exact-head GitHub PR and merge-tier evidence remain pending for
+checkpoint R.

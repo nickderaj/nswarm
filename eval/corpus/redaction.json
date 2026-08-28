@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "redaction",
+  "package": "agent-control",
+  "test": "store::tests::eval_redaction_corpus_uses_production_filter",
+  "input": {
+    "evidence": {
+      "summary": "focused test passed",
+      "OPENROUTER_API_KEY": "synthetic-key-value",
+      "nested": [
+        {"authorization": "Bearer abcdefghijklmnopqrstuvwx"},
+        {"note": "injected-by-test"},
+        {"ordinary": "Bearer abcdefghijklmnopqrs"}
+      ]
+    },
+    "token_fragments": ["gh", "p_", "aaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaa"]
+  },
+  "expected": {
+    "evidence": {
+      "summary": "focused test passed",
+      "OPENROUTER_API_KEY": "[REDACTED]",
+      "nested": [
+        {"authorization": "[REDACTED]"},
+        {"note": "[REDACTED]"},
+        {"ordinary": "Bearer abcdefghijklmnopqrs"}
+      ]
+    }
+  }
+}
