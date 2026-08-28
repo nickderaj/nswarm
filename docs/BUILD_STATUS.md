@@ -413,3 +413,30 @@ The matching merge tier for prior head
 GitHub did not create a pull-request suite for that revision, so it is not used
 as protection evidence; the next push must produce and pass a new PR suite
 before protection can be applied.
+
+## Checkpoint O — multi-unit schema and dependency integrity
+
+Schema v6 separates immutable per-unit briefs from job identity. A job now pins
+its repository and standing-policy version once while owning multiple units;
+each unit retains its own report contract. Dependencies must already exist in
+the same job, both dependency columns are foreign keys, and dependent leasing
+remains blocked until every prerequisite is `merged`. Credential identifiers
+remain job-scoped and cannot change their allowed methods between unit briefs.
+
+Creation uses one immediate transaction across the optional job row, unit,
+unit brief, dependencies, credential grants, and append-only event. Negative
+tests prove unknown dependencies, cross-job dependencies, repository or policy
+changes, and credential-method conflicts roll back without partial rows.
+Migration tests populate each historical schema version from v1 through v5,
+upgrade it to v6 twice, preserve the brief, verify both dependency foreign keys,
+confirm `PRAGMA foreign_keys = 1`, and require an empty
+`pragma_foreign_key_check` result. Direct SQL tests also prove job scope and
+unit briefs are immutable.
+
+Fresh pre-checkpoint evidence: all 54 `agent-control` tests pass, strict
+workspace Clippy is clean, and the complete local `just ci` gate passes. Its
+fresh coverage run executes all 79 workspace tests and reports 98.06% for
+`agent-control`, 97.31% repository line coverage, 97.25% changed executable-line
+coverage, every crate above 90%, and 100% critical branch outcomes (252/252
+across 36 marked functions). Exact-head GitHub PR and merge-tier runs remain
+pending for the checkpoint commit and are not yet claimed as evidence.

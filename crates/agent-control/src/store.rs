@@ -10,7 +10,7 @@ use crate::{
     SessionId, Sha, UnitId,
 };
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Reviewer assessment recorded against one exact candidate SHA.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,28 +149,68 @@ impl ControlStore {
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(MIGRATION_5)?;
+            transaction.pragma_update(None, "user_version", 5_i64)?;
+            transaction.commit()?;
+            version = 5;
+        }
+        if version == 5 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(MIGRATION_6)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
         }
         Ok(())
     }
 
-    /// Stores one validated immutable brief and its dependent records.
+    /// Stores one validated immutable unit brief under its job.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when validation, serialization, or the atomic
     /// insert fails.
+    // coverage-critical
     pub fn create_job(&mut self, brief: &JobBrief, now: i64) -> Result<(), StoreError> {
         brief.validate()?;
         let brief_json = serde_json::to_string(brief)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO jobs (job_id, brief_json, created_at) VALUES (?1, ?2, ?3)",
-            params![brief.job_id.as_str(), brief_json, now],
-        )?;
+        let existing_scope: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT repository, standing_policy_version FROM jobs WHERE job_id = ?1",
+                [brief.job_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((repository, policy_version)) = existing_scope {
+            if repository != brief.repository || policy_version != brief.standing_policy_version {
+                return Err(StoreError::JobScopeMismatch(brief.job_id.to_string()));
+            }
+        } else {
+            transaction.execute(
+                "INSERT INTO jobs (job_id, repository, standing_policy_version, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    brief.job_id.as_str(),
+                    &brief.repository,
+                    &brief.standing_policy_version,
+                    now
+                ],
+            )?;
+        }
+        for dependency in &brief.dependencies {
+            let exists: Option<i64> = transaction
+                .query_row(
+                    "SELECT 1 FROM units WHERE unit_id = ?1 AND job_id = ?2",
+                    params![dependency.as_str(), brief.job_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if exists.is_none() {
+                return Err(StoreError::UnknownDependency(dependency.to_string()));
+            }
+        }
         transaction.execute(
             "INSERT INTO units (unit_id, job_id, state, base_sha, updated_at) VALUES (?1, ?2, 'pending', ?3, ?4)",
             params![
@@ -180,6 +220,10 @@ impl ControlStore {
                 now
             ],
         )?;
+        transaction.execute(
+            "INSERT INTO unit_briefs (unit_id, brief_json) VALUES (?1, ?2)",
+            params![brief.unit_id.as_str(), brief_json],
+        )?;
         for dependency in &brief.dependencies {
             transaction.execute(
                 "INSERT INTO dependencies (unit_id, depends_on_unit_id) VALUES (?1, ?2)",
@@ -187,21 +231,32 @@ impl ControlStore {
             )?;
         }
         for grant in &brief.credential_grants {
-            transaction.execute(
-                "INSERT INTO credential_grants (job_id, credential_id, methods_json, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    brief.job_id.as_str(),
-                    grant.credential_id,
-                    serde_json::to_string(&grant.methods)?,
-                    now
-                ],
-            )?;
+            let methods_json = serde_json::to_string(&grant.methods)?;
+            let existing_methods: Option<String> = transaction
+                .query_row(
+                    "SELECT methods_json FROM credential_grants WHERE job_id = ?1 AND credential_id = ?2",
+                    params![brief.job_id.as_str(), &grant.credential_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(existing_methods) = existing_methods {
+                if existing_methods != methods_json {
+                    return Err(StoreError::CredentialGrantConflict(
+                        grant.credential_id.clone(),
+                    ));
+                }
+            } else {
+                transaction.execute(
+                    "INSERT INTO credential_grants (job_id, credential_id, methods_json, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![brief.job_id.as_str(), &grant.credential_id, methods_json, now],
+                )?;
+            }
         }
         append_event_tx(
             &transaction,
             &brief.job_id,
-            &format!("job-created:{}", brief.unit_id),
-            "job-created",
+            &format!("unit-created:{}", brief.unit_id),
+            "unit-created",
             &json!({"unit_id": brief.unit_id.as_str()}),
             now,
         )?;
@@ -801,8 +856,8 @@ impl ControlStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (job_id, _) = unit_identity_tx(&transaction, unit_id)?;
         let brief_json: String = transaction.query_row(
-            "SELECT brief_json FROM jobs WHERE job_id = ?1",
-            [job_id.as_str()],
+            "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
+            [unit_id.as_str()],
             |row| row.get(0),
         )?;
         let brief: JobBrief = serde_json::from_str(&brief_json)?;
@@ -1418,7 +1473,7 @@ fn require_review_gate_tx(
     head_sha: &Sha,
 ) -> Result<(), StoreError> {
     let brief_json: String = transaction.query_row(
-        "SELECT jobs.brief_json FROM jobs JOIN units USING (job_id) WHERE units.unit_id = ?1",
+        "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
         [unit_id.as_str()],
         |row| row.get(0),
     )?;
@@ -1667,6 +1722,15 @@ pub enum StoreError {
     /// Profile registration cannot cross job ownership.
     #[error("job and unit ownership do not match")]
     JobUnitMismatch,
+    /// Existing job identity cannot be reused for a different repository or policy pin.
+    #[error("job scope differs from its immutable definition: {0}")]
+    JobScopeMismatch(String),
+    /// Every dependency must name an already persisted unit.
+    #[error("unknown dependency unit: {0}")]
+    UnknownDependency(String),
+    /// A job-level credential identifier cannot change methods between units.
+    #[error("credential grant methods differ within the job: {0}")]
+    CredentialGrantConflict(String),
     /// A worker cannot lease a unit before every declared dependency merges.
     #[error("unit has {0} unsatisfied dependencies")]
     DependenciesUnsatisfied(i64),
@@ -1917,6 +1981,71 @@ ON verification_verdicts (unit_id, head_sha, verifier_profile)
 WHERE verifier_profile IS NOT NULL;
 ";
 
+const MIGRATION_6: &str = r"
+ALTER TABLE jobs ADD COLUMN repository TEXT;
+ALTER TABLE jobs ADD COLUMN standing_policy_version TEXT;
+
+UPDATE jobs
+SET repository = json_extract(brief_json, '$.repository'),
+    standing_policy_version = json_extract(brief_json, '$.standing_policy_version');
+
+CREATE TABLE unit_briefs (
+    unit_id TEXT PRIMARY KEY REFERENCES units(unit_id),
+    brief_json TEXT NOT NULL
+) STRICT;
+
+INSERT INTO unit_briefs (unit_id, brief_json)
+SELECT units.unit_id, jobs.brief_json
+FROM units JOIN jobs USING (job_id);
+
+DROP TRIGGER jobs_brief_immutable;
+ALTER TABLE jobs DROP COLUMN brief_json;
+
+ALTER TABLE dependencies RENAME TO dependencies_v5;
+
+CREATE TABLE dependencies (
+    unit_id TEXT NOT NULL REFERENCES units(unit_id),
+    depends_on_unit_id TEXT NOT NULL REFERENCES units(unit_id),
+    PRIMARY KEY (unit_id, depends_on_unit_id)
+) STRICT;
+
+CREATE TRIGGER dependencies_same_job
+BEFORE INSERT ON dependencies
+WHEN (SELECT job_id FROM units WHERE unit_id = NEW.unit_id)
+   != (SELECT job_id FROM units WHERE unit_id = NEW.depends_on_unit_id)
+BEGIN
+    SELECT RAISE(ABORT, 'dependency must belong to the same job');
+END;
+
+INSERT INTO dependencies (unit_id, depends_on_unit_id)
+SELECT unit_id, depends_on_unit_id FROM dependencies_v5;
+
+DROP TABLE dependencies_v5;
+
+CREATE UNIQUE INDEX credential_grants_job_credential
+ON credential_grants (job_id, credential_id);
+
+CREATE TRIGGER jobs_scope_immutable
+BEFORE UPDATE OF repository, standing_policy_version ON jobs
+BEGIN
+    SELECT RAISE(ABORT, 'job scope is immutable');
+END;
+
+CREATE TRIGGER jobs_scope_required
+BEFORE INSERT ON jobs
+WHEN NEW.repository IS NULL OR trim(NEW.repository) = ''
+  OR NEW.standing_policy_version IS NULL OR trim(NEW.standing_policy_version) = ''
+BEGIN
+    SELECT RAISE(ABORT, 'job scope is required');
+END;
+
+CREATE TRIGGER unit_briefs_immutable
+BEFORE UPDATE OF brief_json ON unit_briefs
+BEGIN
+    SELECT RAISE(ABORT, 'unit brief is immutable');
+END;
+";
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1924,8 +2053,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ControlStore, FindingDisposition, ReviewAssessment, SCHEMA, StoreError,
-        VerificationVerdict, contains_secret_shape, is_safe_relative_path,
+        ControlStore, FindingDisposition, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5,
+        ReviewAssessment, SCHEMA, StoreError, VerificationVerdict, contains_secret_shape,
+        is_safe_relative_path,
     };
     use crate::{
         ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
@@ -2764,7 +2894,7 @@ mod tests {
     }
 
     #[test]
-    fn lease_refuses_unsatisfied_dependencies() {
+    fn cross_job_dependencies_are_rejected_and_rolled_back() {
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let prerequisite = brief();
         store
@@ -2774,18 +2904,194 @@ mod tests {
         dependent.job_id = JobId::new("job-2").expect("dependent job");
         dependent.unit_id = UnitId::new("unit-2").expect("dependent unit");
         dependent.dependencies = vec![prerequisite.unit_id.clone()];
-        store.create_job(&dependent, 2).expect("dependent created");
+        assert!(matches!(
+            store.create_job(&dependent, 2),
+            Err(StoreError::UnknownDependency(unit)) if unit == prerequisite.unit_id.as_str()
+        ));
+        let partial_rows: i64 = store
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM jobs WHERE job_id = 'job-2') + (SELECT COUNT(*) FROM units WHERE unit_id = 'unit-2') + (SELECT COUNT(*) FROM unit_briefs WHERE unit_id = 'unit-2') + (SELECT COUNT(*) FROM dependencies WHERE unit_id = 'unit-2') + (SELECT COUNT(*) FROM events WHERE job_id = 'job-2')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("cross-job rollback query");
+        assert_eq!(partial_rows, 0);
+
+        dependent.dependencies.clear();
+        store
+            .create_job(&dependent, 3)
+            .expect("independent second job created");
+        assert!(
+            store
+                .connection
+                .execute(
+                    "INSERT INTO dependencies (unit_id, depends_on_unit_id) VALUES (?1, ?2)",
+                    rusqlite::params![dependent.unit_id.as_str(), prerequisite.unit_id.as_str()],
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn one_job_can_own_multiple_unit_briefs_and_dependencies() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let first = brief();
+        store.create_job(&first, 1).expect("first unit created");
+
+        let mut second = first.clone();
+        second.unit_id = UnitId::new("unit-2").expect("second unit");
+        second.dependencies = vec![first.unit_id.clone()];
+        second.report_schema = json!({
+            "type": "object",
+            "required": ["status"],
+            "properties": {"status": {"type": "string"}},
+            "additionalProperties": false
+        });
+        store.create_job(&second, 2).expect("second unit created");
+
+        let (jobs, units, briefs): (i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM jobs), (SELECT COUNT(*) FROM units), (SELECT COUNT(*) FROM unit_briefs)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("inventory query");
+        assert_eq!((jobs, units, briefs), (1, 2, 2));
         assert!(matches!(
             store.acquire_lease(
-                &dependent.job_id,
-                &dependent.unit_id,
+                &second.job_id,
+                &second.unit_id,
                 LeaseKind::Path,
-                "crates/dependent",
+                "crates/second",
                 100,
                 3,
             ),
             Err(StoreError::DependenciesUnsatisfied(1))
         ));
+        store
+            .connection
+            .execute(
+                "UPDATE units SET state = 'merged' WHERE unit_id = ?1",
+                [first.unit_id.as_str()],
+            )
+            .expect("prerequisite merged");
+        store
+            .acquire_lease(
+                &second.job_id,
+                &second.unit_id,
+                LeaseKind::Path,
+                "crates/second",
+                100,
+                4,
+            )
+            .expect("dependency now satisfied");
+        store
+            .record_report(
+                &second.unit_id,
+                &json!({"status": "complete"}),
+                "second-unit-report",
+                5,
+            )
+            .expect("second unit uses its own report schema");
+        assert!(matches!(
+            store.record_report(
+                &first.unit_id,
+                &json!({"status": "complete"}),
+                "wrong-first-unit-schema",
+                6,
+            ),
+            Err(StoreError::ReportSchemaViolation)
+        ));
+    }
+
+    #[test]
+    fn unknown_dependencies_roll_back_the_whole_unit_creation() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let mut dependent = brief();
+        dependent.dependencies = vec![UnitId::new("missing-unit").expect("dependency id")];
+        assert!(matches!(
+            store.create_job(&dependent, 1),
+            Err(StoreError::UnknownDependency(unit)) if unit == "missing-unit"
+        ));
+        let counts: (i64, i64, i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM jobs), (SELECT COUNT(*) FROM units), (SELECT COUNT(*) FROM unit_briefs), (SELECT COUNT(*) FROM dependencies), (SELECT COUNT(*) FROM events)",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("inventory query");
+        assert_eq!(counts, (0, 0, 0, 0, 0));
+    }
+
+    #[test]
+    fn units_cannot_redefine_job_scope_or_credential_methods() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let first = brief();
+        store.create_job(&first, 1).expect("first unit created");
+
+        let mut changed_scope = first.clone();
+        changed_scope.unit_id = UnitId::new("unit-scope").expect("unit id");
+        changed_scope.repository = "https://example.invalid/other.git".to_owned();
+        assert!(matches!(
+            store.create_job(&changed_scope, 2),
+            Err(StoreError::JobScopeMismatch(job)) if job == first.job_id.as_str()
+        ));
+
+        let mut changed_policy = first.clone();
+        changed_policy.unit_id = UnitId::new("unit-policy").expect("unit id");
+        changed_policy.standing_policy_version = "v2".to_owned();
+        assert!(matches!(
+            store.create_job(&changed_policy, 3),
+            Err(StoreError::JobScopeMismatch(job)) if job == first.job_id.as_str()
+        ));
+
+        let mut changed_grant = first.clone();
+        changed_grant.unit_id = UnitId::new("unit-grant").expect("unit id");
+        changed_grant.credential_grants[0].methods =
+            vec!["git:push:refs/heads/nswarm/job-1/unit-grant".to_owned()];
+        assert!(matches!(
+            store.create_job(&changed_grant, 4),
+            Err(StoreError::CredentialGrantConflict(grant)) if grant == "github-job-push"
+        ));
+        let rolled_back: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM units WHERE unit_id IN ('unit-scope', 'unit-policy', 'unit-grant')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rollback query");
+        assert_eq!(rolled_back, 0);
+
+        assert!(
+            store
+                .connection
+                .execute(
+                    "UPDATE jobs SET standing_policy_version = 'v2' WHERE job_id = ?1",
+                    [first.job_id.as_str()],
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .connection
+                .execute(
+                    "UPDATE unit_briefs SET brief_json = '{}' WHERE unit_id = ?1",
+                    [first.unit_id.as_str()],
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -3753,15 +4059,7 @@ mod tests {
             .expect("tracked candidate accepted");
     }
 
-    #[test]
-    fn prior_schema_migrates_to_reviewer_attribution() {
-        let connection = rusqlite::Connection::open_in_memory().expect("connection");
-        connection.execute_batch(SCHEMA).expect("v1 schema");
-        connection
-            .pragma_update(None, "user_version", 1_i64)
-            .expect("set v1");
-        let mut store = ControlStore { connection };
-        store.migrate().expect("v1 to v2 migration");
+    fn assert_current_schema(store: &ControlStore, legacy: &JobBrief) {
         let reviewer_column: i64 = store
             .connection
             .query_row(
@@ -3798,10 +4096,105 @@ mod tests {
             )
             .expect("verifier column query");
         assert_eq!(verifier_column, 1);
+        let unit_brief_rows: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM unit_briefs", [], |row| row.get(0))
+            .expect("unit brief migration query");
+        assert_eq!(unit_brief_rows, 1);
+        let migrated_brief: String = store
+            .connection
+            .query_row(
+                "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
+                [legacy.unit_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("migrated brief query");
+        assert_eq!(
+            &serde_json::from_str::<JobBrief>(&migrated_brief).expect("parse migrated brief"),
+            legacy
+        );
+        let dependency_foreign_keys: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_list('dependencies') WHERE \"table\" = 'units'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("dependency foreign-key query");
+        assert_eq!(dependency_foreign_keys, 2);
+        let foreign_keys_enabled: i64 = store
+            .connection
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .expect("foreign keys pragma query");
+        assert_eq!(foreign_keys_enabled, 1);
+        let foreign_key_violations: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .expect("foreign key check");
+        assert_eq!(foreign_key_violations, 0);
+        let job_scope_columns: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name IN ('repository', 'standing_policy_version')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("job scope column query");
+        assert_eq!(job_scope_columns, 2);
         let schema_version: i64 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("schema version query");
         assert_eq!(schema_version, super::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn populated_v1_through_v5_schemas_migrate_idempotently() {
+        let legacy = brief();
+        for legacy_version in 1_i64..=5 {
+            let connection = rusqlite::Connection::open_in_memory().expect("connection");
+            connection.execute_batch(SCHEMA).expect("v1 schema");
+            connection
+                .execute(
+                    "INSERT INTO jobs (job_id, brief_json, created_at) VALUES (?1, ?2, 1)",
+                    rusqlite::params![
+                        legacy.job_id.as_str(),
+                        serde_json::to_string(&legacy).expect("serialize legacy brief")
+                    ],
+                )
+                .expect("legacy job inserted");
+            connection
+                .execute(
+                    "INSERT INTO units (unit_id, job_id, state, base_sha, updated_at) VALUES (?1, ?2, 'pending', ?3, 1)",
+                    rusqlite::params![
+                        legacy.unit_id.as_str(),
+                        legacy.job_id.as_str(),
+                        legacy.base_sha.as_str()
+                    ],
+                )
+                .expect("legacy unit inserted");
+            for (version, migration) in [
+                (2_i64, MIGRATION_2),
+                (3_i64, MIGRATION_3),
+                (4_i64, MIGRATION_4),
+                (5_i64, MIGRATION_5),
+            ] {
+                if version > legacy_version {
+                    break;
+                }
+                connection
+                    .execute_batch(migration)
+                    .expect("legacy migration applied");
+            }
+            connection
+                .pragma_update(None, "user_version", legacy_version)
+                .expect("set legacy version");
+            let mut store = ControlStore { connection };
+            store.migrate().expect("legacy to current migration");
+            store.migrate().expect("current migration is idempotent");
+            assert_current_schema(&store, &legacy);
+        }
     }
 }

@@ -175,13 +175,19 @@ the report at face value.
 
 ### Critical follow-up findings
 
-- **C-4 — the data model cannot represent a multi-unit job and dependencies
-  fail open.** `jobs.brief_json` contains one unit-specific brief, `job_id` is
-  unique at creation, and the dependency query uses an inner join. A dependency
-  identifier with no matching unit therefore disappears from the unsatisfied
-  count. Repair requires a schema migration that separates job-level identity
-  from immutable unit briefs, foreign-keys both dependency endpoints, and
-  proves two units in one job plus unknown-dependency rejection.
+- **C-4 — the data model could not represent a multi-unit job and dependencies
+  failed open. Repaired in the current worktree.** Schema v6 removes the
+  unit-specific brief from `jobs`, pins repository and standing-policy identity
+  at job scope, and stores an immutable brief for each unit. Both dependency
+  endpoints now reference units, and creation accepts only already-persisted
+  prerequisites in the same job. One immediate transaction creates the job (if
+  needed), unit, brief, dependencies, credential grants, and event, so unknown
+  and cross-job dependencies or scope/grant conflicts leave no partial unit.
+  Tests prove multiple unit briefs and report schemas in one job, blocking until
+  a prerequisite reaches `merged`, repository/policy/credential immutability,
+  active and clean foreign keys, and idempotent preservation of populated v1
+  through v5 databases. This is storage support for partition/race/arena unit
+  graphs; it is not a claim that a scheduler yet constructs those topologies.
 - **C-5 — verification verdicts were unattributed. Repaired in the current
   worktree.** Schema v5 adds the verifier profile to exact-SHA verdicts and a
   uniqueness constraint per unit/SHA/actor. Publishing requires a live
