@@ -569,3 +569,14 @@ manifest validate, all 38 cargo-vet exemptions remain explicit, and coverage is
 executable lines. All 288 critical branch outcomes across 37 marked functions
 remain covered. Exact-head GitHub PR and merge-tier evidence remain pending for
 checkpoint R.
+
+The first exact-head PR attempt for `2c229a6e4c680a9c6ad6a1a197e706c0aa1c983e`
+is retained as failed evidence in
+[run `33208327933`](https://github.com/nickderaj/nswarm/actions/runs/33208327933).
+The quality job reached the offline eval runner before any workspace dependency
+command had populated a clean runner's Cargo cache, so Cargo correctly refused
+to fetch `rusqlite` in offline mode. The PR and local CI sequences now perform a
+locked workspace check before the offline eval step. This prepares the locked
+dependency graph in the ordinary build phase while keeping the eval runner
+itself network-disabled; a later exact-head run must pass before checkpoint R
+is claimed as GitHub evidence.
