@@ -189,7 +189,7 @@ the report at face value.
   Tests prove multiple unit briefs and report schemas in one job, blocking until
   a prerequisite reaches `merged`, repository/policy/credential immutability,
   active and clean foreign keys, and idempotent preservation of populated v1
-  through v5 databases. This is storage support for partition/race/arena unit
+  through v8 databases. This is storage support for partition/race/arena unit
   graphs; it is not a claim that a scheduler yet constructs those topologies.
 - **C-5 — verification verdicts were unattributed. Repaired in the current
   worktree.** Schema v5 adds the verifier profile to exact-SHA verdicts and a
@@ -197,7 +197,11 @@ the report at face value.
   same-job `Verify` capability and persists the actor in both the verdict and
   event. Acceptance requires at least one attributed verdict and rejects the
   SHA if any attributed verifier failed. Migrated nullable legacy verdicts are
-  deliberately insufficient until fresh attributed proof runs.
+  deliberately insufficient until fresh attributed proof runs. Schema v9
+  makes verdict rows update/delete-immutable as well as unique per
+  unit/SHA/verifier. This is an intentional fail-closed policy: a false
+  negative cannot be overwritten, and recovery requires a new candidate SHA
+  with fresh verification evidence.
 
 ### High follow-up findings
 

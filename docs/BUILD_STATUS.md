@@ -607,6 +607,25 @@ the text.
 Focused evidence: all 21 fleet library/binary tests pass, including explicit
 Telegram-enabled, non-Telegram, dedicated-group, repository-generation, and
 CLI rendering cases. Strict fleet Clippy passes, and a fresh temporary
-generation is byte-identical to the checked-in systemd tree. The full clean
-repository gate and exact-head GitHub evidence remain pending until the
-generated fixture is checkpointed.
+generation is byte-identical to the checked-in systemd tree. After checkpointing,
+the full clean `just ci` gate passes 89 workspace tests with none skipped,
+validates all policy/eval/generated and supply-chain gates, and reports 97.17%
+repository and changed executable-line coverage with 290/290 critical branch
+outcomes. Exact-head GitHub evidence remains pending.
+
+## Checkpoint T — immutable fail-closed verifier results
+
+The one-verdict-per-unit/SHA/verifier policy is intentional. Schema v9 adds
+update and delete guards to the existing uniqueness constraint, so an
+attributed failure cannot be erased, revised, or shadowed by a later pass from
+the same verifier. Acceptance already aggregates every attributed verdict and
+therefore continues to reject an exact SHA when any verifier failed it.
+
+Recovery is deliberately content-addressed rather than verdict-mutable: the
+unit enters `fix-required`, the author records a new candidate SHA, and that
+new SHA receives fresh verification. The end-to-end regression proves a
+failed SHA remains unacceptable, direct insert/update/delete rehabilitation is
+rejected by SQLite, and the same verifier can pass a new SHA which then
+advances. Populated v1 through v8 databases migrate idempotently to v9. This
+policy prefers a small corrective commit over weakening durable negative
+evidence; operational false positives therefore cost a new SHA by design.

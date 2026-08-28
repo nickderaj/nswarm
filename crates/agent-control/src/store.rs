@@ -10,7 +10,7 @@ use crate::{
     SessionId, Sha, UnitId,
 };
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Reviewer assessment recorded against one exact candidate SHA.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,6 +176,15 @@ impl ControlStore {
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(MIGRATION_8)?;
+            transaction.pragma_update(None, "user_version", 8_i64)?;
+            transaction.commit()?;
+            version = 8;
+        }
+        if version == 8 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(MIGRATION_9)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
         }
@@ -2822,6 +2831,20 @@ BEGIN
 END;
 ";
 
+const MIGRATION_9: &str = r"
+CREATE TRIGGER verification_verdicts_no_update
+BEFORE UPDATE ON verification_verdicts
+BEGIN
+    SELECT RAISE(ABORT, 'verification verdicts are immutable');
+END;
+
+CREATE TRIGGER verification_verdicts_no_delete
+BEFORE DELETE ON verification_verdicts
+BEGIN
+    SELECT RAISE(ABORT, 'verification verdicts are immutable');
+END;
+";
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -2831,8 +2854,9 @@ mod tests {
 
     use super::{
         ControlStore, FindingDisposition, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5,
-        MIGRATION_6, MIGRATION_7, ReviewAssessment, SCHEMA, StoreError, VerificationVerdict,
-        command_replay_tx, contains_secret_shape, is_safe_relative_path, redact_evidence,
+        MIGRATION_6, MIGRATION_7, MIGRATION_8, ReviewAssessment, SCHEMA, StoreError,
+        VerificationVerdict, command_replay_tx, contains_secret_shape, is_safe_relative_path,
+        redact_evidence,
     };
     use crate::{
         ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
@@ -3628,6 +3652,159 @@ mod tests {
             store.accept_verdict(&integrator, &brief.unit_id, "dissenting-accept", 11),
             Err(StoreError::MissingPassingVerdict(head)) if head == candidate
         ));
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one end-to-end regression keeps the failed-SHA immutability and fresh-SHA recovery contract auditable"
+    )]
+    fn failed_verdict_is_immutable_and_recovery_requires_a_new_sha() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let mut brief = brief();
+        brief.risk_class = RiskClass::Low;
+        let failed_sha = sha('b');
+        let replacement_sha = sha('c');
+        store.create_job(&brief, 1).expect("job created");
+        let coder = advance_to_self_verifying(&mut store, &brief);
+        store
+            .record_candidate(
+                &coder,
+                &brief.unit_id,
+                &failed_sha,
+                "failed-sha-candidate",
+                7,
+            )
+            .expect("failed SHA recorded");
+        let verifier = register_verifier(&mut store, &brief, "fail-closed", 8);
+        store
+            .transition(
+                &verifier,
+                &brief.unit_id,
+                JobState::IndependentlyVerifying,
+                "failed-sha-verification",
+                8,
+            )
+            .expect("verification starts");
+        store
+            .record_verdict(
+                &brief.unit_id,
+                &VerificationVerdict {
+                    verifier: &verifier,
+                    head_sha: &failed_sha,
+                    passed: false,
+                    evidence: &json!({"result": "failed"}),
+                    idempotency_key: "failed-sha-verdict",
+                },
+                9,
+            )
+            .expect("failure is durable");
+
+        assert!(
+            store
+                .connection
+                .execute(
+                    "INSERT INTO verification_verdicts (unit_id, verifier_profile, head_sha, passed, evidence_json, created_at) VALUES (?1, ?2, ?3, 1, '{}', 10)",
+                    rusqlite::params![
+                        brief.unit_id.as_str(),
+                        verifier.as_str(),
+                        failed_sha.as_str()
+                    ],
+                )
+                .is_err(),
+            "one verifier cannot replace a failure with a second verdict for the same SHA"
+        );
+        assert!(
+            store
+                .connection
+                .execute(
+                    "UPDATE verification_verdicts SET passed = 1 WHERE unit_id = ?1 AND head_sha = ?2",
+                    rusqlite::params![brief.unit_id.as_str(), failed_sha.as_str()],
+                )
+                .is_err(),
+            "persisted verdicts cannot be revised"
+        );
+        assert!(
+            store
+                .connection
+                .execute(
+                    "DELETE FROM verification_verdicts WHERE unit_id = ?1 AND head_sha = ?2",
+                    rusqlite::params![brief.unit_id.as_str(), failed_sha.as_str()],
+                )
+                .is_err(),
+            "persisted verdicts cannot be erased"
+        );
+        let integrator = ensure_integrator(&mut store, &brief, 10);
+        assert!(matches!(
+            store.accept_verdict(&integrator, &brief.unit_id, "failed-sha-accept", 10),
+            Err(StoreError::MissingPassingVerdict(head)) if head == failed_sha
+        ));
+
+        let coordinator = ensure_coordinator(&mut store, &brief, 11);
+        store
+            .transition(
+                &coordinator,
+                &brief.unit_id,
+                JobState::FixRequired,
+                "failed-sha-fix-required",
+                11,
+            )
+            .expect("failed SHA enters repair");
+        store
+            .transition(
+                &coordinator,
+                &brief.unit_id,
+                JobState::Leased,
+                "replacement-leased",
+                12,
+            )
+            .expect("replacement work leased");
+        for (state, key, now) in [
+            (JobState::Grounding, "replacement-grounding", 13),
+            (JobState::Implementing, "replacement-implementing", 14),
+            (JobState::SelfVerifying, "replacement-self-verifying", 15),
+        ] {
+            store
+                .transition(&coder, &brief.unit_id, state, key, now)
+                .expect("replacement advances");
+        }
+        store
+            .record_candidate(
+                &coder,
+                &brief.unit_id,
+                &replacement_sha,
+                "replacement-candidate",
+                16,
+            )
+            .expect("new SHA recorded");
+        store
+            .transition(
+                &verifier,
+                &brief.unit_id,
+                JobState::IndependentlyVerifying,
+                "replacement-verification",
+                17,
+            )
+            .expect("new SHA verification starts");
+        store
+            .record_verdict(
+                &brief.unit_id,
+                &VerificationVerdict {
+                    verifier: &verifier,
+                    head_sha: &replacement_sha,
+                    passed: true,
+                    evidence: &json!({"result": "passed"}),
+                    idempotency_key: "replacement-verdict",
+                },
+                18,
+            )
+            .expect("same verifier may assess a new SHA");
+        assert_eq!(
+            store
+                .accept_verdict(&integrator, &brief.unit_id, "replacement-accept", 19)
+                .expect("fresh SHA can recover"),
+            JobState::Verified
+        );
     }
 
     #[test]
@@ -6007,9 +6184,9 @@ mod tests {
     }
 
     #[test]
-    fn populated_v1_through_v7_schemas_migrate_idempotently() {
+    fn populated_v1_through_v8_schemas_migrate_idempotently() {
         let legacy = brief();
-        for legacy_version in 1_i64..=7 {
+        for legacy_version in 1_i64..=8 {
             let connection = rusqlite::Connection::open_in_memory().expect("connection");
             connection.execute_batch(SCHEMA).expect("v1 schema");
             connection
@@ -6038,6 +6215,7 @@ mod tests {
                 (5_i64, MIGRATION_5),
                 (6_i64, MIGRATION_6),
                 (7_i64, MIGRATION_7),
+                (8_i64, MIGRATION_8),
             ] {
                 if version > legacy_version {
                     break;
