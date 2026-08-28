@@ -260,13 +260,18 @@ the report at face value.
   transactional store. The Python runner contains no duplicate security
   decision logic: it validates corpus identity, runs each package with Cargo's
   locked offline mode, and fails unless every exact named test reports success.
-- **H-15 — host sandbox proof remains incomplete. Partially repaired in the
-  current worktree.** Rendered bot units now add `UMask=0077`,
-  `SystemCallFilter=@system-service`, and systemd IP allow/deny rules that
-  permit loopback Hermes access while denying non-loopback IP traffic. Secret
-  environment values ending in a continuation backslash are rejected, and
-  deny paths cannot be ancestors of writable roots. Socket group/ACL rendering
-  and real systemd enforcement remain unmeasured and must not be claimed.
+- **H-15 — Telegram and socket rendering were incomplete. Repaired at the
+  deterministic rendering boundary in the current worktree.** Non-Telegram
+  units retain `IPAddressDeny=any` plus the loopback Hermes exception.
+  Telegram-enabled units omit both directives instead of rendering a policy
+  that makes Telegram unreachable or pretending a hostname is a stable systemd
+  IP allowlist. Their real egress containment therefore remains explicitly
+  unimplemented pending a firewall or network-namespace adapter. Each manifest
+  now declares only its derived `<bot>-access` socket group and renders it as a
+  supplementary service group; arbitrary existing host groups are rejected.
+  Tests cover enabled/disabled Telegram text and group validation/rendering.
+  Group creation, peer membership, socket ownership/mode, live network policy,
+  and real systemd enforcement remain unmeasured and are not claimed.
 
 ### Medium follow-up findings
 

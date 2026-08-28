@@ -118,6 +118,7 @@ data = "/var/lib/nswarm/research"
 [surface]
 telegram = false
 socket = "/run/research/mcp.sock"
+socket_group = "research-access"
 ask = true
 peers = ["boss-agent"]
 [secrets]
@@ -166,6 +167,9 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         let unit = run(["render".to_owned(), bot_path.display().to_string()].into_iter())
             .expect("render succeeds");
         assert!(unit.contains("User=research-agent"));
+        assert!(unit.contains("SupplementaryGroups=research-access"));
+        assert!(unit.contains("IPAddressDeny=any"));
+        assert!(unit.contains("IPAddressAllow=localhost"));
         let installed_path = directory.path().join("research.service");
         fs::write(&installed_path, &unit).expect("write installed fixture");
         let plan = run([

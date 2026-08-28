@@ -538,8 +538,13 @@ including 85/85 tests with none skipped, all policy/profile/eval/generated
 gates, deny/vet/machete, reproducibility, bounded fuzzing, MSRV, current stable,
 hosted aarch64 compilation, 97.17% repository coverage, 97.20% PR
 changed-line coverage, and 288/288 critical branch outcomes. The complete
-17,427-line log contains no Actions error or warning annotations. Exact-head
-merge-tier evidence is not yet claimed here.
+17,427-line log contains no Actions error or warning annotations. All four
+exact-head merge-tier jobs then passed in
+[run `33208168688`](https://github.com/nickderaj/nswarm/actions/runs/33208168688):
+hosted aarch64, Miri, AddressSanitizer/LeakSanitizer, and mutation testing are
+green. Mutation tested 491 candidates with no survivors (339 caught and 152
+unviable); the complete 1,833-line log has no Actions error or warning
+annotations. Checkpoint Q is therefore complete at its exact committed SHA.
 
 ## Checkpoint R — production-backed evaluation corpus
 
@@ -580,3 +585,28 @@ locked workspace check before the offline eval step. This prepares the locked
 dependency graph in the ordinary build phase while keeping the eval runner
 itself network-disabled; a later exact-head run must pass before checkpoint R
 is claimed as GitHub evidence.
+
+## Checkpoint S — explicit Telegram and socket-group rendering
+
+`Surface::telegram` now controls the rendered network policy. A disabled
+adapter retains systemd's deny-all IP policy and loopback exception for the
+local Hermes gateway. An enabled adapter receives neither directive: this
+avoids making Telegram impossible without claiming that systemd can reliably
+contain a changing hostname. Restricting Telegram-enabled egress remains a
+separate, unimplemented firewall or network-namespace adapter.
+
+Every bot manifest now declares its dedicated `<bot>-access` group. Validation
+derives the only accepted value from the bot name, preventing a manifest from
+adding the service to `wheel`, another bot identity, or another pre-existing
+host group. The service renders that identity through `SupplementaryGroups` so
+a future socket ACL adapter has an explicit group contract. This checkpoint
+does not claim that the group exists, that peers have membership, that the
+runtime assigns socket ownership or mode, or that a real systemd host enforces
+the text.
+
+Focused evidence: all 21 fleet library/binary tests pass, including explicit
+Telegram-enabled, non-Telegram, dedicated-group, repository-generation, and
+CLI rendering cases. Strict fleet Clippy passes, and a fresh temporary
+generation is byte-identical to the checked-in systemd tree. The full clean
+repository gate and exact-head GitHub evidence remain pending until the
+generated fixture is checkpointed.

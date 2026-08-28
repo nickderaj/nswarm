@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=research-agent
 Group=research-agent
+SupplementaryGroups=research-access
 ExecStart=/opt/nswarm/research/bin/research-bot
 WorkingDirectory=/opt/nswarm/research
 EnvironmentFile=/etc/nswarm/research.env

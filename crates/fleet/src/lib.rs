@@ -65,6 +65,8 @@ pub struct Surface {
     pub telegram: bool,
     /// Unix-domain socket carrying MCP tools and `ask`.
     pub socket: PathBuf,
+    /// Dedicated supplementary group used by the runtime's socket ACL adapter.
+    pub socket_group: String,
     /// Whether callers may request a full agent turn.
     pub ask: bool,
     /// Bot identities allowed to call this surface.
@@ -135,6 +137,10 @@ impl BotManifest {
         validate_identifier("bot.crate", &self.bot.crate_name)?;
         validate_identifier("bot.user", &self.bot.user)?;
         validate_identifier("agent.profile", &self.agent.profile)?;
+        validate_identifier("surface.socket_group", &self.surface.socket_group)?;
+        if self.surface.socket_group != format!("{}-access", self.bot.name) {
+            return Err(ManifestError::InvalidSocketGroup);
+        }
 
         for (name, path) in [
             ("bot.prefix", self.bot.prefix.as_path()),
@@ -213,6 +219,7 @@ impl BotManifest {
             "Type=simple".to_owned(),
             format!("User={}", self.bot.user),
             format!("Group={}", self.bot.user),
+            format!("SupplementaryGroups={}", self.surface.socket_group),
             format!("ExecStart={}", executable.display()),
             format!("WorkingDirectory={}", self.bot.prefix.display()),
             format!("EnvironmentFile=/etc/nswarm/{}.env", self.bot.name),
@@ -239,8 +246,14 @@ impl BotManifest {
             "SystemCallArchitectures=native".to_owned(),
             "SystemCallFilter=@system-service".to_owned(),
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6".to_owned(),
-            "IPAddressDeny=any".to_owned(),
-            "IPAddressAllow=localhost".to_owned(),
+        ];
+        if !self.surface.telegram {
+            lines.extend([
+                "IPAddressDeny=any".to_owned(),
+                "IPAddressAllow=localhost".to_owned(),
+            ]);
+        }
+        lines.extend([
             format!("MemoryMax={}", self.sandbox.memory_max),
             format!("CPUQuota={}", self.sandbox.cpu_quota),
             format!(
@@ -248,7 +261,7 @@ impl BotManifest {
                 self.bot.state.display(),
                 self.bot.data.display()
             ),
-        ];
+        ]);
         if !self.sandbox.deny_paths.is_empty() {
             lines.push(format!(
                 "InaccessiblePaths={}",
@@ -713,6 +726,9 @@ pub enum ManifestError {
     /// Worker peer ACLs must retain the star topology.
     #[error("worker peers must be exactly [\"boss-agent\"]")]
     InvalidPeerTopology,
+    /// Socket groups are dedicated per bot and cannot grant an existing host group.
+    #[error("surface.socket_group must be <bot.name>-access")]
+    InvalidSocketGroup,
     /// Environment variable names use a strict portable alphabet.
     #[error("invalid secret variable name: {0}")]
     InvalidSecretName(String),
@@ -780,6 +796,7 @@ data = "/srv/nswarm/gym"
 [surface]
 telegram = true
 socket = "/run/gym/mcp.sock"
+socket_group = "gym-access"
 ask = true
 peers = ["boss-agent"]
 
@@ -815,14 +832,33 @@ deny_paths = ["/srv/nswarm/tutor"]
             "ProtectSystem=strict",
             "UMask=0077",
             "SystemCallFilter=@system-service",
-            "IPAddressDeny=any",
-            "IPAddressAllow=localhost",
+            "SupplementaryGroups=gym-access",
             "ReadWritePaths=/var/lib/gym-agent /srv/nswarm/gym",
             "InaccessiblePaths=/srv/nswarm/tutor",
         ] {
             assert!(unit.contains(required), "missing {required}");
         }
         assert!(!unit.contains(concat!("/home/", "nick")));
+        assert!(!unit.contains("IPAddressDeny="));
+        assert!(!unit.contains("IPAddressAllow="));
+    }
+
+    #[test]
+    fn telegram_and_non_telegram_egress_rendering_is_explicit() {
+        let telegram = BotManifest::parse(MANIFEST)
+            .expect("Telegram manifest validates")
+            .render_unit()
+            .expect("Telegram unit renders");
+        assert!(!telegram.contains("IPAddressDeny="));
+        assert!(!telegram.contains("IPAddressAllow="));
+
+        let local_only =
+            BotManifest::parse(&MANIFEST.replace("telegram = true", "telegram = false"))
+                .expect("non-Telegram manifest validates")
+                .render_unit()
+                .expect("non-Telegram unit renders");
+        assert!(local_only.contains("IPAddressDeny=any"));
+        assert!(local_only.contains("IPAddressAllow=localhost"));
     }
 
     #[test]
@@ -944,10 +980,29 @@ deny_paths = ["/srv/nswarm/tutor"]
         ));
         let mut candidate = manifest;
         candidate.bot.name = "boss".to_owned();
+        candidate.surface.socket_group = "boss-access".to_owned();
         candidate.surface.peers.clear();
         candidate
             .validate()
             .expect("boss has no required upstream peer");
+    }
+
+    #[test]
+    fn socket_group_is_dedicated_and_rendered() {
+        let manifest = BotManifest::parse(MANIFEST).expect("manifest validates");
+        let unit = manifest.render_unit().expect("unit renders");
+        assert!(unit.contains("SupplementaryGroups=gym-access"));
+
+        for socket_group in ["boss-agent", "wheel", "gym-agent", ""] {
+            let source = MANIFEST.replace(
+                "socket_group = \"gym-access\"",
+                &format!("socket_group = \"{socket_group}\""),
+            );
+            assert!(matches!(
+                BotManifest::parse(&source),
+                Err(ManifestError::InvalidSocketGroup | ManifestError::InvalidIdentifier { .. })
+            ));
+        }
     }
 
     #[test]
@@ -1139,6 +1194,10 @@ secrets_allow = ["OPENROUTER_API_KEY"]
                 .replace(
                     "socket = \"/run/gym/mcp.sock\"",
                     "socket = \"/run/coach/mcp.sock\"",
+                )
+                .replace(
+                    "socket_group = \"gym-access\"",
+                    "socket_group = \"coach-access\"",
                 )
                 .replace("profile = \"gym\"", "profile = \"coach\""),
         )

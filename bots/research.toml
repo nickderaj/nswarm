@@ -10,6 +10,7 @@ data = "/var/lib/nswarm/research"
 [surface]
 telegram = false
 socket = "/run/research/mcp.sock"
+socket_group = "research-access"
 ask = true
 peers = ["boss-agent"]
 
