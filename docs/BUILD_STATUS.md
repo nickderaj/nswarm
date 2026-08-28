@@ -629,3 +629,21 @@ rejected by SQLite, and the same verifier can pass a new SHA which then
 advances. Populated v1 through v8 databases migrate idempotently to v9. This
 policy prefers a small corrective commit over weakening durable negative
 evidence; operational false positives therefore cost a new SHA by design.
+
+## Checkpoint U — supply-chain exemption inventory
+
+The locked graph still contains exactly 38 cargo-vet exemptions and zero local
+audits. The generated [inventory](SUPPLY_CHAIN.md) now records every crate's
+exact version and crates.io source, exact-release publishing account when the
+registry exposes one, dependency kind, a representative shortest use path,
+required criterion, and review class. The graph divides into 6
+direct/security-sensitive, 18 transitive bootstrap, and 14 build/dev-only
+entries.
+
+No exemption was promoted without source-review evidence. P1 direct and native
+SQLite boundary review is assigned first, P2 transitive bootstrap review or
+trustworthy audit imports second, and P3 build/dev-only review third. Build
+tooling remains relevant to produced artifacts even when it does not execute in
+the service. `cargo vet check` remains in `just ci`, so newly resolved versions
+continue to fail closed. `scripts/inventory_vet.py` regenerates the table from
+the vet configuration, Cargo's graph, and crates.io exact-version records.

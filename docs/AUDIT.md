@@ -166,9 +166,12 @@ cross-repository transaction invariants.
 
 All 38 cargo-vet entries are exemptions and `audits.toml` contains no audits.
 The configuration fails closed for new dependencies, which is good, but no
-crate has yet been reviewed strongly enough to replace an exemption. Direct and
-security-sensitive dependencies must be inventoried before any exemption is
-removed; no audit may be inferred from a passing build.
+crate has yet been reviewed strongly enough to replace an exemption. The
+[locked exemption inventory](SUPPLY_CHAIN.md) records exact versions, registry
+sources and publishing accounts, dependency kinds, representative uses, and
+assigned review priority: 6 direct/security-sensitive, 18 transitive bootstrap,
+and 14 build/dev-only entries. No audit may be inferred from a passing build or
+publisher identity.
 
 ## Follow-up independent review disposition
 
