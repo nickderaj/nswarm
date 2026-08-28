@@ -10,7 +10,7 @@ use crate::{
     SessionId, Sha, UnitId,
 };
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Reviewer assessment recorded against one exact candidate SHA.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +158,15 @@ impl ControlStore {
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(MIGRATION_6)?;
+            transaction.pragma_update(None, "user_version", 6_i64)?;
+            transaction.commit()?;
+            version = 6;
+        }
+        if version == 6 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(MIGRATION_7)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
         }
@@ -312,12 +321,26 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({"unit_id": unit_id.as_str(), "next": next.as_str()});
+        if command_replay_tx(
+            &transaction,
+            idempotency_key,
+            "transition",
+            &command_request,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
         let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
+        if matches!(current, JobState::Integrated | JobState::MergeAuthorized) {
+            return Err(StoreError::DedicatedGateRequired(next));
+        }
         if !current.can_transition_to(next) {
             return Err(StoreError::InvalidTransition { current, next });
         }
         update_state_tx(&transaction, unit_id, next, now)?;
-        append_event_tx(
+        let event_id = append_event_tx(
             &transaction,
             &job_id,
             idempotency_key,
@@ -328,6 +351,14 @@ impl ControlStore {
                 "to": next.as_str()
             }),
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            idempotency_key,
+            "transition",
+            &command_request,
+            &Value::Null,
+            event_id,
         )?;
         transaction.commit()?;
         Ok(())
@@ -348,6 +379,17 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str()});
+        if command_replay_tx(
+            &transaction,
+            idempotency_key,
+            "record-candidate",
+            &command_request,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
         let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
         if current != JobState::SelfVerifying {
             return Err(StoreError::InvalidTransition {
@@ -375,13 +417,21 @@ impl ControlStore {
             "UPDATE units SET state = 'candidate-ready', candidate_sha = ?1, integration_sha = NULL, updated_at = ?2 WHERE unit_id = ?3",
             params![head_sha.as_str(), now, unit_id.as_str()],
         )?;
-        append_event_tx(
+        let event_id = append_event_tx(
             &transaction,
             &job_id,
             idempotency_key,
             "candidate-recorded",
             &json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str()}),
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            idempotency_key,
+            "record-candidate",
+            &command_request,
+            &Value::Null,
+            event_id,
         )?;
         transaction.commit()?;
         Ok(())
@@ -402,6 +452,23 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({
+            "unit_id": unit_id.as_str(),
+            "verifier": verdict.verifier.as_str(),
+            "head_sha": verdict.head_sha.as_str(),
+            "passed": verdict.passed,
+            "evidence": verdict.evidence
+        });
+        if command_replay_tx(
+            &transaction,
+            verdict.idempotency_key,
+            "record-verdict",
+            &command_request,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
         let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
         if current != JobState::IndependentlyVerifying {
             return Err(StoreError::InvalidTransition {
@@ -436,7 +503,7 @@ impl ControlStore {
             ],
         )?;
         update_state_tx(&transaction, unit_id, JobState::Reviewing, now)?;
-        append_event_tx(
+        let event_id = append_event_tx(
             &transaction,
             &job_id,
             verdict.idempotency_key,
@@ -448,6 +515,14 @@ impl ControlStore {
                 "passed": verdict.passed
             }),
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            verdict.idempotency_key,
+            "record-verdict",
+            &command_request,
+            &Value::Null,
+            event_id,
         )?;
         transaction.commit()?;
         Ok(())
@@ -470,6 +545,18 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({"unit_id": unit_id.as_str()});
+        if let Some(result) = command_replay_tx(
+            &transaction,
+            idempotency_key,
+            "accept-verdict",
+            &command_request,
+        )? {
+            let state = result
+                .as_str()
+                .ok_or_else(|| StoreError::InvalidStoredCommand(idempotency_key.to_owned()))?;
+            return Ok(JobState::try_from(state)?);
+        }
         let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
         if current != JobState::Reviewing {
             return Err(StoreError::InvalidTransition {
@@ -491,13 +578,21 @@ impl ControlStore {
             JobState::Verified
         };
         update_state_tx(&transaction, unit_id, next, now)?;
-        append_event_tx(
+        let event_id = append_event_tx(
             &transaction,
             &job_id,
             idempotency_key,
             "verdict-accepted",
             &json!({"unit_id": unit_id.as_str(), "head_sha": candidate.as_str(), "state": next.as_str()}),
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            idempotency_key,
+            "accept-verdict",
+            &command_request,
+            &json!(next.as_str()),
+            event_id,
         )?;
         transaction.commit()?;
         Ok(next)
@@ -519,6 +614,21 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({
+            "unit_id": unit_id.as_str(),
+            "integrated_sha": integrated_sha.as_str()
+        });
+        if let Some(result) = command_replay_tx(
+            &transaction,
+            idempotency_key,
+            "complete-integration",
+            &command_request,
+        )? {
+            let state = result
+                .as_str()
+                .ok_or_else(|| StoreError::InvalidStoredCommand(idempotency_key.to_owned()))?;
+            return Ok(JobState::try_from(state)?);
+        }
         let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
         if current != JobState::Integrating {
             return Err(StoreError::InvalidTransition {
@@ -537,7 +647,7 @@ impl ControlStore {
             "UPDATE units SET state = ?1, candidate_sha = ?2, integration_sha = ?2, updated_at = ?3 WHERE unit_id = ?4",
             params![next.as_str(), integrated_sha.as_str(), now, unit_id.as_str()],
         )?;
-        append_event_tx(
+        let event_id = append_event_tx(
             &transaction,
             &job_id,
             idempotency_key,
@@ -549,6 +659,14 @@ impl ControlStore {
                 "requires_reverification": next == JobState::CandidateReady
             }),
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            idempotency_key,
+            "complete-integration",
+            &command_request,
+            &json!(next.as_str()),
+            event_id,
         )?;
         transaction.commit()?;
         Ok(next)
@@ -571,6 +689,21 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({
+            "unit_id": unit_id.as_str(),
+            "head_sha": head_sha.as_str(),
+            "authorized_by": authorized_by.as_str()
+        });
+        if command_replay_tx(
+            &transaction,
+            idempotency_key,
+            "authorize-merge",
+            &command_request,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
         let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
         if current != JobState::Integrated {
             return Err(StoreError::InvalidTransition {
@@ -595,13 +728,21 @@ impl ControlStore {
             params![unit_id.as_str(), head_sha.as_str(), authorized_by.as_str(), now],
         )?;
         update_state_tx(&transaction, unit_id, JobState::MergeAuthorized, now)?;
-        append_event_tx(
+        let event_id = append_event_tx(
             &transaction,
             &job_id,
             idempotency_key,
             "merge-authorized",
             &json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str(), "authorized_by": authorized_by.as_str()}),
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            idempotency_key,
+            "authorize-merge",
+            &command_request,
+            &Value::Null,
+            event_id,
         )?;
         transaction.commit()?;
         Ok(())
@@ -624,6 +765,21 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({
+            "unit_id": unit_id.as_str(),
+            "head_sha": head_sha.as_str(),
+            "merged_by": merged_by.as_str()
+        });
+        if command_replay_tx(
+            &transaction,
+            idempotency_key,
+            "record-merged",
+            &command_request,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
         let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
         if current != JobState::MergeAuthorized {
             return Err(StoreError::InvalidTransition {
@@ -633,7 +789,7 @@ impl ControlStore {
         }
         let authorized: Option<(String, String)> = transaction
             .query_row(
-                "SELECT head_sha, authorized_by FROM merge_authorizations WHERE unit_id = ?1",
+                "SELECT head_sha, authorized_by FROM merge_authorizations WHERE unit_id = ?1 AND invalidated_at IS NULL ORDER BY authorization_id DESC LIMIT 1",
                 [unit_id.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -651,13 +807,112 @@ impl ControlStore {
             return Err(StoreError::UnauthorizedShipper);
         }
         update_state_tx(&transaction, unit_id, JobState::Merged, now)?;
-        append_event_tx(
+        let event_id = append_event_tx(
             &transaction,
             &job_id,
             idempotency_key,
             "merged",
             &json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str(), "merged_by": merged_by.as_str()}),
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            idempotency_key,
+            "record-merged",
+            &command_request,
+            &Value::Null,
+            event_id,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Recovers an integrated or merge-authorized unit after an external merge
+    /// failure while preserving and invalidating its exact-SHA authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] unless the actor has the capability belonging to
+    /// the protected state and the requested recovery state is explicit.
+    // coverage-critical
+    pub fn recover_integration(
+        &mut self,
+        unit_id: &UnitId,
+        actor: &ProfileId,
+        next: JobState,
+        reason: &Value,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({
+            "unit_id": unit_id.as_str(),
+            "actor": actor.as_str(),
+            "next": next.as_str(),
+            "reason": reason
+        });
+        if command_replay_tx(
+            &transaction,
+            idempotency_key,
+            "recover-integration",
+            &command_request,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
+        let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
+        if !matches!(
+            next,
+            JobState::FixRequired
+                | JobState::Blocked
+                | JobState::Abandoned
+                | JobState::Quarantined
+                | JobState::Superseded
+        ) || !current.can_transition_to(next)
+        {
+            return Err(StoreError::InvalidRecovery { current, next });
+        }
+        let capability = match current {
+            JobState::Integrated => Capability::Integrate,
+            JobState::MergeAuthorized => Capability::Merge,
+            _ => return Err(StoreError::InvalidRecovery { current, next }),
+        };
+        if !live_profile_has_capability_tx(&transaction, actor, &job_id, capability)? {
+            return Err(StoreError::UnauthorizedRecovery);
+        }
+        if current == JobState::MergeAuthorized {
+            transaction.execute(
+                "UPDATE merge_authorizations SET invalidated_at = ?1 WHERE unit_id = ?2 AND invalidated_at IS NULL",
+                params![now, unit_id.as_str()],
+            )?;
+        }
+        let candidate = candidate_sha_tx(&transaction, unit_id)?;
+        update_state_tx(&transaction, unit_id, next, now)?;
+        let event_id = append_event_tx(
+            &transaction,
+            &job_id,
+            idempotency_key,
+            "integration-recovered",
+            &json!({
+                "unit_id": unit_id.as_str(),
+                "actor": actor.as_str(),
+                "from": current.as_str(),
+                "to": next.as_str(),
+                "head_sha": candidate.as_str(),
+                "reason": reason
+            }),
+            now,
+        )?;
+        record_command_tx(
+            &transaction,
+            idempotency_key,
+            "recover-integration",
+            &command_request,
+            &Value::Null,
+            event_id,
         )?;
         transaction.commit()?;
         Ok(())
@@ -854,6 +1109,17 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({"unit_id": unit_id.as_str(), "report": report});
+        if let Some(result) = command_replay_tx(
+            &transaction,
+            idempotency_key,
+            "record-report",
+            &command_request,
+        )? {
+            return result
+                .as_i64()
+                .ok_or_else(|| StoreError::InvalidStoredCommand(idempotency_key.to_owned()));
+        }
         let (job_id, _) = unit_identity_tx(&transaction, unit_id)?;
         let brief_json: String = transaction.query_row(
             "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
@@ -871,6 +1137,14 @@ impl ControlStore {
             "worker-report",
             report,
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            idempotency_key,
+            "record-report",
+            &command_request,
+            &json!(id),
+            id,
         )?;
         transaction.commit()?;
         Ok(id)
@@ -987,6 +1261,20 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({
+            "coordinator": coordinator.as_str(),
+            "target": target.as_str()
+        });
+        if command_replay_tx(
+            &transaction,
+            idempotency_key,
+            "destroy-profile",
+            &command_request,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
         let target_record: Option<(String, String)> = transaction
             .query_row(
                 "SELECT job_id, unit_id FROM profiles WHERE profile_id = ?1 AND destroyed_at IS NULL",
@@ -1016,9 +1304,10 @@ impl ControlStore {
             "UPDATE leases SET released_at = ?1 WHERE job_id = ?2 AND unit_id = ?3 AND kind = 'profile' AND resource = ?4 AND released_at IS NULL",
             params![now, &job_id, &unit_id, target.as_str()],
         )?;
-        append_event_tx(
+        let job_id = JobId::new(job_id)?;
+        let event_id = append_event_tx(
             &transaction,
-            &JobId::new(job_id)?,
+            &job_id,
             idempotency_key,
             "profile-destroyed",
             &json!({
@@ -1027,6 +1316,14 @@ impl ControlStore {
                 "unit_id": unit_id
             }),
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            idempotency_key,
+            "destroy-profile",
+            &command_request,
+            &Value::Null,
+            event_id,
         )?;
         transaction.commit()?;
         Ok(())
@@ -1080,6 +1377,21 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({
+            "job_id": job_id.as_str(),
+            "coordinator": coordinator.as_str(),
+            "credential_id": credential_id
+        });
+        if command_replay_tx(
+            &transaction,
+            idempotency_key,
+            "revoke-credential-grant",
+            &command_request,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
         if !live_profile_has_capability_tx(
             &transaction,
             coordinator,
@@ -1097,13 +1409,21 @@ impl ControlStore {
                 credential_id.to_owned(),
             ));
         }
-        append_event_tx(
+        let event_id = append_event_tx(
             &transaction,
             job_id,
             idempotency_key,
             "credential-revoked",
             &json!({"credential_id": credential_id, "coordinator": coordinator.as_str()}),
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            idempotency_key,
+            "revoke-credential-grant",
+            &command_request,
+            &Value::Null,
+            event_id,
         )?;
         transaction.commit()?;
         Ok(())
@@ -1179,6 +1499,21 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({
+            "unit_id": unit_id.as_str(),
+            "expected_head": expected_head.as_str(),
+            "new_head": new_head.as_str()
+        });
+        if command_replay_tx(
+            &transaction,
+            idempotency_key,
+            "update-branch-head",
+            &command_request,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
         let (job_id, state) = unit_identity_tx(&transaction, unit_id)?;
         if !matches!(state, JobState::Implementing | JobState::SelfVerifying) {
             return Err(StoreError::BranchUpdateOutsideCodingState(state));
@@ -1202,7 +1537,7 @@ impl ControlStore {
             "UPDATE branches SET head_sha = ?1 WHERE unit_id = ?2",
             params![new_head.as_str(), unit_id.as_str()],
         )?;
-        append_event_tx(
+        let event_id = append_event_tx(
             &transaction,
             &job_id,
             idempotency_key,
@@ -1213,6 +1548,14 @@ impl ControlStore {
                 "head_sha": new_head.as_str()
             }),
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            idempotency_key,
+            "update-branch-head",
+            &command_request,
+            &Value::Null,
+            event_id,
         )?;
         transaction.commit()?;
         Ok(())
@@ -1354,6 +1697,23 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let command_request = json!({
+            "unit_id": unit_id.as_str(),
+            "integrator": integrator.as_str(),
+            "finding_id": request.finding_id,
+            "disposition": request.disposition.as_str(),
+            "rationale": request.rationale
+        });
+        if command_replay_tx(
+            &transaction,
+            request.idempotency_key,
+            "dispose-review-finding",
+            &command_request,
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
         let (job_id, state) = unit_identity_tx(&transaction, unit_id)?;
         if state != JobState::Reviewing {
             return Err(StoreError::ReviewOutsideReviewState);
@@ -1379,7 +1739,7 @@ impl ControlStore {
         if changed == 0 {
             return Err(StoreError::UnknownOpenFinding(request.finding_id));
         }
-        append_event_tx(
+        let event_id = append_event_tx(
             &transaction,
             &job_id,
             request.idempotency_key,
@@ -1392,6 +1752,14 @@ impl ControlStore {
                 "rationale": request.rationale
             }),
             now,
+        )?;
+        record_command_tx(
+            &transaction,
+            request.idempotency_key,
+            "dispose-review-finding",
+            &command_request,
+            &Value::Null,
+            event_id,
         )?;
         transaction.commit()?;
         Ok(())
@@ -1506,6 +1874,56 @@ fn update_state_tx(
         "UPDATE units SET state = ?1, updated_at = ?2 WHERE unit_id = ?3",
         params![state.as_str(), now, unit_id.as_str()],
     )?;
+    Ok(())
+}
+
+fn command_replay_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    idempotency_key: &str,
+    command_type: &str,
+    request: &Value,
+) -> Result<Option<Value>, StoreError> {
+    if idempotency_key.trim().is_empty() || command_type.trim().is_empty() {
+        return Err(StoreError::InvalidEvent);
+    }
+    let request_json = serde_json::to_string(&redact_evidence(request))?;
+    let existing: Option<(String, String, String)> = transaction
+        .query_row(
+            "SELECT command_type, request_json, result_json FROM command_results WHERE idempotency_key = ?1",
+            [idempotency_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((existing_type, existing_request, result_json)) = existing else {
+        return Ok(None);
+    };
+    if existing_type != command_type || existing_request != request_json {
+        return Err(StoreError::IdempotencyConflict(idempotency_key.to_owned()));
+    }
+    Ok(Some(serde_json::from_str(&result_json)?))
+}
+
+fn record_command_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    idempotency_key: &str,
+    command_type: &str,
+    request: &Value,
+    result: &Value,
+    event_id: i64,
+) -> Result<(), StoreError> {
+    let inserted = transaction.execute(
+        "INSERT INTO command_results (idempotency_key, job_id, command_type, request_json, result_json, event_id, created_at) SELECT ?1, job_id, ?2, ?3, ?4, event_id, created_at FROM events WHERE event_id = ?5",
+        params![
+            idempotency_key,
+            command_type,
+            serde_json::to_string(&redact_evidence(request))?,
+            serde_json::to_string(&redact_evidence(result))?,
+            event_id
+        ],
+    )?;
+    if inserted != 1 {
+        return Err(StoreError::InvalidStoredCommand(idempotency_key.to_owned()));
+    }
     Ok(())
 }
 
@@ -1716,6 +2134,9 @@ pub enum StoreError {
     /// An idempotency key was reused for a different logical event.
     #[error("idempotency key was reused with different evidence: {0}")]
     IdempotencyConflict(String),
+    /// A durable command result could not be decoded as its advertised type.
+    #[error("stored command result is invalid: {0}")]
+    InvalidStoredCommand(String),
     /// Profile home must be an explicit isolated absolute path.
     #[error("profile home must be absolute: {path}", path = .0.display())]
     InvalidProfileHome(std::path::PathBuf),
@@ -1725,6 +2146,17 @@ pub enum StoreError {
     /// Existing job identity cannot be reused for a different repository or policy pin.
     #[error("job scope differs from its immutable definition: {0}")]
     JobScopeMismatch(String),
+    /// Protected integration recovery requires an explicitly supported edge.
+    #[error("cannot recover unit from {current:?} to {next:?}")]
+    InvalidRecovery {
+        /// Current protected state.
+        current: JobState,
+        /// Requested recovery state.
+        next: JobState,
+    },
+    /// Recovery actors must own the capability associated with the state.
+    #[error("profile is not authorized to recover the protected integration state")]
+    UnauthorizedRecovery,
     /// Every dependency must name an already persisted unit.
     #[error("unknown dependency unit: {0}")]
     UnknownDependency(String),
@@ -2046,6 +2478,53 @@ BEGIN
 END;
 ";
 
+const MIGRATION_7: &str = r"
+ALTER TABLE merge_authorizations RENAME TO merge_authorizations_v6;
+
+CREATE TABLE merge_authorizations (
+    authorization_id INTEGER PRIMARY KEY,
+    unit_id TEXT NOT NULL REFERENCES units(unit_id),
+    head_sha TEXT NOT NULL,
+    authorized_by TEXT NOT NULL REFERENCES profiles(profile_id),
+    created_at INTEGER NOT NULL,
+    invalidated_at INTEGER
+) STRICT;
+
+INSERT INTO merge_authorizations (
+    authorization_id, unit_id, head_sha, authorized_by, created_at
+)
+SELECT authorization_id, unit_id, head_sha, authorized_by, created_at
+FROM merge_authorizations_v6;
+
+DROP TABLE merge_authorizations_v6;
+
+CREATE UNIQUE INDEX merge_authorizations_one_active
+ON merge_authorizations (unit_id)
+WHERE invalidated_at IS NULL;
+
+CREATE TABLE command_results (
+    idempotency_key TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    command_type TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    event_id INTEGER NOT NULL UNIQUE REFERENCES events(event_id),
+    created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TRIGGER command_results_no_update
+BEFORE UPDATE ON command_results
+BEGIN
+    SELECT RAISE(ABORT, 'command results are immutable');
+END;
+
+CREATE TRIGGER command_results_no_delete
+BEFORE DELETE ON command_results
+BEGIN
+    SELECT RAISE(ABORT, 'command results are immutable');
+END;
+";
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -2054,8 +2533,8 @@ mod tests {
 
     use super::{
         ControlStore, FindingDisposition, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5,
-        ReviewAssessment, SCHEMA, StoreError, VerificationVerdict, contains_secret_shape,
-        is_safe_relative_path,
+        MIGRATION_6, ReviewAssessment, SCHEMA, StoreError, VerificationVerdict,
+        contains_secret_shape, is_safe_relative_path,
     };
     use crate::{
         ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
@@ -2180,19 +2659,20 @@ mod tests {
             )
             .expect("verification starts");
         let verifier = register_verifier(store, brief, "prepared", 8);
+        let evidence = json!({"commands": ["cargo test"]});
+        let verdict = VerificationVerdict {
+            verifier: &verifier,
+            head_sha: candidate,
+            passed: true,
+            evidence: &evidence,
+            idempotency_key: "verdict-prepared",
+        };
         store
-            .record_verdict(
-                &brief.unit_id,
-                &VerificationVerdict {
-                    verifier: &verifier,
-                    head_sha: candidate,
-                    passed: true,
-                    evidence: &json!({"commands": ["cargo test"]}),
-                    idempotency_key: "verdict-prepared",
-                },
-                9,
-            )
+            .record_verdict(&brief.unit_id, &verdict, 9)
             .expect("verdict recorded");
+        store
+            .record_verdict(&brief.unit_id, &verdict, 99)
+            .expect("verdict replayed after state advance");
     }
 
     fn record_two_reviews(store: &mut ControlStore, brief: &JobBrief, head_sha: &Sha, now: i64) {
@@ -2229,19 +2709,20 @@ mod tests {
                     now + index + 2,
                 )
                 .expect("review recorded");
+            let rationale = json!({"reason": "independent review evidence accepted"});
+            let idempotency_key = format!("review-disposed:{finding_id}");
+            let disposition = FindingDisposition {
+                finding_id,
+                disposition: ReviewAssessment::Noted,
+                rationale: &rationale,
+                idempotency_key: &idempotency_key,
+            };
             store
-                .dispose_review_finding(
-                    &brief.unit_id,
-                    &integrator,
-                    &FindingDisposition {
-                        finding_id,
-                        disposition: ReviewAssessment::Noted,
-                        rationale: &json!({"reason": "independent review evidence accepted"}),
-                        idempotency_key: &format!("review-disposed:{finding_id}"),
-                    },
-                    now + index + 4,
-                )
+                .dispose_review_finding(&brief.unit_id, &integrator, &disposition, now + index + 4)
                 .expect("review disposed");
+            store
+                .dispose_review_finding(&brief.unit_id, &integrator, &disposition, 99)
+                .expect("review disposition replayed after mutation");
         }
     }
 
@@ -2301,6 +2782,64 @@ mod tests {
     fn migration_is_idempotent() {
         let mut store = ControlStore::open_in_memory().expect("store opens");
         store.migrate().expect("second migration succeeds");
+    }
+
+    #[test]
+    fn completed_commands_replay_before_state_checks_without_duplicate_effects() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        let unit = brief.unit_id.clone();
+        store.create_job(&brief, 1).expect("job created");
+
+        store
+            .transition(&unit, JobState::Leased, "lease-command", 2)
+            .expect("initial transition succeeds");
+        store
+            .transition(&unit, JobState::Leased, "lease-command", 99)
+            .expect("identical retry succeeds after state advance");
+        assert!(matches!(
+            store.transition(&unit, JobState::Grounding, "lease-command", 3),
+            Err(StoreError::IdempotencyConflict(key)) if key == "lease-command"
+        ));
+        store
+            .transition(&unit, JobState::Grounding, "ground-command", 4)
+            .expect("later command advances state");
+        let unknown = ProfileId::new("unknown-recovery-actor").expect("profile id");
+        assert!(matches!(
+            store.recover_integration(
+                &unit,
+                &unknown,
+                JobState::Merged,
+                &json!({"reason": "not a recovery target"}),
+                "invalid-recovery-target",
+                5,
+            ),
+            Err(StoreError::InvalidRecovery { .. })
+        ));
+        assert!(matches!(
+            store.recover_integration(
+                &unit,
+                &unknown,
+                JobState::FixRequired,
+                &json!({"reason": "wrong origin state"}),
+                "invalid-recovery-origin",
+                6,
+            ),
+            Err(StoreError::InvalidRecovery { .. })
+        ));
+        store
+            .transition(&unit, JobState::Leased, "lease-command", 100)
+            .expect("original result remains replayable after further progress");
+
+        let (events, commands): (i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM events WHERE idempotency_key = 'lease-command'), (SELECT COUNT(*) FROM command_results WHERE idempotency_key = 'lease-command')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("single-effect query");
+        assert_eq!((events, commands), (1, 1));
     }
 
     #[test]
@@ -2636,6 +3175,12 @@ mod tests {
                 .expect("low risk needs no reviewer quorum"),
             JobState::Verified
         );
+        assert_eq!(
+            store
+                .accept_verdict(&low_risk.unit_id, "low-risk-accepted", 99)
+                .expect("accepted verdict replays after state advance"),
+            JobState::Verified
+        );
 
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let brief = brief();
@@ -2654,6 +3199,17 @@ mod tests {
                 .expect("exact integration SHA is restored"),
             JobState::Integrated
         );
+        let integrator = ProfileId::new("integrator-review-gate").expect("integrator id");
+        store
+            .recover_integration(
+                &brief.unit_id,
+                &integrator,
+                JobState::Blocked,
+                &json!({"reason": "integration environment rejected"}),
+                "recover-integrated",
+                17,
+            )
+            .expect("integrator can recover an integrated SHA");
     }
 
     #[test]
@@ -3590,7 +4146,205 @@ mod tests {
         store
             .record_merged(&unit, &candidate, &shipper, "merged-full", 22)
             .expect("exact SHA merged");
+        store
+            .record_merged(&unit, &candidate, &shipper, "merged-full", 99)
+            .expect("merge completion replays after state advance");
         assert_eq!(store.state(&unit).expect("state"), JobState::Merged);
+    }
+
+    fn authorize_initial_candidate(
+        store: &mut ControlStore,
+        brief: &JobBrief,
+        candidate: &Sha,
+    ) -> ProfileId {
+        prepare_reviewing_candidate(store, brief, candidate);
+        assert_eq!(
+            store
+                .accept_verdict(&brief.unit_id, "accept-first", 10)
+                .expect("first SHA accepted"),
+            JobState::Verified
+        );
+        store
+            .transition(&brief.unit_id, JobState::Integrating, "integrate-first", 11)
+            .expect("first integration starts");
+        assert_eq!(
+            store
+                .complete_integration(&brief.unit_id, candidate, "integrated-first", 12)
+                .expect("first integration completes"),
+            JobState::Integrated
+        );
+        let shipper = register_shipper(store, brief, 13);
+        store
+            .authorize_merge(&brief.unit_id, candidate, &shipper, "authorize-first", 14)
+            .expect("first SHA authorized");
+        shipper
+    }
+
+    fn recover_authorized_candidate(
+        store: &mut ControlStore,
+        brief: &JobBrief,
+        shipper: &ProfileId,
+    ) {
+        let unit = &brief.unit_id;
+        let integrator = ProfileId::new("recovery-integrator").expect("integrator id");
+        store
+            .register_profile(
+                &integrator,
+                &brief.job_id,
+                unit,
+                Role::Integrator,
+                std::path::Path::new("/tmp/nswarm-recovery-integrator"),
+                15,
+            )
+            .expect("integrator registered");
+        assert!(matches!(
+            store.recover_integration(
+                unit,
+                &integrator,
+                JobState::FixRequired,
+                &json!({"reason": "protected merge rejected"}),
+                "wrong-recovery-role",
+                16,
+            ),
+            Err(StoreError::UnauthorizedRecovery)
+        ));
+        store
+            .recover_integration(
+                unit,
+                shipper,
+                JobState::FixRequired,
+                &json!({"reason": "protected merge rejected"}),
+                "recover-first",
+                16,
+            )
+            .expect("shipper recovers rejected merge");
+        store
+            .recover_integration(
+                unit,
+                shipper,
+                JobState::FixRequired,
+                &json!({"reason": "protected merge rejected"}),
+                "recover-first",
+                99,
+            )
+            .expect("identical recovery replay succeeds after state advance");
+        assert!(matches!(
+            store.recover_integration(
+                unit,
+                shipper,
+                JobState::Blocked,
+                &json!({"reason": "different recovery"}),
+                "recover-first",
+                99,
+            ),
+            Err(StoreError::IdempotencyConflict(key)) if key == "recover-first"
+        ));
+    }
+
+    fn authorize_replacement_candidate(
+        store: &mut ControlStore,
+        brief: &JobBrief,
+        candidate: &Sha,
+        shipper: &ProfileId,
+    ) {
+        let unit = &brief.unit_id;
+        for (state, key, timestamp) in [
+            (JobState::Leased, "second-leased", 17),
+            (JobState::Grounding, "second-grounding", 18),
+            (JobState::Implementing, "second-implementing", 19),
+            (JobState::SelfVerifying, "second-self-verifying", 20),
+        ] {
+            store
+                .transition(unit, state, key, timestamp)
+                .expect("second candidate advances");
+        }
+        store
+            .record_candidate(unit, candidate, "candidate-second", 21)
+            .expect("second candidate recorded");
+        store
+            .transition(unit, JobState::IndependentlyVerifying, "verify-second", 22)
+            .expect("second verification starts");
+        let verifier = register_verifier(store, brief, "second-sha", 22);
+        store
+            .record_verdict(
+                unit,
+                &VerificationVerdict {
+                    verifier: &verifier,
+                    head_sha: candidate,
+                    passed: true,
+                    evidence: &json!({"commands": ["cargo test"]}),
+                    idempotency_key: "verdict-second",
+                },
+                23,
+            )
+            .expect("second SHA freshly verified");
+        assert_eq!(
+            store
+                .accept_verdict(unit, "accept-second", 24)
+                .expect("second SHA accepted"),
+            JobState::Verified
+        );
+        store
+            .transition(unit, JobState::Integrating, "integrate-second", 25)
+            .expect("second integration starts");
+        assert_eq!(
+            store
+                .complete_integration(unit, candidate, "integrated-second", 26)
+                .expect("second integration completes"),
+            JobState::Integrated
+        );
+        store
+            .authorize_merge(unit, candidate, shipper, "authorize-second", 27)
+            .expect("second SHA authorized");
+        store
+            .authorize_merge(unit, candidate, shipper, "authorize-second", 27)
+            .expect("identical authorization replay succeeds after state advance");
+    }
+
+    #[test]
+    fn merge_recovery_preserves_history_and_requires_fresh_sha_authorization() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let mut brief = brief();
+        brief.risk_class = RiskClass::Low;
+        let unit = brief.unit_id.clone();
+        let first = sha('b');
+        let second = sha('c');
+        let shipper = authorize_initial_candidate(&mut store, &brief, &first);
+        recover_authorized_candidate(&mut store, &brief, &shipper);
+        authorize_replacement_candidate(&mut store, &brief, &second, &shipper);
+
+        assert!(matches!(
+            store.authorize_merge(&unit, &first, &shipper, "authorize-second", 28),
+            Err(StoreError::IdempotencyConflict(key)) if key == "authorize-second"
+        ));
+        assert!(matches!(
+            store.record_merged(&unit, &first, &shipper, "stale-first-merge", 28),
+            Err(StoreError::UnauthorizedSha { expected, actual })
+                if expected == second && actual == first
+        ));
+        assert!(
+            store
+                .connection
+                .execute(
+                    "INSERT INTO merge_authorizations (unit_id, head_sha, authorized_by, created_at) VALUES (?1, ?2, ?3, 28)",
+                    rusqlite::params![unit.as_str(), first.as_str(), shipper.as_str()],
+                )
+                .is_err(),
+            "storage allows only one active authorization per unit"
+        );
+
+        let (authorizations, active, events, commands): (i64, i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM merge_authorizations), (SELECT COUNT(*) FROM merge_authorizations WHERE invalidated_at IS NULL), (SELECT COUNT(*) FROM events WHERE idempotency_key = 'authorize-second'), (SELECT COUNT(*) FROM command_results WHERE idempotency_key = 'authorize-second')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("authorization history query");
+        assert_eq!((authorizations, active, events, commands), (2, 1, 1, 1));
+        store
+            .record_merged(&unit, &second, &shipper, "merge-second", 29)
+            .expect("only second SHA can merge");
     }
 
     #[test]
@@ -3976,6 +4730,15 @@ mod tests {
                 4,
             )
             .expect("coordinator revokes");
+        store
+            .revoke_credential_grant(
+                &brief.job_id,
+                &coordinator,
+                "github-job-push",
+                "authorized-revoke",
+                99,
+            )
+            .expect("credential revocation replays after mutation");
         assert!(
             !store
                 .credential_method_is_active(&brief.job_id, "github-job-push", method,)
@@ -4039,6 +4802,9 @@ mod tests {
         store
             .update_branch_head(&unit, &sha('a'), &sha('b'), "branch-update", 8)
             .expect("head advances");
+        store
+            .update_branch_head(&unit, &sha('a'), &sha('b'), "branch-update", 99)
+            .expect("branch update replays after head advances");
         assert!(matches!(
             store.update_branch_head(&unit, &sha('b'), &sha('c'), "branch-update", 9),
             Err(StoreError::IdempotencyConflict(key)) if key == "branch-update"
@@ -4059,43 +4825,27 @@ mod tests {
             .expect("tracked candidate accepted");
     }
 
+    fn assert_schema_column(store: &ControlStore, table: &str, column: &str) {
+        let query = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
+        let count: i64 = store
+            .connection
+            .query_row(&query, [column], |row| row.get(0))
+            .expect("schema column query");
+        assert_eq!(count, 1, "missing {table}.{column}");
+    }
+
     fn assert_current_schema(store: &ControlStore, legacy: &JobBrief) {
-        let reviewer_column: i64 = store
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('review_findings') WHERE name = 'reviewer_profile'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("column query");
-        assert_eq!(reviewer_column, 1);
-        let destroyed_session_column: i64 = store
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'destroyed_at'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("session column query");
-        assert_eq!(destroyed_session_column, 1);
-        let artifact_head_column: i64 = store
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('artifacts') WHERE name = 'head_sha'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("artifact column query");
-        assert_eq!(artifact_head_column, 1);
-        let verifier_column: i64 = store
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('verification_verdicts') WHERE name = 'verifier_profile'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("verifier column query");
-        assert_eq!(verifier_column, 1);
+        for (table, column) in [
+            ("review_findings", "reviewer_profile"),
+            ("sessions", "destroyed_at"),
+            ("artifacts", "head_sha"),
+            ("verification_verdicts", "verifier_profile"),
+            ("jobs", "repository"),
+            ("jobs", "standing_policy_version"),
+            ("merge_authorizations", "invalidated_at"),
+        ] {
+            assert_schema_column(store, table, column);
+        }
         let unit_brief_rows: i64 = store
             .connection
             .query_row("SELECT COUNT(*) FROM unit_briefs", [], |row| row.get(0))
@@ -4134,15 +4884,15 @@ mod tests {
             })
             .expect("foreign key check");
         assert_eq!(foreign_key_violations, 0);
-        let job_scope_columns: i64 = store
+        let command_result_table: i64 = store
             .connection
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name IN ('repository', 'standing_policy_version')",
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'command_results'",
                 [],
                 |row| row.get(0),
             )
-            .expect("job scope column query");
-        assert_eq!(job_scope_columns, 2);
+            .expect("command result table query");
+        assert_eq!(command_result_table, 1);
         let schema_version: i64 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -4151,9 +4901,9 @@ mod tests {
     }
 
     #[test]
-    fn populated_v1_through_v5_schemas_migrate_idempotently() {
+    fn populated_v1_through_v6_schemas_migrate_idempotently() {
         let legacy = brief();
-        for legacy_version in 1_i64..=5 {
+        for legacy_version in 1_i64..=6 {
             let connection = rusqlite::Connection::open_in_memory().expect("connection");
             connection.execute_batch(SCHEMA).expect("v1 schema");
             connection
@@ -4180,6 +4930,7 @@ mod tests {
                 (3_i64, MIGRATION_3),
                 (4_i64, MIGRATION_4),
                 (5_i64, MIGRATION_5),
+                (6_i64, MIGRATION_6),
             ] {
                 if version > legacy_version {
                     break;
@@ -4188,6 +4939,20 @@ mod tests {
                     .execute_batch(migration)
                     .expect("legacy migration applied");
             }
+            if legacy_version == 6 {
+                connection
+                    .execute(
+                        "INSERT INTO profiles (profile_id, job_id, unit_id, role, home) VALUES ('legacy-shipper', ?1, ?2, 'shipper', '/tmp/legacy-shipper')",
+                        rusqlite::params![legacy.job_id.as_str(), legacy.unit_id.as_str()],
+                    )
+                    .expect("legacy shipper inserted");
+                connection
+                    .execute(
+                        "INSERT INTO merge_authorizations (unit_id, head_sha, authorized_by, created_at) VALUES (?1, ?2, 'legacy-shipper', 2)",
+                        rusqlite::params![legacy.unit_id.as_str(), sha('b').as_str()],
+                    )
+                    .expect("legacy authorization inserted");
+            }
             connection
                 .pragma_update(None, "user_version", legacy_version)
                 .expect("set legacy version");
@@ -4195,6 +4960,20 @@ mod tests {
             store.migrate().expect("legacy to current migration");
             store.migrate().expect("current migration is idempotent");
             assert_current_schema(&store, &legacy);
+            if legacy_version == 6 {
+                let authorization: (String, String, Option<i64>) = store
+                    .connection
+                    .query_row(
+                        "SELECT head_sha, authorized_by, invalidated_at FROM merge_authorizations WHERE unit_id = ?1",
+                        [legacy.unit_id.as_str()],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .expect("migrated authorization query");
+                assert_eq!(
+                    authorization,
+                    (sha('b').to_string(), "legacy-shipper".to_owned(), None)
+                );
+            }
         }
     }
 }

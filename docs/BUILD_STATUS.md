@@ -1,6 +1,6 @@
 # nswarm v1 build status
 
-Updated: 2026-08-27 (Europe/London). Active branch: `overnight/bootstrap`.
+Updated: 2026-08-28 (Europe/London). Active branch: `overnight/bootstrap`.
 The frozen `ultron` v0 checkout has not been modified, staged, committed,
 deployed, restarted, or used as a source of private state.
 
@@ -440,3 +440,40 @@ fresh coverage run executes all 79 workspace tests and reports 98.06% for
 coverage, every crate above 90%, and 100% critical branch outcomes (252/252
 across 36 marked functions). Exact-head GitHub PR and merge-tier runs remain
 pending for the checkpoint commit and are not yet claimed as evidence.
+
+The committed checkpoint is
+`f23e56f15edbf7631e5b2e2f83e5827509d6ff2a`. All eight PR jobs passed in
+[run `33150146844`](https://github.com/nickderaj/nswarm/actions/runs/33150146844),
+including 79 tests, 97.31% repository coverage, 97.44% PR changed-line
+coverage, and 252/252 critical outcomes. All four exact-head merge-tier jobs
+passed in
+[run `33150797402`](https://github.com/nickderaj/nswarm/actions/runs/33150797402):
+464 mutation candidates produced no survivors (320 caught, 144 unviable),
+Miri passed, hosted aarch64 passed, and ASan/LSan passed.
+
+## Checkpoint P — recoverable exact-SHA authorization and command replay
+
+Schema v7 replaces the one-row-per-unit merge authorization with immutable
+history plus an explicit invalidation timestamp and one-active-per-unit index.
+`Integrated` and `MergeAuthorized` may recover only through a dedicated
+actor-bearing command: an integrator may recover the former and a shipper may
+recover the latter. Recovering an authorized merge invalidates its active
+authorization, while a replacement candidate must traverse fresh exact-SHA
+verification, integration, and authorization. Generic state transitions are
+unable to bypass the recovery gate.
+
+An immutable command-result ledger now makes advertised idempotent commands
+replay before state preconditions. Identical retries return their original
+result after later state changes; conflicting command/request reuse fails; and
+the command row is transactionally linked one-to-one with its append-only event.
+Tests cover transition, candidate, verdict, acceptance, integration, merge,
+recovery, report, teardown, branch, and review-disposition replay paths.
+Populated schema-v6 migration preserves its existing authorization row, retains
+foreign-key integrity, and remains idempotent.
+
+Fresh local evidence: all 56 `agent-control` tests and strict workspace Clippy
+pass. The complete `just ci` gate executes 81 tests with none skipped, keeps all
+38 supply-chain exemptions explicit, and reports 97.50% `agent-control`, 96.94%
+repository, and 96.62% changed executable-line coverage. Critical branch
+coverage is 278/278 across 37 marked functions. Exact-head GitHub PR and
+merge-tier evidence remain pending for this checkpoint commit.

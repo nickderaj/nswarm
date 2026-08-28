@@ -131,13 +131,16 @@ integration test can use the network. A new workspace crate can omit
 contract. Repository symlinks and alternate protected content shapes are not
 rejected.
 
-### M-2: Operation-level idempotency is not established
+### M-2: Operation-level idempotency was not established — repaired
 
-The append-only event helper is idempotent, but most state-changing methods
-perform state precondition checks before replay detection. Retrying a completed
-transition or merge authorization with the same key generally returns an
-invalid-transition error rather than the original success/result. The current
-evidence supports ledger-event idempotency only, not command idempotency.
+Schema v7 adds an immutable command-result ledger linked one-to-one with the
+append-only event that committed each command. Replay matching happens before
+state preconditions, returns the original result after later state advances,
+and rejects reuse of a key for a different command or redacted request. Tests
+exercise replay for transitions, candidates, verdicts, verdict acceptance,
+integration, merge authorization/completion/recovery, reports, profile and
+credential teardown, branch CAS, and review disposition without duplicating
+events or side effects.
 
 ### M-3: CI omits parts of the declared plan contract
 
@@ -220,17 +223,21 @@ the report at face value.
   locations, disables system/global Git config, credential helpers, prompts,
   hooks, and fsmonitor, and prohibits the file transport. A hostile executable
   `post-checkout` hook is proven not to run.
-- **H-11 — merge-authorized/integrated recovery paths are incomplete.** The
-  state machine and unique merge-authorization row can strand a unit when a
-  protected merge is rejected or its candidate changes. Exact-SHA
-  invalidation and explicit recovery transitions need durable tests.
+- **H-11 — merge-authorized/integrated recovery paths were incomplete.
+  Repaired in the current worktree.** Schema v7 preserves multiple historical
+  merge authorizations, permits only one active exact-SHA authorization per
+  unit, and invalidates active authorization when a merge-capable actor
+  recovers a merge-authorized unit. Integrated recovery requires `Integrate`;
+  merge-authorized recovery requires `Merge`; generic transitions cannot
+  bypass this gate. A full SHA-A/rejected-merge/SHA-B test proves fresh
+  verification and authorization are required and SHA A remains unusable.
 - **H-12 — capabilities were not the store's authorization source of truth.
   Partially repaired in the current worktree.** Existing actor-bearing merge,
   coordinator, reviewer, and integrator operations now resolve a live profile's
   persisted role through the typed `Role` parser and capability map. Structured
   profile policy no longer invents a `deploy` token absent from the Rust enum.
   Lifecycle methods without actors and verdict attribution remain active under
-  C-5.
+  this finding; attributed verdict publication itself is repaired under C-5.
 - **H-13 — topology leases were globally exclusive. Repaired in the current
   worktree.** Topology conflicts are now job-scoped; same-job concurrent owners
   fail while two independent jobs can hold integration topology concurrently.

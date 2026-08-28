@@ -433,6 +433,14 @@ impl JobState {
                 | (Self::Integrated, Self::MergeAuthorized)
                 | (Self::MergeAuthorized, Self::Merged)
                 | (
+                    Self::Integrated | Self::MergeAuthorized,
+                    Self::FixRequired
+                        | Self::Blocked
+                        | Self::Abandoned
+                        | Self::Quarantined
+                        | Self::Superseded
+                )
+                | (
                     Self::CandidateReady
                         | Self::IndependentlyVerifying
                         | Self::Reviewing
