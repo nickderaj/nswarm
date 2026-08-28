@@ -477,3 +477,56 @@ pass. The complete `just ci` gate executes 81 tests with none skipped, keeps all
 repository, and 96.62% changed executable-line coverage. Critical branch
 coverage is 278/278 across 37 marked functions. Exact-head GitHub PR and
 merge-tier evidence remain pending for this checkpoint commit.
+
+The committed checkpoint is
+`5494e50deb921942e548f87dcff0b33c7ec16df6`. All eight PR jobs passed in
+[run `33152626713`](https://github.com/nickderaj/nswarm/actions/runs/33152626713),
+including 81 tests, 96.94% repository coverage, 97.00% PR changed-line
+coverage, and 278/278 critical outcomes. The exact-head
+[merge-tier run `33181311813`](https://github.com/nickderaj/nswarm/actions/runs/33181311813)
+passed hosted aarch64, Miri, AddressSanitizer, and LeakSanitizer, but correctly
+failed the checkpoint because mutation testing found two survivors: the
+independent operands of the integration-recovery gate and the command identity
+blank-field gate. Mutation tested 481 candidates: 331 caught, 148 unviable,
+and 2 missed. This run is recorded as failed evidence and is not used to claim
+the checkpoint merge-ready; both missing outcomes are covered by checkpoint Q.
+
+## Checkpoint Q — actor-bound mutation and lease authority
+
+Schema v8 adds an immutable `holder_profile` foreign key to leases and a
+storage trigger requiring every new holder to be live in the lease's exact job
+and unit. Historical holderless leases migrate without invented attribution
+and fail closed. Lease acquisition now requires a live same-job coordinator
+and a live exact-unit holder with capability appropriate to the lease kind;
+profile lease resources must equal the holder identity.
+
+The nine reported actorless mutations now carry and persist actor identity.
+State transitions, candidate/branch mutation, integration completion,
+worker-result acceptance, report publication, and artifact recording enforce
+the exact role capability and required actor-owned lease in the same immediate
+transaction. Verdict acceptance and the previously actor-bearing verdict,
+review, merge, and recovery paths were also tightened to exact-unit scope and
+leases where their roles support them. A worker result cannot substitute a
+path or topology lease for its actor-owned profile lease. Profile destruction
+releases every lease held by that profile, and integration recovery releases
+stale topology ownership before replacement work. Provisioning and raw event
+storage methods are crate-private until the scheduler command adapter exists,
+so they are not downstream mutation bypasses.
+
+Adversarial tests cover unauthorized coordinators, wrong-role holders,
+cross-job and cross-unit actors, destroyed profiles, expired leases, wrong
+lease holders and kinds, missing profile/topology leases, and merge completion
+by a live shipper other than the exact authorized actor. Populated v1 through
+v7 schemas migrate twice to v8 with active, clean foreign keys; a legacy
+holderless lease remains unattributed. Regression tests also kill both mutants
+missed by merge-tier run `33181311813`: a recovery call cannot synthesize the
+otherwise legal `Integrated` to `MergeAuthorized` edge, and each blank command
+identity operand fails independently.
+
+Fresh pre-checkpoint local evidence: strict `agent-control` Clippy passes; all
+60 `agent-control` tests pass; the complete `just ci` gate executes 85
+workspace tests with none skipped, validates 88 policy-scanned files and two
+profiles, keeps all 38 cargo-vet exemptions explicit, and reports 97.70%
+`agent-control`, 97.17% repository, and 96.76% changed executable-line
+coverage. Critical branch coverage is 288/288 across 37 marked functions.
+Exact-head GitHub PR and merge-tier evidence remain pending for checkpoint Q.

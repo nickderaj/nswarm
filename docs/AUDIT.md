@@ -232,12 +232,22 @@ the report at face value.
   bypass this gate. A full SHA-A/rejected-merge/SHA-B test proves fresh
   verification and authorization are required and SHA A remains unusable.
 - **H-12 — capabilities were not the store's authorization source of truth.
-  Partially repaired in the current worktree.** Existing actor-bearing merge,
-  coordinator, reviewer, and integrator operations now resolve a live profile's
-  persisted role through the typed `Role` parser and capability map. Structured
-  profile policy no longer invents a `deploy` token absent from the Rust enum.
-  Lifecycle methods without actors and verdict attribution remain active under
-  this finding; attributed verdict publication itself is repaired under C-5.
+  Repaired in the current worktree.** Schema v8 attributes every new lease to
+  one live profile in its exact job and unit, makes the holder immutable, and
+  deliberately leaves migrated holderless leases unusable. The reported
+  lifecycle, candidate, integration, lease, worker-result, report, branch, and
+  artifact mutation boundaries now accept an actor and transactionally require
+  its live exact-unit capability plus the operation's profile or topology
+  lease. Adjacent verdict acceptance, review, authorization, merge, and
+  recovery boundaries use the same exact-unit check. Worker results accept
+  only the exact actor-owned profile lease ID; path or topology lease IDs are
+  insufficient. Destroying a profile releases all of its leases. Adversarial
+  tests cover expired and wrong-holder leases, destroyed profiles, wrong roles,
+  cross-job and cross-unit actors, and authorization bound to a different live
+  shipper. Generic job/profile/session provisioning and the raw event helper
+  are now crate-private scheduler/storage primitives, so downstream callers
+  cannot bypass the actor-bearing command surface while the trusted scheduler
+  adapter remains unimplemented.
 - **H-13 — topology leases were globally exclusive. Repaired in the current
   worktree.** Topology conflicts are now job-scoped; same-job concurrent owners
   fail while two independent jobs can hold integration topology concurrently.

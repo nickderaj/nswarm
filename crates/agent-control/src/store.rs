@@ -10,7 +10,7 @@ use crate::{
     SessionId, Sha, UnitId,
 };
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Reviewer assessment recorded against one exact candidate SHA.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,7 +99,7 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] for an unsupported prior version or SQL failure.
     // coverage-critical
-    pub fn migrate(&mut self) -> Result<(), StoreError> {
+    fn migrate(&mut self) -> Result<(), StoreError> {
         self.connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         let version = self
             .connection
@@ -167,6 +167,15 @@ impl ControlStore {
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(MIGRATION_7)?;
+            transaction.pragma_update(None, "user_version", 7_i64)?;
+            transaction.commit()?;
+            version = 7;
+        }
+        if version == 7 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(MIGRATION_8)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
         }
@@ -179,8 +188,15 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] when validation, serialization, or the atomic
     /// insert fails.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "trusted scheduler provisioning remains private until its command adapter is implemented"
+        )
+    )]
     // coverage-critical
-    pub fn create_job(&mut self, brief: &JobBrief, now: i64) -> Result<(), StoreError> {
+    pub(crate) fn create_job(&mut self, brief: &JobBrief, now: i64) -> Result<(), StoreError> {
         brief.validate()?;
         let brief_json = serde_json::to_string(brief)?;
         let transaction = self
@@ -302,6 +318,7 @@ impl ControlStore {
     /// Returns [`StoreError`] for an illegal edge or missing unit.
     pub fn transition(
         &mut self,
+        actor: &ProfileId,
         unit_id: &UnitId,
         next: JobState,
         idempotency_key: &str,
@@ -321,7 +338,11 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let command_request = json!({"unit_id": unit_id.as_str(), "next": next.as_str()});
+        let command_request = json!({
+            "actor": actor.as_str(),
+            "unit_id": unit_id.as_str(),
+            "next": next.as_str()
+        });
         if command_replay_tx(
             &transaction,
             idempotency_key,
@@ -339,6 +360,30 @@ impl ControlStore {
         if !current.can_transition_to(next) {
             return Err(StoreError::InvalidTransition { current, next });
         }
+        let (capability, lease) = match next {
+            JobState::Leased
+            | JobState::FixRequired
+            | JobState::Blocked
+            | JobState::Abandoned
+            | JobState::Quarantined
+            | JobState::Superseded => (Capability::Coordinate, None),
+            JobState::Grounding | JobState::Implementing | JobState::SelfVerifying => {
+                (Capability::BranchPush, Some(LeaseKind::Profile))
+            }
+            JobState::IndependentlyVerifying => (Capability::Verify, Some(LeaseKind::Profile)),
+            JobState::Integrating => (Capability::Integrate, Some(LeaseKind::Topology)),
+            JobState::Pending
+            | JobState::CandidateReady
+            | JobState::Reviewing
+            | JobState::Verified
+            | JobState::Integrated
+            | JobState::MergeAuthorized
+            | JobState::Merged => return Err(StoreError::DedicatedGateRequired(next)),
+        };
+        require_unit_actor_tx(&transaction, actor, &job_id, unit_id, capability)?;
+        if let Some(kind) = lease {
+            require_actor_lease_tx(&transaction, actor, unit_id, kind, now)?;
+        }
         update_state_tx(&transaction, unit_id, next, now)?;
         let event_id = append_event_tx(
             &transaction,
@@ -347,6 +392,7 @@ impl ControlStore {
             "state-transition",
             &json!({
                 "unit_id": unit_id.as_str(),
+                "actor": actor.as_str(),
                 "from": current.as_str(),
                 "to": next.as_str()
             }),
@@ -371,6 +417,7 @@ impl ControlStore {
     /// Returns [`StoreError`] unless the unit is self-verifying.
     pub fn record_candidate(
         &mut self,
+        actor: &ProfileId,
         unit_id: &UnitId,
         head_sha: &Sha,
         idempotency_key: &str,
@@ -379,7 +426,11 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let command_request = json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str()});
+        let command_request = json!({
+            "actor": actor.as_str(),
+            "unit_id": unit_id.as_str(),
+            "head_sha": head_sha.as_str()
+        });
         if command_replay_tx(
             &transaction,
             idempotency_key,
@@ -397,6 +448,14 @@ impl ControlStore {
                 next: JobState::CandidateReady,
             });
         }
+        require_unit_actor_tx(
+            &transaction,
+            actor,
+            &job_id,
+            unit_id,
+            Capability::BranchPush,
+        )?;
+        require_actor_lease_tx(&transaction, actor, unit_id, LeaseKind::Profile, now)?;
         let tracked_head: Option<String> = transaction
             .query_row(
                 "SELECT COALESCE(head_sha, base_sha) FROM branches WHERE unit_id = ?1",
@@ -422,7 +481,7 @@ impl ControlStore {
             &job_id,
             idempotency_key,
             "candidate-recorded",
-            &json!({"unit_id": unit_id.as_str(), "head_sha": head_sha.as_str()}),
+            &json!({"unit_id": unit_id.as_str(), "actor": actor.as_str(), "head_sha": head_sha.as_str()}),
             now,
         )?;
         record_command_tx(
@@ -483,14 +542,22 @@ impl ControlStore {
                 verdict: verdict.head_sha.clone(),
             });
         }
-        if !live_profile_has_capability_tx(
+        if !live_profile_has_unit_capability_tx(
             &transaction,
             verdict.verifier,
             &job_id,
+            unit_id,
             Capability::Verify,
         )? {
             return Err(StoreError::UnauthorizedVerifier);
         }
+        require_actor_lease_tx(
+            &transaction,
+            verdict.verifier,
+            unit_id,
+            LeaseKind::Profile,
+            now,
+        )?;
         transaction.execute(
             "INSERT INTO verification_verdicts (unit_id, verifier_profile, head_sha, passed, evidence_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -538,6 +605,7 @@ impl ControlStore {
     // coverage-critical
     pub fn accept_verdict(
         &mut self,
+        actor: &ProfileId,
         unit_id: &UnitId,
         idempotency_key: &str,
         now: i64,
@@ -545,7 +613,10 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let command_request = json!({"unit_id": unit_id.as_str()});
+        let command_request = json!({
+            "actor": actor.as_str(),
+            "unit_id": unit_id.as_str()
+        });
         if let Some(result) = command_replay_tx(
             &transaction,
             idempotency_key,
@@ -564,6 +635,8 @@ impl ControlStore {
                 next: JobState::Verified,
             });
         }
+        require_unit_actor_tx(&transaction, actor, &job_id, unit_id, Capability::Integrate)?;
+        require_actor_lease_tx(&transaction, actor, unit_id, LeaseKind::Profile, now)?;
         let candidate = candidate_sha_tx(&transaction, unit_id)?;
         require_passing_verdict_tx(&transaction, unit_id, &candidate)?;
         require_review_gate_tx(&transaction, unit_id, &candidate)?;
@@ -583,7 +656,7 @@ impl ControlStore {
             &job_id,
             idempotency_key,
             "verdict-accepted",
-            &json!({"unit_id": unit_id.as_str(), "head_sha": candidate.as_str(), "state": next.as_str()}),
+            &json!({"unit_id": unit_id.as_str(), "actor": actor.as_str(), "head_sha": candidate.as_str(), "state": next.as_str()}),
             now,
         )?;
         record_command_tx(
@@ -606,6 +679,7 @@ impl ControlStore {
     /// Returns [`StoreError`] unless an integrator currently owns the state.
     pub fn complete_integration(
         &mut self,
+        actor: &ProfileId,
         unit_id: &UnitId,
         integrated_sha: &Sha,
         idempotency_key: &str,
@@ -615,6 +689,7 @@ impl ControlStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let command_request = json!({
+            "actor": actor.as_str(),
             "unit_id": unit_id.as_str(),
             "integrated_sha": integrated_sha.as_str()
         });
@@ -636,6 +711,8 @@ impl ControlStore {
                 next: JobState::Integrated,
             });
         }
+        require_unit_actor_tx(&transaction, actor, &job_id, unit_id, Capability::Integrate)?;
+        require_actor_lease_tx(&transaction, actor, unit_id, LeaseKind::Topology, now)?;
         let candidate = candidate_sha_tx(&transaction, unit_id)?;
         let next = if candidate == *integrated_sha {
             require_passing_verdict_tx(&transaction, unit_id, integrated_sha)?;
@@ -654,6 +731,7 @@ impl ControlStore {
             "integration-completed",
             &json!({
                 "unit_id": unit_id.as_str(),
+                "actor": actor.as_str(),
                 "old_sha": candidate.as_str(),
                 "integrated_sha": integrated_sha.as_str(),
                 "requires_reverification": next == JobState::CandidateReady
@@ -711,8 +789,13 @@ impl ControlStore {
                 next: JobState::MergeAuthorized,
             });
         }
-        if !live_profile_has_capability_tx(&transaction, authorized_by, &job_id, Capability::Merge)?
-        {
+        if !live_profile_has_unit_capability_tx(
+            &transaction,
+            authorized_by,
+            &job_id,
+            unit_id,
+            Capability::Merge,
+        )? {
             return Err(StoreError::UnauthorizedShipper);
         }
         let candidate = candidate_sha_tx(&transaction, unit_id)?;
@@ -786,6 +869,15 @@ impl ControlStore {
                 current,
                 next: JobState::Merged,
             });
+        }
+        if !live_profile_has_unit_capability_tx(
+            &transaction,
+            merged_by,
+            &job_id,
+            unit_id,
+            Capability::Merge,
+        )? {
+            return Err(StoreError::UnauthorizedShipper);
         }
         let authorized: Option<(String, String)> = transaction
             .query_row(
@@ -880,7 +972,8 @@ impl ControlStore {
             JobState::MergeAuthorized => Capability::Merge,
             _ => return Err(StoreError::InvalidRecovery { current, next }),
         };
-        if !live_profile_has_capability_tx(&transaction, actor, &job_id, capability)? {
+        if !live_profile_has_unit_capability_tx(&transaction, actor, &job_id, unit_id, capability)?
+        {
             return Err(StoreError::UnauthorizedRecovery);
         }
         if current == JobState::MergeAuthorized {
@@ -889,6 +982,10 @@ impl ControlStore {
                 params![now, unit_id.as_str()],
             )?;
         }
+        transaction.execute(
+            "UPDATE leases SET released_at = ?1 WHERE unit_id = ?2 AND kind = 'topology' AND released_at IS NULL",
+            params![now, unit_id.as_str()],
+        )?;
         let candidate = candidate_sha_tx(&transaction, unit_id)?;
         update_state_tx(&transaction, unit_id, next, now)?;
         let event_id = append_event_tx(
@@ -927,9 +1024,15 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] when another live lease overlaps or expiry is not
     /// in the future.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the lease transaction keeps both actors and every immutable lease operand explicit"
+    )]
     // coverage-critical
     pub fn acquire_lease(
         &mut self,
+        coordinator: &ProfileId,
+        holder: &ProfileId,
         job_id: &JobId,
         unit_id: &UnitId,
         kind: LeaseKind,
@@ -949,6 +1052,23 @@ impl ControlStore {
         let (actual_job, _) = unit_identity_tx(&transaction, unit_id)?;
         if actual_job != *job_id {
             return Err(StoreError::JobUnitMismatch);
+        }
+        if !live_profile_has_capability_tx(
+            &transaction,
+            coordinator,
+            job_id,
+            Capability::Coordinate,
+        )? {
+            return Err(StoreError::UnauthorizedCoordinator);
+        }
+        let holder_capability = match kind {
+            LeaseKind::Path => Capability::RepositoryWrite,
+            LeaseKind::Topology => Capability::Integrate,
+            LeaseKind::Profile => Capability::EvidenceWrite,
+        };
+        require_unit_actor_tx(&transaction, holder, job_id, unit_id, holder_capability)?;
+        if kind == LeaseKind::Profile && resource != holder.as_str() {
+            return Err(StoreError::InvalidLease);
         }
         let unsatisfied: i64 = transaction.query_row(
             "SELECT COUNT(*) FROM dependencies AS dependency JOIN units AS prerequisite ON prerequisite.unit_id = dependency.depends_on_unit_id WHERE dependency.unit_id = ?1 AND prerequisite.state != 'merged'",
@@ -984,8 +1104,8 @@ impl ControlStore {
             return Err(StoreError::LeaseConflict(resource.to_owned()));
         }
         transaction.execute(
-            "INSERT INTO leases (job_id, unit_id, kind, resource, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![job_id.as_str(), unit_id.as_str(), kind.as_str(), resource, expires_at],
+            "INSERT INTO leases (job_id, unit_id, kind, resource, expires_at, holder_profile) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![job_id.as_str(), unit_id.as_str(), kind.as_str(), resource, expires_at, holder.as_str()],
         )?;
         let lease_id = transaction.last_insert_rowid();
         append_event_tx(
@@ -993,7 +1113,7 @@ impl ControlStore {
             job_id,
             &format!("lease-acquired:{lease_id}"),
             "lease-acquired",
-            &json!({"unit_id": unit_id.as_str(), "lease_id": lease_id, "kind": kind.as_str(), "resource": resource}),
+            &json!({"unit_id": unit_id.as_str(), "lease_id": lease_id, "kind": kind.as_str(), "resource": resource, "coordinator": coordinator.as_str(), "holder": holder.as_str()}),
             now,
         )?;
         transaction.commit()?;
@@ -1012,6 +1132,7 @@ impl ControlStore {
     // coverage-critical
     pub fn accept_worker_result(
         &mut self,
+        actor: &ProfileId,
         unit_id: &UnitId,
         lease_id: i64,
         head_sha: &Sha,
@@ -1021,17 +1142,24 @@ impl ControlStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (job_id, current) = unit_identity_tx(&transaction, unit_id)?;
+        require_unit_actor_tx(
+            &transaction,
+            actor,
+            &job_id,
+            unit_id,
+            Capability::EvidenceWrite,
+        )?;
         let live: bool = transaction
             .query_row(
-                "SELECT expires_at > ?1 AND released_at IS NULL FROM leases WHERE lease_id = ?2 AND unit_id = ?3",
-                params![now, lease_id, unit_id.as_str()],
+                "SELECT expires_at > ?1 AND released_at IS NULL FROM leases WHERE lease_id = ?2 AND unit_id = ?3 AND holder_profile = ?4 AND kind = 'profile'",
+                params![now, lease_id, unit_id.as_str(), actor.as_str()],
                 |row| row.get(0),
             )
             .optional()?
             .unwrap_or(false);
         if !live {
             let replacement_live: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM leases WHERE unit_id = ?1 AND released_at IS NULL AND expires_at > ?2)",
+                "SELECT EXISTS(SELECT 1 FROM leases WHERE unit_id = ?1 AND kind = 'profile' AND released_at IS NULL AND expires_at > ?2)",
                 params![unit_id.as_str(), now],
                 |row| row.get(0),
             )?;
@@ -1043,7 +1171,7 @@ impl ControlStore {
                 &job_id,
                 &format!("stale-result:{lease_id}:{}", head_sha.as_str()),
                 "result-quarantined",
-                &json!({"unit_id": unit_id.as_str(), "lease_id": lease_id, "head_sha": head_sha.as_str()}),
+                &json!({"unit_id": unit_id.as_str(), "actor": actor.as_str(), "lease_id": lease_id, "head_sha": head_sha.as_str()}),
                 now,
             )?;
             transaction.commit()?;
@@ -1054,7 +1182,7 @@ impl ControlStore {
             &job_id,
             &format!("worker-result:{lease_id}:{}", head_sha.as_str()),
             "worker-result",
-            &json!({"unit_id": unit_id.as_str(), "lease_id": lease_id, "head_sha": head_sha.as_str()}),
+            &json!({"unit_id": unit_id.as_str(), "actor": actor.as_str(), "lease_id": lease_id, "head_sha": head_sha.as_str()}),
             now,
         )?;
         transaction.commit()?;
@@ -1066,7 +1194,14 @@ impl ControlStore {
     /// # Errors
     ///
     /// Returns [`StoreError`] for an empty key or database failure.
-    pub fn append_event(
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "tests exercise the private event primitive; production mutations use authorized transactional helpers"
+        )
+    )]
+    pub(crate) fn append_event(
         &mut self,
         job_id: &JobId,
         idempotency_key: &str,
@@ -1101,6 +1236,7 @@ impl ControlStore {
     /// is missing, or persistence fails.
     pub fn record_report(
         &mut self,
+        actor: &ProfileId,
         unit_id: &UnitId,
         report: &Value,
         idempotency_key: &str,
@@ -1109,7 +1245,11 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let command_request = json!({"unit_id": unit_id.as_str(), "report": report});
+        let command_request = json!({
+            "actor": actor.as_str(),
+            "unit_id": unit_id.as_str(),
+            "report": report
+        });
         if let Some(result) = command_replay_tx(
             &transaction,
             idempotency_key,
@@ -1121,6 +1261,14 @@ impl ControlStore {
                 .ok_or_else(|| StoreError::InvalidStoredCommand(idempotency_key.to_owned()));
         }
         let (job_id, _) = unit_identity_tx(&transaction, unit_id)?;
+        require_unit_actor_tx(
+            &transaction,
+            actor,
+            &job_id,
+            unit_id,
+            Capability::EvidenceWrite,
+        )?;
+        require_actor_lease_tx(&transaction, actor, unit_id, LeaseKind::Profile, now)?;
         let brief_json: String = transaction.query_row(
             "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
             [unit_id.as_str()],
@@ -1135,7 +1283,7 @@ impl ControlStore {
             &job_id,
             idempotency_key,
             "worker-report",
-            report,
+            &json!({"actor": actor.as_str(), "report": report}),
             now,
         )?;
         record_command_tx(
@@ -1156,7 +1304,14 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] for a job/unit mismatch, relative home, duplicate
     /// profile, or database failure.
-    pub fn register_profile(
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "trusted scheduler provisioning remains private until its command adapter is implemented"
+        )
+    )]
+    pub(crate) fn register_profile(
         &mut self,
         profile_id: &ProfileId,
         job_id: &JobId,
@@ -1203,7 +1358,14 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] for a blank key, unknown profile, duplicate, or
     /// database failure.
-    pub fn register_session(
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "trusted scheduler provisioning remains private until its command adapter is implemented"
+        )
+    )]
+    pub(crate) fn register_session(
         &mut self,
         session_id: &SessionId,
         profile_id: &ProfileId,
@@ -1301,7 +1463,7 @@ impl ControlStore {
             params![now, target.as_str()],
         )?;
         transaction.execute(
-            "UPDATE leases SET released_at = ?1 WHERE job_id = ?2 AND unit_id = ?3 AND kind = 'profile' AND resource = ?4 AND released_at IS NULL",
+            "UPDATE leases SET released_at = ?1 WHERE job_id = ?2 AND unit_id = ?3 AND holder_profile = ?4 AND released_at IS NULL",
             params![now, &job_id, &unit_id, target.as_str()],
         )?;
         let job_id = JobId::new(job_id)?;
@@ -1438,6 +1600,7 @@ impl ControlStore {
     // coverage-critical
     pub fn register_branch(
         &mut self,
+        actor: &ProfileId,
         unit_id: &UnitId,
         name: &str,
         worktree: &Path,
@@ -1451,6 +1614,14 @@ impl ControlStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (job_id, _) = unit_identity_tx(&transaction, unit_id)?;
+        require_unit_actor_tx(
+            &transaction,
+            actor,
+            &job_id,
+            unit_id,
+            Capability::BranchPush,
+        )?;
+        require_actor_lease_tx(&transaction, actor, unit_id, LeaseKind::Profile, now)?;
         let expected_name = format!("nswarm/{job_id}/{unit_id}");
         let expected_base: String = transaction.query_row(
             "SELECT base_sha FROM units WHERE unit_id = ?1",
@@ -1474,7 +1645,7 @@ impl ControlStore {
             &job_id,
             &format!("branch-registered:{unit_id}"),
             "branch-registered",
-            &json!({"unit_id": unit_id.as_str(), "name": name, "base_sha": base_sha.as_str()}),
+            &json!({"unit_id": unit_id.as_str(), "actor": actor.as_str(), "name": name, "base_sha": base_sha.as_str()}),
             now,
         )?;
         transaction.commit()?;
@@ -1490,6 +1661,7 @@ impl ControlStore {
     // coverage-critical
     pub fn update_branch_head(
         &mut self,
+        actor: &ProfileId,
         unit_id: &UnitId,
         expected_head: &Sha,
         new_head: &Sha,
@@ -1500,6 +1672,7 @@ impl ControlStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let command_request = json!({
+            "actor": actor.as_str(),
             "unit_id": unit_id.as_str(),
             "expected_head": expected_head.as_str(),
             "new_head": new_head.as_str()
@@ -1515,6 +1688,14 @@ impl ControlStore {
             return Ok(());
         }
         let (job_id, state) = unit_identity_tx(&transaction, unit_id)?;
+        require_unit_actor_tx(
+            &transaction,
+            actor,
+            &job_id,
+            unit_id,
+            Capability::BranchPush,
+        )?;
+        require_actor_lease_tx(&transaction, actor, unit_id, LeaseKind::Profile, now)?;
         if !matches!(state, JobState::Implementing | JobState::SelfVerifying) {
             return Err(StoreError::BranchUpdateOutsideCodingState(state));
         }
@@ -1544,6 +1725,7 @@ impl ControlStore {
             "branch-head-updated",
             &json!({
                 "unit_id": unit_id.as_str(),
+                "actor": actor.as_str(),
                 "previous_head": expected_head.as_str(),
                 "head_sha": new_head.as_str()
             }),
@@ -1567,9 +1749,14 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] for an unsafe path, stale source SHA, duplicate,
     /// or database failure.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "artifact attribution keeps the actor and exact evidence identity explicit"
+    )]
     // coverage-critical
     pub fn record_artifact(
         &mut self,
+        actor: &ProfileId,
         unit_id: &UnitId,
         kind: ArtifactKind,
         path: &Path,
@@ -1592,6 +1779,14 @@ impl ControlStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (job_id, _) = unit_identity_tx(&transaction, unit_id)?;
+        require_unit_actor_tx(
+            &transaction,
+            actor,
+            &job_id,
+            unit_id,
+            Capability::EvidenceWrite,
+        )?;
+        require_actor_lease_tx(&transaction, actor, unit_id, LeaseKind::Profile, now)?;
         let current: String = transaction.query_row(
             "SELECT COALESCE(candidate_sha, base_sha) FROM units WHERE unit_id = ?1",
             [unit_id.as_str()],
@@ -1616,6 +1811,7 @@ impl ControlStore {
             "artifact-recorded",
             &json!({
                 "unit_id": unit_id.as_str(),
+                "actor": actor.as_str(),
                 "artifact_id": artifact_id,
                 "kind": kind.as_str(),
                 "head_sha": head_sha.as_str(),
@@ -1657,9 +1853,16 @@ impl ControlStore {
                 verdict: head_sha.clone(),
             });
         }
-        if !live_profile_has_capability_tx(&transaction, reviewer, &job_id, Capability::Verify)? {
+        if !live_profile_has_unit_capability_tx(
+            &transaction,
+            reviewer,
+            &job_id,
+            unit_id,
+            Capability::Verify,
+        )? {
             return Err(StoreError::UnauthorizedReviewer);
         }
+        require_actor_lease_tx(&transaction, reviewer, unit_id, LeaseKind::Profile, now)?;
         transaction.execute(
             "INSERT INTO review_findings (unit_id, head_sha, reviewer_profile, severity, finding_json, disposition, created_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
             params![unit_id.as_str(), head_sha.as_str(), reviewer.as_str(), assessment.as_str(), serde_json::to_string(&redact_evidence(finding))?, now],
@@ -1718,14 +1921,16 @@ impl ControlStore {
         if state != JobState::Reviewing {
             return Err(StoreError::ReviewOutsideReviewState);
         }
-        if !live_profile_has_capability_tx(
+        if !live_profile_has_unit_capability_tx(
             &transaction,
             integrator,
             &job_id,
+            unit_id,
             Capability::Integrate,
         )? {
             return Err(StoreError::UnauthorizedIntegrator);
         }
+        require_actor_lease_tx(&transaction, integrator, unit_id, LeaseKind::Profile, now)?;
         let candidate = candidate_sha_tx(&transaction, unit_id)?;
         let changed = transaction.execute(
             "UPDATE review_findings SET disposition = ?1 WHERE finding_id = ?2 AND unit_id = ?3 AND head_sha = ?4 AND disposition IS NULL",
@@ -1784,6 +1989,62 @@ fn live_profile_has_capability_tx(
         .as_deref()
         .and_then(Role::from_name)
         .is_some_and(|role| role.can(capability)))
+}
+
+fn live_profile_has_unit_capability_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    profile_id: &ProfileId,
+    job_id: &JobId,
+    unit_id: &UnitId,
+    capability: Capability,
+) -> Result<bool, StoreError> {
+    let role: Option<String> = transaction
+        .query_row(
+            "SELECT role FROM profiles WHERE profile_id = ?1 AND job_id = ?2 AND unit_id = ?3 AND destroyed_at IS NULL",
+            params![profile_id.as_str(), job_id.as_str(), unit_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(role
+        .as_deref()
+        .and_then(Role::from_name)
+        .is_some_and(|role| role.can(capability)))
+}
+
+fn require_unit_actor_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    actor: &ProfileId,
+    job_id: &JobId,
+    unit_id: &UnitId,
+    capability: Capability,
+) -> Result<(), StoreError> {
+    if live_profile_has_unit_capability_tx(transaction, actor, job_id, unit_id, capability)? {
+        Ok(())
+    } else {
+        Err(StoreError::UnauthorizedActor(actor.to_string()))
+    }
+}
+
+fn require_actor_lease_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    actor: &ProfileId,
+    unit_id: &UnitId,
+    kind: LeaseKind,
+    now: i64,
+) -> Result<(), StoreError> {
+    let live: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM leases WHERE holder_profile = ?1 AND unit_id = ?2 AND kind = ?3 AND released_at IS NULL AND expires_at > ?4)",
+        params![actor.as_str(), unit_id.as_str(), kind.as_str(), now],
+        |row| row.get(0),
+    )?;
+    if live {
+        Ok(())
+    } else {
+        Err(StoreError::MissingActorLease {
+            actor: actor.to_string(),
+            kind,
+        })
+    }
 }
 
 fn unit_identity_tx(
@@ -2157,6 +2418,17 @@ pub enum StoreError {
     /// Recovery actors must own the capability associated with the state.
     #[error("profile is not authorized to recover the protected integration state")]
     UnauthorizedRecovery,
+    /// A mutation actor must be live, exactly scoped, and hold the required capability.
+    #[error("profile is not authorized for this unit mutation: {0}")]
+    UnauthorizedActor(String),
+    /// A mutation actor must own the required current lease for the exact unit.
+    #[error("profile {actor} lacks a live {kind:?} lease for this unit")]
+    MissingActorLease {
+        /// Actor whose lease was required.
+        actor: String,
+        /// Required lease category.
+        kind: LeaseKind,
+    },
     /// Every dependency must name an already persisted unit.
     #[error("unknown dependency unit: {0}")]
     UnknownDependency(String),
@@ -2525,16 +2797,42 @@ BEGIN
 END;
 ";
 
+const MIGRATION_8: &str = r"
+ALTER TABLE leases
+ADD COLUMN holder_profile TEXT REFERENCES profiles(profile_id);
+
+CREATE TRIGGER leases_holder_required_and_scoped
+BEFORE INSERT ON leases
+WHEN NEW.holder_profile IS NULL
+  OR NOT EXISTS (
+      SELECT 1 FROM profiles
+      WHERE profile_id = NEW.holder_profile
+        AND job_id = NEW.job_id
+        AND unit_id = NEW.unit_id
+        AND destroyed_at IS NULL
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'lease holder must be a live profile in the exact job and unit');
+END;
+
+CREATE TRIGGER leases_holder_immutable
+BEFORE UPDATE OF holder_profile ON leases
+BEGIN
+    SELECT RAISE(ABORT, 'lease holder is immutable');
+END;
+";
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use rusqlite::OptionalExtension;
     use serde_json::json;
 
     use super::{
         ControlStore, FindingDisposition, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5,
-        MIGRATION_6, ReviewAssessment, SCHEMA, StoreError, VerificationVerdict,
-        contains_secret_shape, is_safe_relative_path,
+        MIGRATION_6, MIGRATION_7, ReviewAssessment, SCHEMA, StoreError, VerificationVerdict,
+        command_replay_tx, contains_secret_shape, is_safe_relative_path,
     };
     use crate::{
         ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
@@ -2608,20 +2906,151 @@ mod tests {
         }
     }
 
-    fn advance_to_self_verifying(store: &mut ControlStore, unit: &UnitId) {
+    fn ensure_profile(
+        store: &mut ControlStore,
+        brief: &JobBrief,
+        label: &str,
+        role: Role,
+        now: i64,
+    ) -> ProfileId {
+        let profile = ProfileId::new(label).expect("profile id");
+        let exists: bool = store
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM profiles WHERE profile_id = ?1)",
+                [profile.as_str()],
+                |row| row.get(0),
+            )
+            .expect("profile lookup");
+        if !exists {
+            store
+                .register_profile(
+                    &profile,
+                    &brief.job_id,
+                    &brief.unit_id,
+                    role,
+                    PathBuf::from(format!("/tmp/nswarm-{label}")).as_path(),
+                    now,
+                )
+                .expect("profile registered");
+        }
+        profile
+    }
+
+    fn ensure_coordinator(store: &mut ControlStore, brief: &JobBrief, now: i64) -> ProfileId {
+        ensure_profile(
+            store,
+            brief,
+            &format!("coordinator-{}-{}", brief.job_id, brief.unit_id),
+            Role::Coordinator,
+            now,
+        )
+    }
+
+    fn ensure_profile_lease(
+        store: &mut ControlStore,
+        brief: &JobBrief,
+        holder: &ProfileId,
+        now: i64,
+    ) -> i64 {
+        let existing: Option<i64> = store
+            .connection
+            .query_row(
+                "SELECT lease_id FROM leases WHERE holder_profile = ?1 AND unit_id = ?2 AND kind = 'profile' AND released_at IS NULL AND expires_at > ?3",
+                rusqlite::params![holder.as_str(), brief.unit_id.as_str(), now],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("lease lookup");
+        if let Some(lease_id) = existing {
+            return lease_id;
+        }
+        let coordinator = ensure_coordinator(store, brief, now);
+        store
+            .acquire_lease(
+                &coordinator,
+                holder,
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                holder.as_str(),
+                10_000,
+                now,
+            )
+            .expect("profile lease acquired")
+    }
+
+    fn ensure_integrator(store: &mut ControlStore, brief: &JobBrief, now: i64) -> ProfileId {
+        let integrator = ensure_profile(
+            store,
+            brief,
+            &format!("integrator-{}-{}", brief.job_id, brief.unit_id),
+            Role::Integrator,
+            now,
+        );
+        ensure_profile_lease(store, brief, &integrator, now);
+        integrator
+    }
+
+    fn ensure_topology_lease(
+        store: &mut ControlStore,
+        brief: &JobBrief,
+        integrator: &ProfileId,
+        now: i64,
+    ) -> i64 {
+        let coordinator = ensure_coordinator(store, brief, now);
+        store
+            .acquire_lease(
+                &coordinator,
+                integrator,
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Topology,
+                "integration",
+                10_000,
+                now,
+            )
+            .expect("topology lease acquired")
+    }
+
+    fn advance_to_self_verifying(store: &mut ControlStore, brief: &JobBrief) -> ProfileId {
+        let coordinator = ensure_coordinator(store, brief, 2);
+        let coder = ensure_profile(
+            store,
+            brief,
+            &format!("coder-{}-{}", brief.job_id, brief.unit_id),
+            Role::Coder,
+            2,
+        );
+        store
+            .transition(
+                &coordinator,
+                &brief.unit_id,
+                JobState::Leased,
+                "advance-2",
+                2,
+            )
+            .expect("unit leased");
+        ensure_profile_lease(store, brief, &coder, 2);
         for (state, timestamp) in [
-            JobState::Leased,
             JobState::Grounding,
             JobState::Implementing,
             JobState::SelfVerifying,
         ]
         .into_iter()
-        .zip([2_i64, 3, 4, 5])
+        .zip([3_i64, 4, 5])
         {
             store
-                .transition(unit, state, &format!("advance-{timestamp}"), timestamp)
+                .transition(
+                    &coder,
+                    &brief.unit_id,
+                    state,
+                    &format!("advance-{timestamp}"),
+                    timestamp,
+                )
                 .expect("valid transition");
         }
+        coder
     }
 
     fn register_verifier(
@@ -2641,24 +3070,26 @@ mod tests {
                 now,
             )
             .expect("verifier registered");
+        ensure_profile_lease(store, brief, &verifier, now);
         verifier
     }
 
     fn prepare_reviewing_candidate(store: &mut ControlStore, brief: &JobBrief, candidate: &Sha) {
         store.create_job(brief, 1).expect("job created");
-        advance_to_self_verifying(store, &brief.unit_id);
+        let coder = advance_to_self_verifying(store, brief);
         store
-            .record_candidate(&brief.unit_id, candidate, "candidate-prepared", 7)
+            .record_candidate(&coder, &brief.unit_id, candidate, "candidate-prepared", 7)
             .expect("candidate recorded");
+        let verifier = register_verifier(store, brief, "prepared", 8);
         store
             .transition(
+                &verifier,
                 &brief.unit_id,
                 JobState::IndependentlyVerifying,
                 "verification-prepared",
                 8,
             )
             .expect("verification starts");
-        let verifier = register_verifier(store, brief, "prepared", 8);
         let evidence = json!({"commands": ["cargo test"]});
         let verdict = VerificationVerdict {
             verifier: &verifier,
@@ -2676,17 +3107,7 @@ mod tests {
     }
 
     fn record_two_reviews(store: &mut ControlStore, brief: &JobBrief, head_sha: &Sha, now: i64) {
-        let integrator = ProfileId::new("integrator-review-gate").expect("valid integrator");
-        store
-            .register_profile(
-                &integrator,
-                &brief.job_id,
-                &brief.unit_id,
-                Role::Integrator,
-                PathBuf::from("/tmp/nswarm-integrator-review-gate").as_path(),
-                now,
-            )
-            .expect("integrator profile registered");
+        let integrator = ensure_integrator(store, brief, now);
         for index in 1..=2 {
             let profile = ProfileId::new(format!("reviewer-{index}")).expect("valid profile");
             store
@@ -2699,6 +3120,7 @@ mod tests {
                     now + index,
                 )
                 .expect("review profile registered");
+            ensure_profile_lease(store, brief, &profile, now + index);
             let finding_id = store
                 .record_review(
                     &brief.unit_id,
@@ -2761,6 +3183,7 @@ mod tests {
                     10 + index,
                 )
                 .expect("reviewer registered");
+            ensure_profile_lease(store, brief, &reviewer, 10 + index);
             findings.push(
                 store
                     .record_review(
@@ -2790,19 +3213,22 @@ mod tests {
         let brief = brief();
         let unit = brief.unit_id.clone();
         store.create_job(&brief, 1).expect("job created");
+        let coordinator = ensure_coordinator(&mut store, &brief, 2);
+        let coder = ensure_profile(&mut store, &brief, "coder-job-1", Role::Coder, 2);
 
         store
-            .transition(&unit, JobState::Leased, "lease-command", 2)
+            .transition(&coordinator, &unit, JobState::Leased, "lease-command", 2)
             .expect("initial transition succeeds");
         store
-            .transition(&unit, JobState::Leased, "lease-command", 99)
+            .transition(&coordinator, &unit, JobState::Leased, "lease-command", 99)
             .expect("identical retry succeeds after state advance");
         assert!(matches!(
-            store.transition(&unit, JobState::Grounding, "lease-command", 3),
+            store.transition(&coder, &unit, JobState::Grounding, "lease-command", 3),
             Err(StoreError::IdempotencyConflict(key)) if key == "lease-command"
         ));
+        ensure_profile_lease(&mut store, &brief, &coder, 3);
         store
-            .transition(&unit, JobState::Grounding, "ground-command", 4)
+            .transition(&coder, &unit, JobState::Grounding, "ground-command", 4)
             .expect("later command advances state");
         let unknown = ProfileId::new("unknown-recovery-actor").expect("profile id");
         assert!(matches!(
@@ -2828,7 +3254,7 @@ mod tests {
             Err(StoreError::InvalidRecovery { .. })
         ));
         store
-            .transition(&unit, JobState::Leased, "lease-command", 100)
+            .transition(&coordinator, &unit, JobState::Leased, "lease-command", 100)
             .expect("original result remains replayable after further progress");
 
         let (events, commands): (i64, i64) = store
@@ -2840,6 +3266,18 @@ mod tests {
             )
             .expect("single-effect query");
         assert_eq!((events, commands), (1, 1));
+    }
+
+    #[test]
+    fn command_replay_rejects_each_blank_identity_field() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let transaction = store.connection.transaction().expect("transaction");
+        for (key, command_type) in [("", "transition"), ("command-key", " ")] {
+            assert!(matches!(
+                command_replay_tx(&transaction, key, command_type, &json!({})),
+                Err(StoreError::InvalidEvent)
+            ));
+        }
     }
 
     #[test]
@@ -2880,13 +3318,14 @@ mod tests {
         let brief = brief();
         let unit = brief.unit_id.clone();
         store.create_job(&brief, 1).expect("job created");
+        let unknown = ProfileId::new("unknown-candidate-actor").expect("profile id");
         assert!(matches!(
-            store.transition(&unit, JobState::Verified, "skip", 2),
+            store.transition(&unknown, &unit, JobState::Verified, "skip", 2),
             Err(StoreError::DedicatedGateRequired(JobState::Verified))
         ));
-        advance_to_self_verifying(&mut store, &unit);
+        let coder = advance_to_self_verifying(&mut store, &brief);
         store
-            .record_candidate(&unit, &sha('b'), "candidate", 7)
+            .record_candidate(&coder, &unit, &sha('b'), "candidate", 7)
             .expect("candidate recorded");
         assert_eq!(store.state(&unit).expect("state"), JobState::CandidateReady);
     }
@@ -2897,14 +3336,20 @@ mod tests {
         let brief = brief();
         let unit = brief.unit_id.clone();
         store.create_job(&brief, 1).expect("job created");
-        advance_to_self_verifying(&mut store, &unit);
+        let coder = advance_to_self_verifying(&mut store, &brief);
         store
-            .record_candidate(&unit, &sha('b'), "candidate", 7)
+            .record_candidate(&coder, &unit, &sha('b'), "candidate", 7)
             .expect("candidate recorded");
-        store
-            .transition(&unit, JobState::IndependentlyVerifying, "verify", 8)
-            .expect("verification starts");
         let verifier = register_verifier(&mut store, &brief, "changed-sha", 8);
+        store
+            .transition(
+                &verifier,
+                &unit,
+                JobState::IndependentlyVerifying,
+                "verify",
+                8,
+            )
+            .expect("verification starts");
         assert!(matches!(
             store.record_verdict(
                 &unit,
@@ -2927,14 +3372,20 @@ mod tests {
         let brief = brief();
         let unit = brief.unit_id.clone();
         store.create_job(&brief, 1).expect("job created");
-        advance_to_self_verifying(&mut store, &unit);
+        let coder = advance_to_self_verifying(&mut store, &brief);
         store
-            .record_candidate(&unit, &sha('b'), "candidate", 7)
+            .record_candidate(&coder, &unit, &sha('b'), "candidate", 7)
             .expect("candidate recorded");
-        store
-            .transition(&unit, JobState::IndependentlyVerifying, "verify", 8)
-            .expect("verification starts");
         let verifier = register_verifier(&mut store, &brief, "integration", 8);
+        store
+            .transition(
+                &verifier,
+                &unit,
+                JobState::IndependentlyVerifying,
+                "verify",
+                8,
+            )
+            .expect("verification starts");
         store
             .record_verdict(
                 &unit,
@@ -2948,21 +3399,25 @@ mod tests {
                 9,
             )
             .expect("verdict recorded");
+        let integrator = ensure_integrator(&mut store, &brief, 10);
         assert!(matches!(
-            store.accept_verdict(&unit, "premature-accept", 10),
+            store.accept_verdict(&integrator, &unit, "premature-accept", 10),
             Err(StoreError::ReviewGateUnsatisfied { reviewers: 0, .. })
         ));
         record_two_reviews(&mut store, &brief, &sha('b'), 10);
         assert_eq!(
-            store.accept_verdict(&unit, "accept", 15).expect("accepted"),
+            store
+                .accept_verdict(&integrator, &unit, "accept", 15)
+                .expect("accepted"),
             JobState::Verified
         );
+        ensure_topology_lease(&mut store, &brief, &integrator, 16);
         store
-            .transition(&unit, JobState::Integrating, "integrate", 16)
+            .transition(&integrator, &unit, JobState::Integrating, "integrate", 16)
             .expect("integration starts");
         assert_eq!(
             store
-                .complete_integration(&unit, &sha('c'), "integrated", 17)
+                .complete_integration(&integrator, &unit, &sha('c'), "integrated", 17)
                 .expect("integration completes"),
             JobState::CandidateReady
         );
@@ -3001,22 +3456,23 @@ mod tests {
             Err(StoreError::InvalidTransition { .. })
         ));
         assert!(matches!(
-            store.accept_verdict(&unit, "too-early-accept", 2),
+            store.accept_verdict(&unknown, &unit, "too-early-accept", 2),
             Err(StoreError::InvalidTransition { .. })
         ));
-        advance_to_self_verifying(&mut store, &unit);
+        let coder = advance_to_self_verifying(&mut store, &brief);
         store
-            .record_candidate(&unit, &candidate, "failed-candidate", 7)
+            .record_candidate(&coder, &unit, &candidate, "failed-candidate", 7)
             .expect("candidate recorded");
+        let verifier = register_verifier(&mut store, &brief, "failed", 8);
         store
             .transition(
+                &verifier,
                 &unit,
                 JobState::IndependentlyVerifying,
                 "failed-verification-started",
                 8,
             )
             .expect("verification starts");
-        let verifier = register_verifier(&mut store, &brief, "failed", 8);
         store
             .record_verdict(
                 &unit,
@@ -3030,8 +3486,9 @@ mod tests {
                 9,
             )
             .expect("failing verdict is durable");
+        let integrator = ensure_integrator(&mut store, &brief, 10);
         assert!(matches!(
-            store.accept_verdict(&unit, "failed-accept", 10),
+            store.accept_verdict(&integrator, &unit, "failed-accept", 10),
             Err(StoreError::MissingPassingVerdict(head)) if head == candidate
         ));
 
@@ -3046,6 +3503,7 @@ mod tests {
                 10,
             )
             .expect("reviewer registered");
+        ensure_profile_lease(&mut store, &brief, &reviewer, 10);
         assert!(matches!(
             store.record_review(
                 &unit,
@@ -3065,12 +3523,20 @@ mod tests {
         let brief = brief();
         let candidate = sha('b');
         store.create_job(&brief, 1).expect("job created");
-        advance_to_self_verifying(&mut store, &brief.unit_id);
+        let coding_actor = advance_to_self_verifying(&mut store, &brief);
         store
-            .record_candidate(&brief.unit_id, &candidate, "auth-candidate", 7)
+            .record_candidate(
+                &coding_actor,
+                &brief.unit_id,
+                &candidate,
+                "auth-candidate",
+                7,
+            )
             .expect("candidate recorded");
+        let gate_verifier = register_verifier(&mut store, &brief, "gate", 8);
         store
             .transition(
+                &gate_verifier,
                 &brief.unit_id,
                 JobState::IndependentlyVerifying,
                 "auth-verification-started",
@@ -3126,8 +3592,9 @@ mod tests {
                 ],
             )
             .expect("independent failure recorded");
+        let integrator = ensure_integrator(&mut store, &brief, 11);
         assert!(matches!(
-            store.accept_verdict(&brief.unit_id, "dissenting-accept", 11),
+            store.accept_verdict(&integrator, &brief.unit_id, "dissenting-accept", 11),
             Err(StoreError::MissingPassingVerdict(head)) if head == candidate
         ));
     }
@@ -3138,9 +3605,9 @@ mod tests {
         let brief = brief();
         let candidate = sha('b');
         store.create_job(&brief, 1).expect("job created");
-        advance_to_self_verifying(&mut store, &brief.unit_id);
+        let coder = advance_to_self_verifying(&mut store, &brief);
         store
-            .record_candidate(&brief.unit_id, &candidate, "legacy-candidate", 7)
+            .record_candidate(&coder, &brief.unit_id, &candidate, "legacy-candidate", 7)
             .expect("candidate recorded");
         store
             .connection
@@ -3156,8 +3623,9 @@ mod tests {
                 [brief.unit_id.as_str()],
             )
             .expect("model migrated reviewing state");
+        let integrator = ensure_integrator(&mut store, &brief, 9);
         assert!(matches!(
-            store.accept_verdict(&brief.unit_id, "legacy-accept", 9),
+            store.accept_verdict(&integrator, &brief.unit_id, "legacy-accept", 9),
             Err(StoreError::MissingPassingVerdict(head)) if head == candidate
         ));
     }
@@ -3169,15 +3637,16 @@ mod tests {
         low_risk.risk_class = RiskClass::Low;
         let mut store = ControlStore::open_in_memory().expect("store opens");
         prepare_reviewing_candidate(&mut store, &low_risk, &candidate);
+        let integrator = ensure_integrator(&mut store, &low_risk, 10);
         assert_eq!(
             store
-                .accept_verdict(&low_risk.unit_id, "low-risk-accepted", 10)
+                .accept_verdict(&integrator, &low_risk.unit_id, "low-risk-accepted", 10)
                 .expect("low risk needs no reviewer quorum"),
             JobState::Verified
         );
         assert_eq!(
             store
-                .accept_verdict(&low_risk.unit_id, "low-risk-accepted", 99)
+                .accept_verdict(&integrator, &low_risk.unit_id, "low-risk-accepted", 99)
                 .expect("accepted verdict replays after state advance"),
             JobState::Verified
         );
@@ -3186,6 +3655,7 @@ mod tests {
         let brief = brief();
         prepare_reviewing_candidate(&mut store, &brief, &candidate);
         record_two_reviews(&mut store, &brief, &candidate, 10);
+        let integrator = ensure_integrator(&mut store, &brief, 10);
         store
             .connection
             .execute(
@@ -3195,11 +3665,10 @@ mod tests {
             .expect("model a reverified integration candidate");
         assert_eq!(
             store
-                .accept_verdict(&brief.unit_id, "integration-reverified", 16)
+                .accept_verdict(&integrator, &brief.unit_id, "integration-reverified", 16)
                 .expect("exact integration SHA is restored"),
             JobState::Integrated
         );
-        let integrator = ProfileId::new("integrator-review-gate").expect("integrator id");
         store
             .recover_integration(
                 &brief.unit_id,
@@ -3276,53 +3745,23 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn overlapping_and_topology_leases_are_rejected() {
-        let mut store = ControlStore::open_in_memory().expect("store opens");
-        let brief = brief();
-        store.create_job(&brief, 1).expect("job created");
-        store
-            .acquire_lease(
-                &brief.job_id,
-                &brief.unit_id,
-                LeaseKind::Path,
-                "crates/assigned",
-                100,
-                2,
-            )
-            .expect("first path lease");
-        assert!(matches!(
-            store.acquire_lease(
-                &brief.job_id,
-                &brief.unit_id,
-                LeaseKind::Path,
-                "crates/assigned/src",
-                100,
-                3,
-            ),
-            Err(StoreError::LeaseConflict(_))
-        ));
-        let mut other = brief.clone();
-        other.job_id = JobId::new("job-2").expect("other job");
-        other.unit_id = UnitId::new("unit-2").expect("other unit");
-        store.create_job(&other, 4).expect("other job created");
-        store
-            .acquire_lease(
-                &other.job_id,
-                &other.unit_id,
-                LeaseKind::Topology,
-                "independent-integration-stack",
-                100,
-                5,
-            )
-            .expect("independent jobs may own topology concurrently");
-
+    fn assert_reverse_path_overlap_rejected(brief: &JobBrief) {
         let mut reverse_store = ControlStore::open_in_memory().expect("reverse store");
         reverse_store
-            .create_job(&brief, 1)
+            .create_job(brief, 1)
             .expect("reverse job created");
+        let reverse_coordinator = ensure_coordinator(&mut reverse_store, brief, 2);
+        let reverse_coder = ensure_profile(
+            &mut reverse_store,
+            brief,
+            "reverse-lease-coder",
+            Role::Coder,
+            2,
+        );
         reverse_store
             .acquire_lease(
+                &reverse_coordinator,
+                &reverse_coder,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Path,
@@ -3333,6 +3772,8 @@ mod tests {
             .expect("child path leased");
         assert!(matches!(
             reverse_store.acquire_lease(
+                &reverse_coordinator,
+                &reverse_coder,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Path,
@@ -3342,8 +3783,46 @@ mod tests {
             ),
             Err(StoreError::LeaseConflict(_))
         ));
+    }
+
+    #[test]
+    fn overlapping_and_topology_leases_are_rejected() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let coordinator = ensure_coordinator(&mut store, &brief, 2);
+        let coder = ensure_profile(&mut store, &brief, "lease-coder-job-1", Role::Coder, 2);
+        let integrator = ensure_integrator(&mut store, &brief, 2);
         store
             .acquire_lease(
+                &coordinator,
+                &coder,
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Path,
+                "crates/assigned",
+                100,
+                2,
+            )
+            .expect("first path lease");
+        assert!(matches!(
+            store.acquire_lease(
+                &coordinator,
+                &coder,
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Path,
+                "crates/assigned/src",
+                100,
+                3,
+            ),
+            Err(StoreError::LeaseConflict(_))
+        ));
+        assert_reverse_path_overlap_rejected(&brief);
+        store
+            .acquire_lease(
+                &coordinator,
+                &coder,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Path,
@@ -3354,6 +3833,8 @@ mod tests {
             .expect("disjoint path lease");
         store
             .acquire_lease(
+                &coordinator,
+                &integrator,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Topology,
@@ -3364,6 +3845,8 @@ mod tests {
             .expect("first topology lease");
         assert!(matches!(
             store.acquire_lease(
+                &coordinator,
+                &integrator,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Topology,
@@ -3373,6 +3856,25 @@ mod tests {
             ),
             Err(StoreError::LeaseConflict(_))
         ));
+
+        let mut other = brief.clone();
+        other.job_id = JobId::new("job-2").expect("other job");
+        other.unit_id = UnitId::new("unit-2").expect("other unit");
+        store.create_job(&other, 4).expect("other job created");
+        let other_coordinator = ensure_coordinator(&mut store, &other, 5);
+        let other_integrator = ensure_integrator(&mut store, &other, 5);
+        store
+            .acquire_lease(
+                &other_coordinator,
+                &other_integrator,
+                &other.job_id,
+                &other.unit_id,
+                LeaseKind::Topology,
+                "independent-integration-stack",
+                100,
+                5,
+            )
+            .expect("independent jobs may own topology concurrently");
     }
 
     #[test]
@@ -3380,8 +3882,12 @@ mod tests {
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let brief = brief();
         store.create_job(&brief, 1).expect("job created");
+        let coordinator = ensure_coordinator(&mut store, &brief, 2);
+        let coder = ensure_profile(&mut store, &brief, "invalid-lease-coder", Role::Coder, 2);
         assert!(matches!(
             store.acquire_lease(
+                &coordinator,
+                &coder,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Path,
@@ -3394,6 +3900,8 @@ mod tests {
         for (resource, expires_at) in [("", 100), ("crates/other", 3)] {
             assert!(matches!(
                 store.acquire_lease(
+                    &coordinator,
+                    &coder,
                     &brief.job_id,
                     &brief.unit_id,
                     LeaseKind::Path,
@@ -3406,6 +3914,8 @@ mod tests {
         }
         assert!(matches!(
             store.acquire_lease(
+                &coordinator,
+                &coder,
                 &JobId::new("job-2").expect("other job"),
                 &brief.unit_id,
                 LeaseKind::Path,
@@ -3415,6 +3925,19 @@ mod tests {
             ),
             Err(StoreError::JobUnitMismatch)
         ));
+        assert!(matches!(
+            store.acquire_lease(
+                &coordinator,
+                &coder,
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                "different-profile",
+                100,
+                3,
+            ),
+            Err(StoreError::InvalidLease)
+        ));
     }
 
     #[test]
@@ -3422,21 +3945,25 @@ mod tests {
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let brief = brief();
         store.create_job(&brief, 1).expect("job created");
+        let coordinator = ensure_coordinator(&mut store, &brief, 2);
+        let coder = ensure_profile(&mut store, &brief, "zombie-coder", Role::Coder, 2);
         store
-            .transition(&brief.unit_id, JobState::Leased, "leased", 2)
+            .transition(&coordinator, &brief.unit_id, JobState::Leased, "leased", 2)
             .expect("leased");
         let lease = store
             .acquire_lease(
+                &coordinator,
+                &coder,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Profile,
-                "coder-job-1-unit-1",
+                coder.as_str(),
                 10,
                 2,
             )
             .expect("lease acquired");
         assert!(matches!(
-            store.accept_worker_result(&brief.unit_id, lease, &sha('b'), 11),
+            store.accept_worker_result(&coder, &brief.unit_id, lease, &sha('b'), 11),
             Err(StoreError::StaleLease(_))
         ));
         assert_eq!(
@@ -3444,7 +3971,7 @@ mod tests {
             JobState::Quarantined
         );
         assert!(matches!(
-            store.accept_worker_result(&brief.unit_id, lease, &sha('c'), 11),
+            store.accept_worker_result(&coder, &brief.unit_id, lease, &sha('c'), 11),
             Err(StoreError::StaleLease(id)) if id == lease
         ));
     }
@@ -3505,6 +4032,10 @@ mod tests {
             "additionalProperties": false
         });
         store.create_job(&second, 2).expect("second unit created");
+        let second_coordinator = ensure_coordinator(&mut store, &second, 3);
+        let second_coder = ensure_profile(&mut store, &second, "second-unit-coder", Role::Coder, 3);
+        let first_coder = ensure_profile(&mut store, &first, "first-unit-reporter", Role::Coder, 3);
+        ensure_profile_lease(&mut store, &first, &first_coder, 3);
 
         let (jobs, units, briefs): (i64, i64, i64) = store
             .connection
@@ -3517,6 +4048,8 @@ mod tests {
         assert_eq!((jobs, units, briefs), (1, 2, 2));
         assert!(matches!(
             store.acquire_lease(
+                &second_coordinator,
+                &second_coder,
                 &second.job_id,
                 &second.unit_id,
                 LeaseKind::Path,
@@ -3535,6 +4068,8 @@ mod tests {
             .expect("prerequisite merged");
         store
             .acquire_lease(
+                &second_coordinator,
+                &second_coder,
                 &second.job_id,
                 &second.unit_id,
                 LeaseKind::Path,
@@ -3543,8 +4078,10 @@ mod tests {
                 4,
             )
             .expect("dependency now satisfied");
+        ensure_profile_lease(&mut store, &second, &second_coder, 4);
         store
             .record_report(
+                &second_coder,
                 &second.unit_id,
                 &json!({"status": "complete"}),
                 "second-unit-report",
@@ -3553,6 +4090,7 @@ mod tests {
             .expect("second unit uses its own report schema");
         assert!(matches!(
             store.record_report(
+                &first_coder,
                 &first.unit_id,
                 &json!({"status": "complete"}),
                 "wrong-first-unit-schema",
@@ -3728,34 +4266,43 @@ mod tests {
         let brief = brief();
         let mut store = ControlStore::open_in_memory().expect("store opens");
         store.create_job(&brief, 1).expect("job created");
+        let coordinator = ensure_coordinator(&mut store, &brief, 2);
+        let first = ensure_profile(&mut store, &brief, "profile-one", Role::Coder, 2);
+        let second = ensure_profile(&mut store, &brief, "profile-two", Role::Coder, 2);
 
         store
             .acquire_lease(
+                &coordinator,
+                &first,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Profile,
-                "profile-one",
+                first.as_str(),
                 100,
                 2,
             )
             .expect("first profile lease");
         assert!(matches!(
             store.acquire_lease(
+                &coordinator,
+                &first,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Profile,
-                "profile-one",
+                first.as_str(),
                 100,
                 3,
             ),
-            Err(StoreError::LeaseConflict(resource)) if resource == "profile-one"
+            Err(StoreError::LeaseConflict(resource)) if resource == first.as_str()
         ));
         store
             .acquire_lease(
+                &coordinator,
+                &second,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Profile,
-                "profile-two",
+                second.as_str(),
                 100,
                 3,
             )
@@ -3767,9 +4314,11 @@ mod tests {
         let brief = brief();
         let mut store = ControlStore::open_in_memory().expect("store opens");
         store.create_job(&brief, 1).expect("job created");
+        let actor = ProfileId::new("invalid-branch-actor").expect("profile id");
         for worktree in ["relative/worktree", "/tmp/../escape"] {
             assert!(matches!(
                 store.register_branch(
+                    &actor,
                     &brief.unit_id,
                     "nswarm/job-1/unit-1",
                     std::path::Path::new(worktree),
@@ -3783,8 +4332,11 @@ mod tests {
             ("nswarm/wrong/unit-1", brief.base_sha.clone()),
             ("nswarm/job-1/unit-1", sha('b')),
         ] {
+            let coder = ensure_profile(&mut store, &brief, "branch-guard-coder", Role::Coder, 3);
+            ensure_profile_lease(&mut store, &brief, &coder, 3);
             assert!(matches!(
                 store.register_branch(
+                    &coder,
                     &brief.unit_id,
                     name,
                     std::path::Path::new("/tmp/nswarm-worktrees/unit-1"),
@@ -3794,8 +4346,10 @@ mod tests {
                 Err(StoreError::InvalidBranchAssignment)
             ));
         }
+        let coder = ensure_profile(&mut store, &brief, "branch-guard-coder", Role::Coder, 3);
         store
             .register_branch(
+                &coder,
                 &brief.unit_id,
                 "nswarm/job-1/unit-1",
                 std::path::Path::new("/tmp/nswarm-worktrees/unit-1"),
@@ -3806,6 +4360,7 @@ mod tests {
         for artifact_path in ["", "/absolute/report.json", "artifacts/../secret"] {
             assert!(matches!(
                 store.record_artifact(
+                    &coder,
                     &brief.unit_id,
                     ArtifactKind::Log,
                     std::path::Path::new(artifact_path),
@@ -3817,13 +4372,20 @@ mod tests {
             ));
         }
 
-        for state in [
-            JobState::Leased,
-            JobState::Grounding,
-            JobState::Implementing,
-        ] {
+        let coordinator = ensure_coordinator(&mut store, &brief, 6);
+        store
+            .transition(
+                &coordinator,
+                &brief.unit_id,
+                JobState::Leased,
+                "state-leased",
+                6,
+            )
+            .expect("unit leased");
+        for state in [JobState::Grounding, JobState::Implementing] {
             store
                 .transition(
+                    &coder,
                     &brief.unit_id,
                     state,
                     &format!("state-{}", state.as_str()),
@@ -3832,7 +4394,7 @@ mod tests {
                 .expect("coding state advances");
         }
         assert!(matches!(
-            store.update_branch_head(&brief.unit_id, &brief.base_sha, &sha('b'), "", 7),
+            store.update_branch_head(&coder, &brief.unit_id, &brief.base_sha, &sha('b'), "", 7),
             Err(StoreError::InvalidEvent)
         ));
     }
@@ -3921,8 +4483,11 @@ mod tests {
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let brief = brief();
         store.create_job(&brief, 1).expect("job created");
+        let reporter = ensure_profile(&mut store, &brief, "reporter", Role::Coder, 2);
+        ensure_profile_lease(&mut store, &brief, &reporter, 2);
         assert!(matches!(
             store.record_report(
+                &reporter,
                 &brief.unit_id,
                 &json!({"head_sha": sha('b').as_str()}),
                 "incomplete-report",
@@ -3932,6 +4497,7 @@ mod tests {
         ));
         assert!(matches!(
             store.record_report(
+                &reporter,
                 &brief.unit_id,
                 &json!({"head_sha": sha('b').as_str(), "evidence": "not-an-object"}),
                 "wrong-type-report",
@@ -3941,6 +4507,7 @@ mod tests {
         ));
         assert!(matches!(
             store.record_report(
+                &reporter,
                 &brief.unit_id,
                 &json!({
                     "head_sha": sha('b').as_str(),
@@ -3960,6 +4527,7 @@ mod tests {
         let private_marker = format!("-----BEGIN {} {}-----", "PRIVATE", "KEY");
         store
             .record_report(
+                &reporter,
                 &brief.unit_id,
                 &json!({
                     "head_sha": sha('b').as_str(),
@@ -4007,12 +4575,14 @@ mod tests {
         let unit = brief.unit_id.clone();
         let candidate = sha('b');
         store.create_job(&brief, 1).expect("job created");
-        advance_to_self_verifying(&mut store, &unit);
+        let coder = advance_to_self_verifying(&mut store, &brief);
         store
-            .record_candidate(&unit, &candidate, "candidate-redaction", 7)
+            .record_candidate(&coder, &unit, &candidate, "candidate-redaction", 7)
             .expect("candidate recorded");
+        let reviewer = register_verifier(&mut store, &brief, "redaction", 8);
         store
             .transition(
+                &reviewer,
                 &unit,
                 JobState::IndependentlyVerifying,
                 "verify-redaction",
@@ -4020,7 +4590,6 @@ mod tests {
             )
             .expect("verification starts");
         let token = "sk-".to_owned() + &"z".repeat(24);
-        let reviewer = register_verifier(&mut store, &brief, "redaction", 8);
         store
             .record_verdict(
                 &unit,
@@ -4068,6 +4637,96 @@ mod tests {
         assert_eq!(verdict_actor, reviewer.as_str());
     }
 
+    fn assert_integration_completion_actor_guards(
+        store: &mut ControlStore,
+        brief: &JobBrief,
+        candidate: &Sha,
+        coder: &ProfileId,
+    ) {
+        let topology_free_integrator = ensure_profile(
+            store,
+            brief,
+            "topology-free-integrator",
+            Role::Integrator,
+            16,
+        );
+        ensure_profile_lease(store, brief, &topology_free_integrator, 16);
+        assert!(matches!(
+            store.complete_integration(
+                &topology_free_integrator,
+                &brief.unit_id,
+                candidate,
+                "topology-free-integration",
+                17,
+            ),
+            Err(StoreError::MissingActorLease {
+                actor,
+                kind: LeaseKind::Topology
+            }) if actor == topology_free_integrator.as_str()
+        ));
+        assert!(matches!(
+            store.complete_integration(
+                coder,
+                &brief.unit_id,
+                candidate,
+                "coder-integration",
+                17,
+            ),
+            Err(StoreError::UnauthorizedActor(actor)) if actor == coder.as_str()
+        ));
+    }
+
+    fn assert_recovery_cannot_synthesize_merge_authorization(
+        store: &mut ControlStore,
+        unit: &UnitId,
+        integrator: &ProfileId,
+    ) {
+        assert!(matches!(
+            store.recover_integration(
+                unit,
+                integrator,
+                JobState::MergeAuthorized,
+                &json!({"reason": "authorization cannot be synthesized by recovery"}),
+                "invalid-recovery-edge",
+                18,
+            ),
+            Err(StoreError::InvalidRecovery {
+                current: JobState::Integrated,
+                next: JobState::MergeAuthorized
+            })
+        ));
+    }
+
+    fn assert_merge_authorization_is_actor_bound(
+        store: &mut ControlStore,
+        brief: &JobBrief,
+        candidate: &Sha,
+    ) {
+        let wrong_role = ensure_profile(store, brief, "wrong-role-shipper", Role::Coder, 21);
+        assert!(matches!(
+            store.record_merged(
+                &brief.unit_id,
+                candidate,
+                &wrong_role,
+                "wrong-role-shipper",
+                21,
+            ),
+            Err(StoreError::UnauthorizedShipper)
+        ));
+        let different_shipper =
+            ensure_profile(store, brief, "different-shipper", Role::Shipper, 21);
+        assert!(matches!(
+            store.record_merged(
+                &brief.unit_id,
+                candidate,
+                &different_shipper,
+                "wrong-shipper",
+                21,
+            ),
+            Err(StoreError::UnauthorizedShipper)
+        ));
+    }
+
     #[test]
     fn exact_sha_can_complete_the_full_authorized_lifecycle() {
         let mut store = ControlStore::open_in_memory().expect("store opens");
@@ -4075,14 +4734,20 @@ mod tests {
         let unit = brief.unit_id.clone();
         let candidate = sha('b');
         store.create_job(&brief, 1).expect("job created");
-        advance_to_self_verifying(&mut store, &unit);
+        let coder = advance_to_self_verifying(&mut store, &brief);
         store
-            .record_candidate(&unit, &candidate, "candidate-full", 7)
+            .record_candidate(&coder, &unit, &candidate, "candidate-full", 7)
             .expect("candidate recorded");
-        store
-            .transition(&unit, JobState::IndependentlyVerifying, "verify-full", 8)
-            .expect("verification starts");
         let verifier = register_verifier(&mut store, &brief, "full", 8);
+        store
+            .transition(
+                &verifier,
+                &unit,
+                JobState::IndependentlyVerifying,
+                "verify-full",
+                8,
+            )
+            .expect("verification starts");
         store
             .record_verdict(
                 &unit,
@@ -4097,21 +4762,31 @@ mod tests {
             )
             .expect("verdict recorded");
         record_two_reviews(&mut store, &brief, &candidate, 10);
+        let integrator = ensure_integrator(&mut store, &brief, 10);
         assert_eq!(
             store
-                .accept_verdict(&unit, "accept-full", 15)
+                .accept_verdict(&integrator, &unit, "accept-full", 15)
                 .expect("accepted"),
             JobState::Verified
         );
+        ensure_topology_lease(&mut store, &brief, &integrator, 16);
         store
-            .transition(&unit, JobState::Integrating, "integrate-full", 16)
+            .transition(
+                &integrator,
+                &unit,
+                JobState::Integrating,
+                "integrate-full",
+                16,
+            )
             .expect("integration starts");
+        assert_integration_completion_actor_guards(&mut store, &brief, &candidate, &coder);
         assert_eq!(
             store
-                .complete_integration(&unit, &candidate, "integrated-full", 17)
+                .complete_integration(&integrator, &unit, &candidate, "integrated-full", 17)
                 .expect("unchanged integration remains verified"),
             JobState::Integrated
         );
+        assert_recovery_cannot_synthesize_merge_authorization(&mut store, &unit, &integrator);
         let unregistered = ProfileId::new("unregistered-shipper").expect("shipper id");
         assert!(matches!(
             store.authorize_merge(&unit, &candidate, &unregistered, "untrusted-auth", 18),
@@ -4129,16 +4804,7 @@ mod tests {
         store
             .authorize_merge(&unit, &candidate, &shipper, "authorize-full", 20)
             .expect("exact SHA authorized");
-        assert!(matches!(
-            store.record_merged(
-                &unit,
-                &candidate,
-                &ProfileId::new("different-shipper").expect("different shipper"),
-                "wrong-shipper",
-                21,
-            ),
-            Err(StoreError::UnauthorizedShipper)
-        ));
+        assert_merge_authorization_is_actor_bound(&mut store, &brief, &candidate);
         assert!(matches!(
             store.record_merged(&unit, &sha('c'), &shipper, "wrong-merge", 21),
             Err(StoreError::UnauthorizedSha { .. })
@@ -4158,18 +4824,32 @@ mod tests {
         candidate: &Sha,
     ) -> ProfileId {
         prepare_reviewing_candidate(store, brief, candidate);
+        let integrator = ensure_integrator(store, brief, 10);
         assert_eq!(
             store
-                .accept_verdict(&brief.unit_id, "accept-first", 10)
+                .accept_verdict(&integrator, &brief.unit_id, "accept-first", 10)
                 .expect("first SHA accepted"),
             JobState::Verified
         );
+        ensure_topology_lease(store, brief, &integrator, 11);
         store
-            .transition(&brief.unit_id, JobState::Integrating, "integrate-first", 11)
+            .transition(
+                &integrator,
+                &brief.unit_id,
+                JobState::Integrating,
+                "integrate-first",
+                11,
+            )
             .expect("first integration starts");
         assert_eq!(
             store
-                .complete_integration(&brief.unit_id, candidate, "integrated-first", 12)
+                .complete_integration(
+                    &integrator,
+                    &brief.unit_id,
+                    candidate,
+                    "integrated-first",
+                    12,
+                )
                 .expect("first integration completes"),
             JobState::Integrated
         );
@@ -4248,23 +4928,39 @@ mod tests {
         shipper: &ProfileId,
     ) {
         let unit = &brief.unit_id;
+        let coordinator = ensure_coordinator(store, brief, 17);
+        let coder = ensure_profile(
+            store,
+            brief,
+            &format!("coder-{}-{}", brief.job_id, brief.unit_id),
+            Role::Coder,
+            17,
+        );
+        store
+            .transition(&coordinator, unit, JobState::Leased, "second-leased", 17)
+            .expect("replacement unit leased");
         for (state, key, timestamp) in [
-            (JobState::Leased, "second-leased", 17),
             (JobState::Grounding, "second-grounding", 18),
             (JobState::Implementing, "second-implementing", 19),
             (JobState::SelfVerifying, "second-self-verifying", 20),
         ] {
             store
-                .transition(unit, state, key, timestamp)
+                .transition(&coder, unit, state, key, timestamp)
                 .expect("second candidate advances");
         }
         store
-            .record_candidate(unit, candidate, "candidate-second", 21)
+            .record_candidate(&coder, unit, candidate, "candidate-second", 21)
             .expect("second candidate recorded");
-        store
-            .transition(unit, JobState::IndependentlyVerifying, "verify-second", 22)
-            .expect("second verification starts");
         let verifier = register_verifier(store, brief, "second-sha", 22);
+        store
+            .transition(
+                &verifier,
+                unit,
+                JobState::IndependentlyVerifying,
+                "verify-second",
+                22,
+            )
+            .expect("second verification starts");
         store
             .record_verdict(
                 unit,
@@ -4278,18 +4974,26 @@ mod tests {
                 23,
             )
             .expect("second SHA freshly verified");
+        let integrator = ensure_integrator(store, brief, 24);
         assert_eq!(
             store
-                .accept_verdict(unit, "accept-second", 24)
+                .accept_verdict(&integrator, unit, "accept-second", 24)
                 .expect("second SHA accepted"),
             JobState::Verified
         );
+        ensure_topology_lease(store, brief, &integrator, 25);
         store
-            .transition(unit, JobState::Integrating, "integrate-second", 25)
+            .transition(
+                &integrator,
+                unit,
+                JobState::Integrating,
+                "integrate-second",
+                25,
+            )
             .expect("second integration starts");
         assert_eq!(
             store
-                .complete_integration(unit, candidate, "integrated-second", 26)
+                .complete_integration(&integrator, unit, candidate, "integrated-second", 26)
                 .expect("second integration completes"),
             JobState::Integrated
         );
@@ -4356,8 +5060,9 @@ mod tests {
         prepare_reviewing_candidate(&mut store, &brief, &candidate);
 
         let (reviewers, findings) = record_unresolved_reviews(&mut store, &brief, &candidate);
+        let integrator = ensure_integrator(&mut store, &brief, 14);
         assert!(matches!(
-            store.accept_verdict(&unit, "unresolved-accept", 15),
+            store.accept_verdict(&integrator, &unit, "unresolved-accept", 15),
             Err(StoreError::ReviewGateUnsatisfied {
                 reviewers: 2,
                 unresolved: 2,
@@ -4379,17 +5084,6 @@ mod tests {
             Err(StoreError::UnauthorizedIntegrator)
         ));
 
-        let integrator = ProfileId::new("disposition-integrator").expect("integrator id");
-        store
-            .register_profile(
-                &integrator,
-                &brief.job_id,
-                &unit,
-                Role::Integrator,
-                std::path::Path::new("/tmp/nswarm-disposition-integrator"),
-                17,
-            )
-            .expect("integrator registered");
         for (index, finding) in findings.into_iter().enumerate() {
             let disposition = if index == 0 {
                 ReviewAssessment::Blocking
@@ -4427,7 +5121,7 @@ mod tests {
             }
         }
         assert!(matches!(
-            store.accept_verdict(&unit, "blocking-accept", 22),
+            store.accept_verdict(&integrator, &unit, "blocking-accept", 22),
             Err(StoreError::ReviewGateUnsatisfied {
                 reviewers: 2,
                 unresolved: 0,
@@ -4441,11 +5135,21 @@ mod tests {
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let brief = brief();
         store.create_job(&brief, 1).expect("job created");
+        let coordinator = ensure_coordinator(&mut store, &brief, 2);
+        let coder = ensure_profile(&mut store, &brief, "coder-job-1-unit-1", Role::Coder, 2);
         store
-            .transition(&brief.unit_id, JobState::Leased, "leased-live", 2)
+            .transition(
+                &coordinator,
+                &brief.unit_id,
+                JobState::Leased,
+                "leased-live",
+                2,
+            )
             .expect("leased");
         let first = store
             .acquire_lease(
+                &coordinator,
+                &coder,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Profile,
@@ -4455,10 +5159,12 @@ mod tests {
             )
             .expect("first lease");
         store
-            .accept_worker_result(&brief.unit_id, first, &sha('b'), 5)
+            .accept_worker_result(&coder, &brief.unit_id, first, &sha('b'), 5)
             .expect("live result accepted");
         let second = store
             .acquire_lease(
+                &coordinator,
+                &coder,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Profile,
@@ -4469,7 +5175,7 @@ mod tests {
             .expect("expired lease is closed before replacement");
         assert_ne!(first, second);
         assert!(matches!(
-            store.accept_worker_result(&brief.unit_id, first, &sha('c'), 12),
+            store.accept_worker_result(&coder, &brief.unit_id, first, &sha('c'), 12),
             Err(StoreError::StaleLease(id)) if id == first
         ));
         assert_eq!(
@@ -4477,8 +5183,332 @@ mod tests {
             JobState::Leased
         );
         store
-            .accept_worker_result(&brief.unit_id, second, &sha('c'), 12)
+            .accept_worker_result(&coder, &brief.unit_id, second, &sha('c'), 12)
             .expect("replacement lease remains authoritative");
+    }
+
+    struct BoundaryFixture {
+        store: ControlStore,
+        brief: JobBrief,
+        coordinator: ProfileId,
+        coder: ProfileId,
+        lease_free_coder: ProfileId,
+        verifier: ProfileId,
+        sibling_coder: ProfileId,
+        foreign_coder: ProfileId,
+        destroyed: ProfileId,
+    }
+
+    fn boundary_fixture() -> BoundaryFixture {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let mut sibling = brief.clone();
+        sibling.unit_id = UnitId::new("unit-2").expect("sibling unit");
+        store.create_job(&sibling, 1).expect("sibling created");
+        let mut foreign = brief.clone();
+        foreign.job_id = JobId::new("job-2").expect("foreign job");
+        foreign.unit_id = UnitId::new("unit-foreign").expect("foreign unit");
+        store.create_job(&foreign, 1).expect("foreign job created");
+        let coordinator = ensure_coordinator(&mut store, &brief, 2);
+        let coder = ensure_profile(&mut store, &brief, "boundary-coder", Role::Coder, 2);
+        let lease_free_coder =
+            ensure_profile(&mut store, &brief, "lease-free-coder", Role::Coder, 2);
+        let verifier = ensure_profile(
+            &mut store,
+            &brief,
+            "boundary-verifier",
+            Role::VerifierReviewer,
+            2,
+        );
+        let sibling_coder = ensure_profile(&mut store, &sibling, "sibling-coder", Role::Coder, 2);
+        let foreign_coder = ensure_profile(&mut store, &foreign, "foreign-coder", Role::Coder, 2);
+        let destroyed = ensure_profile(&mut store, &brief, "destroyed-coder", Role::Coder, 2);
+        store
+            .destroy_profile(&coordinator, &destroyed, "destroy-boundary-coder", 2)
+            .expect("profile destroyed");
+        BoundaryFixture {
+            store,
+            brief,
+            coordinator,
+            coder,
+            lease_free_coder,
+            verifier,
+            sibling_coder,
+            foreign_coder,
+            destroyed,
+        }
+    }
+
+    fn prepare_boundary_implementing(fixture: &mut BoundaryFixture) -> i64 {
+        let store = &mut fixture.store;
+        let brief = &fixture.brief;
+        store
+            .transition(
+                &fixture.coordinator,
+                &brief.unit_id,
+                JobState::Leased,
+                "boundary-leased",
+                2,
+            )
+            .expect("unit leased");
+        let lease = store
+            .acquire_lease(
+                &fixture.coordinator,
+                &fixture.coder,
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                fixture.coder.as_str(),
+                100,
+                2,
+            )
+            .expect("coder lease acquired");
+        store
+            .register_branch(
+                &fixture.coder,
+                &brief.unit_id,
+                "nswarm/job-1/unit-1",
+                std::path::Path::new("/tmp/nswarm-worktrees/unit-1"),
+                &brief.base_sha,
+                2,
+            )
+            .expect("coder registers assigned branch");
+        for (state, key, now) in [
+            (JobState::Grounding, "boundary-grounding", 3),
+            (JobState::Implementing, "boundary-implementing", 4),
+        ] {
+            store
+                .transition(&fixture.coder, &brief.unit_id, state, key, now)
+                .expect("coding state advances");
+        }
+        lease
+    }
+
+    #[test]
+    fn lease_acquisition_rejects_wrong_authority_scope_role_and_liveness() {
+        let mut fixture = boundary_fixture();
+        let store = &mut fixture.store;
+        let brief = &fixture.brief;
+
+        assert!(matches!(
+            store.acquire_lease(
+                &fixture.coder,
+                &fixture.coder,
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                fixture.coder.as_str(),
+                100,
+                2,
+            ),
+            Err(StoreError::UnauthorizedCoordinator)
+        ));
+        for (holder, kind, resource) in [
+            (&fixture.verifier, LeaseKind::Path, "src"),
+            (
+                &fixture.sibling_coder,
+                LeaseKind::Profile,
+                fixture.sibling_coder.as_str(),
+            ),
+            (
+                &fixture.foreign_coder,
+                LeaseKind::Profile,
+                fixture.foreign_coder.as_str(),
+            ),
+            (
+                &fixture.destroyed,
+                LeaseKind::Profile,
+                fixture.destroyed.as_str(),
+            ),
+        ] {
+            assert!(matches!(
+                store.acquire_lease(
+                    &fixture.coordinator,
+                    holder,
+                    &brief.job_id,
+                    &brief.unit_id,
+                    kind,
+                    resource,
+                    100,
+                    2,
+                ),
+                Err(StoreError::UnauthorizedActor(actor)) if actor == holder.as_str()
+            ));
+        }
+    }
+
+    #[test]
+    fn actor_mutations_reject_expired_or_wrong_lease_holders() {
+        let mut fixture = boundary_fixture();
+        let store = &mut fixture.store;
+        let brief = &fixture.brief;
+        store
+            .transition(
+                &fixture.coordinator,
+                &brief.unit_id,
+                JobState::Leased,
+                "boundary-leased",
+                2,
+            )
+            .expect("unit leased");
+        let expired_lease = store
+            .acquire_lease(
+                &fixture.coordinator,
+                &fixture.coder,
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                fixture.coder.as_str(),
+                3,
+                2,
+            )
+            .expect("short lease acquired");
+        assert!(matches!(
+            store.transition(
+                &fixture.coder,
+                &brief.unit_id,
+                JobState::Grounding,
+                "expired-grounding",
+                3,
+            ),
+            Err(StoreError::MissingActorLease { actor, kind: LeaseKind::Profile })
+                if actor == fixture.coder.as_str()
+        ));
+        let coder_lease = store
+            .acquire_lease(
+                &fixture.coordinator,
+                &fixture.coder,
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Profile,
+                fixture.coder.as_str(),
+                100,
+                3,
+            )
+            .expect("replacement coder lease");
+        assert_ne!(expired_lease, coder_lease);
+        ensure_profile_lease(store, brief, &fixture.verifier, 3);
+        let integrator = ensure_profile(store, brief, "boundary-integrator", Role::Integrator, 3);
+        let topology_lease = ensure_topology_lease(store, brief, &integrator, 3);
+        assert!(matches!(
+            store.accept_worker_result(
+                &integrator,
+                &brief.unit_id,
+                topology_lease,
+                &sha('b'),
+                3,
+            ),
+            Err(StoreError::StaleLease(id)) if id == topology_lease
+        ));
+
+        assert!(matches!(
+            store.register_branch(
+                &fixture.verifier,
+                &brief.unit_id,
+                "nswarm/job-1/unit-1",
+                std::path::Path::new("/tmp/nswarm-worktrees/unit-1"),
+                &brief.base_sha,
+                3,
+            ),
+            Err(StoreError::UnauthorizedActor(actor)) if actor == fixture.verifier.as_str()
+        ));
+        assert!(matches!(
+            store.accept_worker_result(
+                &fixture.verifier,
+                &brief.unit_id,
+                coder_lease,
+                &sha('b'),
+                3,
+            ),
+            Err(StoreError::StaleLease(id)) if id == coder_lease
+        ));
+    }
+
+    #[test]
+    fn actor_mutations_reject_wrong_scope_role_and_missing_leases() {
+        let mut fixture = boundary_fixture();
+        prepare_boundary_implementing(&mut fixture);
+        let store = &mut fixture.store;
+        let brief = &fixture.brief;
+        assert!(matches!(
+            store.update_branch_head(
+                &fixture.sibling_coder,
+                &brief.unit_id,
+                &brief.base_sha,
+                &sha('b'),
+                "wrong-unit-branch-update",
+                4,
+            ),
+            Err(StoreError::UnauthorizedActor(actor)) if actor == fixture.sibling_coder.as_str()
+        ));
+        store
+            .update_branch_head(
+                &fixture.coder,
+                &brief.unit_id,
+                &brief.base_sha,
+                &sha('b'),
+                "boundary-branch-update",
+                4,
+            )
+            .expect("coder updates assigned branch");
+
+        let valid_report = json!({
+            "head_sha": sha('b').as_str(),
+            "evidence": {"checks": ["boundary checks passed"]}
+        });
+        assert!(matches!(
+            store.record_report(
+                &fixture.foreign_coder,
+                &brief.unit_id,
+                &valid_report,
+                "foreign-report",
+                6,
+            ),
+            Err(StoreError::UnauthorizedActor(actor)) if actor == fixture.foreign_coder.as_str()
+        ));
+        assert!(matches!(
+            store.record_artifact(
+                &fixture.lease_free_coder,
+                &brief.unit_id,
+                ArtifactKind::Log,
+                std::path::Path::new("artifacts/no-lease.log"),
+                &brief.base_sha,
+                &sha('c'),
+                6,
+            ),
+            Err(StoreError::MissingActorLease { actor, kind: LeaseKind::Profile })
+                if actor == fixture.lease_free_coder.as_str()
+        ));
+        store
+            .transition(
+                &fixture.coder,
+                &brief.unit_id,
+                JobState::SelfVerifying,
+                "boundary-self-verifying",
+                7,
+            )
+            .expect("self verification starts");
+        assert!(matches!(
+            store.record_candidate(
+                &fixture.lease_free_coder,
+                &brief.unit_id,
+                &sha('b'),
+                "lease-free-candidate",
+                7,
+            ),
+            Err(StoreError::MissingActorLease { actor, kind: LeaseKind::Profile })
+                if actor == fixture.lease_free_coder.as_str()
+        ));
+        store
+            .record_candidate(
+                &fixture.coder,
+                &brief.unit_id,
+                &sha('b'),
+                "boundary-candidate",
+                7,
+            )
+            .expect("leased coder records tracked candidate");
     }
 
     #[test]
@@ -4505,8 +5535,10 @@ mod tests {
                 3,
             )
             .expect("session registered");
+        ensure_profile_lease(&mut store, &brief, &profile, 3);
         store
             .register_branch(
+                &profile,
                 &brief.unit_id,
                 "nswarm/job-1/unit-1",
                 std::path::Path::new("/tmp/nswarm-worktrees/unit-1"),
@@ -4516,6 +5548,7 @@ mod tests {
             .expect("branch registered");
         let artifact = store
             .record_artifact(
+                &profile,
                 &brief.unit_id,
                 ArtifactKind::TestReport,
                 std::path::Path::new("artifacts/report.json"),
@@ -4527,6 +5560,7 @@ mod tests {
         assert!(artifact > 0);
         assert!(matches!(
             store.record_artifact(
+                &profile,
                 &brief.unit_id,
                 ArtifactKind::Log,
                 std::path::Path::new("../sibling/secret.log"),
@@ -4538,6 +5572,7 @@ mod tests {
         ));
         assert!(matches!(
             store.record_artifact(
+                &profile,
                 &brief.unit_id,
                 ArtifactKind::Log,
                 std::path::Path::new("artifacts/stale.log"),
@@ -4568,8 +5603,11 @@ mod tests {
         let artifact_path = std::path::Path::new("artifacts/repeatable.json");
         let digest = sha('d');
         store.create_job(&brief, 1).expect("job created");
+        let coder = ensure_profile(&mut store, &brief, "coder-job-1-unit-1", Role::Coder, 2);
+        ensure_profile_lease(&mut store, &brief, &coder, 2);
         store
             .record_artifact(
+                &coder,
                 &brief.unit_id,
                 ArtifactKind::TestReport,
                 artifact_path,
@@ -4578,13 +5616,14 @@ mod tests {
                 2,
             )
             .expect("base artifact recorded");
-        advance_to_self_verifying(&mut store, &brief.unit_id);
+        let coder = advance_to_self_verifying(&mut store, &brief);
         let candidate = sha('b');
         store
-            .record_candidate(&brief.unit_id, &candidate, "artifact-candidate", 7)
+            .record_candidate(&coder, &brief.unit_id, &candidate, "artifact-candidate", 7)
             .expect("candidate recorded");
         store
             .record_artifact(
+                &coder,
                 &brief.unit_id,
                 ArtifactKind::TestReport,
                 artifact_path,
@@ -4631,6 +5670,8 @@ mod tests {
             .expect("session registered");
         store
             .acquire_lease(
+                &coordinator,
+                &coder,
                 &brief.job_id,
                 &brief.unit_id,
                 LeaseKind::Profile,
@@ -4762,8 +5803,18 @@ mod tests {
         let brief = brief();
         let unit = brief.unit_id.clone();
         store.create_job(&brief, 1).expect("job created");
+        let coordinator = ensure_coordinator(&mut store, &brief, 2);
+        let coder = ensure_profile(
+            &mut store,
+            &brief,
+            "branch-coder-job-1-unit-1",
+            Role::Coder,
+            2,
+        );
+        ensure_profile_lease(&mut store, &brief, &coder, 2);
         store
             .register_branch(
+                &coder,
                 &unit,
                 "nswarm/job-1/unit-1",
                 std::path::Path::new("/tmp/nswarm-worktrees/unit-1"),
@@ -4772,21 +5823,21 @@ mod tests {
             )
             .expect("branch registered");
         assert!(matches!(
-            store.update_branch_head(&unit, &sha('a'), &sha('b'), "too-early", 3),
+            store.update_branch_head(&coder, &unit, &sha('a'), &sha('b'), "too-early", 3),
             Err(StoreError::BranchUpdateOutsideCodingState(
                 JobState::Pending
             ))
         ));
-        for (state, timestamp) in [
-            JobState::Leased,
-            JobState::Grounding,
-            JobState::Implementing,
-        ]
-        .into_iter()
-        .zip([4_i64, 5, 6])
+        store
+            .transition(&coordinator, &unit, JobState::Leased, "branch-advance-4", 4)
+            .expect("unit leased");
+        for (state, timestamp) in [JobState::Grounding, JobState::Implementing]
+            .into_iter()
+            .zip([5_i64, 6])
         {
             store
                 .transition(
+                    &coder,
                     &unit,
                     state,
                     &format!("branch-advance-{timestamp}"),
@@ -4795,33 +5846,39 @@ mod tests {
                 .expect("valid transition");
         }
         assert!(matches!(
-            store.update_branch_head(&unit, &sha('c'), &sha('b'), "stale-head", 7),
+            store.update_branch_head(&coder, &unit, &sha('c'), &sha('b'), "stale-head", 7),
             Err(StoreError::StaleBranchHead { current, expected })
                 if current == sha('a') && expected == sha('c')
         ));
         store
-            .update_branch_head(&unit, &sha('a'), &sha('b'), "branch-update", 8)
+            .update_branch_head(&coder, &unit, &sha('a'), &sha('b'), "branch-update", 8)
             .expect("head advances");
         store
-            .update_branch_head(&unit, &sha('a'), &sha('b'), "branch-update", 99)
+            .update_branch_head(&coder, &unit, &sha('a'), &sha('b'), "branch-update", 99)
             .expect("branch update replays after head advances");
         assert!(matches!(
-            store.update_branch_head(&unit, &sha('b'), &sha('c'), "branch-update", 9),
+            store.update_branch_head(&coder, &unit, &sha('b'), &sha('c'), "branch-update", 9),
             Err(StoreError::IdempotencyConflict(key)) if key == "branch-update"
         ));
         store
-            .update_branch_head(&unit, &sha('b'), &sha('d'), "branch-update-2", 10)
+            .update_branch_head(&coder, &unit, &sha('b'), &sha('d'), "branch-update-2", 10)
             .expect("conflicting idempotency transaction rolled back");
         store
-            .transition(&unit, JobState::SelfVerifying, "self-verify-branch", 11)
+            .transition(
+                &coder,
+                &unit,
+                JobState::SelfVerifying,
+                "self-verify-branch",
+                11,
+            )
             .expect("self verification starts");
         assert!(matches!(
-            store.record_candidate(&unit, &sha('c'), "stale-candidate", 12),
+            store.record_candidate(&coder, &unit, &sha('c'), "stale-candidate", 12),
             Err(StoreError::StaleBranchHead { current, expected })
                 if current == sha('d') && expected == sha('c')
         ));
         store
-            .record_candidate(&unit, &sha('d'), "current-candidate", 13)
+            .record_candidate(&coder, &unit, &sha('d'), "current-candidate", 13)
             .expect("tracked candidate accepted");
     }
 
@@ -4843,6 +5900,7 @@ mod tests {
             ("jobs", "repository"),
             ("jobs", "standing_policy_version"),
             ("merge_authorizations", "invalidated_at"),
+            ("leases", "holder_profile"),
         ] {
             assert_schema_column(store, table, column);
         }
@@ -4901,9 +5959,9 @@ mod tests {
     }
 
     #[test]
-    fn populated_v1_through_v6_schemas_migrate_idempotently() {
+    fn populated_v1_through_v7_schemas_migrate_idempotently() {
         let legacy = brief();
-        for legacy_version in 1_i64..=6 {
+        for legacy_version in 1_i64..=7 {
             let connection = rusqlite::Connection::open_in_memory().expect("connection");
             connection.execute_batch(SCHEMA).expect("v1 schema");
             connection
@@ -4931,6 +5989,7 @@ mod tests {
                 (4_i64, MIGRATION_4),
                 (5_i64, MIGRATION_5),
                 (6_i64, MIGRATION_6),
+                (7_i64, MIGRATION_7),
             ] {
                 if version > legacy_version {
                     break;
@@ -4953,6 +6012,20 @@ mod tests {
                     )
                     .expect("legacy authorization inserted");
             }
+            if legacy_version == 7 {
+                connection
+                    .execute(
+                        "INSERT INTO profiles (profile_id, job_id, unit_id, role, home) VALUES ('legacy-coder', ?1, ?2, 'coder', '/tmp/legacy-coder')",
+                        rusqlite::params![legacy.job_id.as_str(), legacy.unit_id.as_str()],
+                    )
+                    .expect("legacy coder inserted");
+                connection
+                    .execute(
+                        "INSERT INTO leases (job_id, unit_id, kind, resource, expires_at) VALUES (?1, ?2, 'profile', 'legacy-coder', 100)",
+                        rusqlite::params![legacy.job_id.as_str(), legacy.unit_id.as_str()],
+                    )
+                    .expect("legacy holderless lease inserted");
+            }
             connection
                 .pragma_update(None, "user_version", legacy_version)
                 .expect("set legacy version");
@@ -4973,6 +6046,17 @@ mod tests {
                     authorization,
                     (sha('b').to_string(), "legacy-shipper".to_owned(), None)
                 );
+            }
+            if legacy_version == 7 {
+                let holder: Option<String> = store
+                    .connection
+                    .query_row(
+                        "SELECT holder_profile FROM leases WHERE resource = 'legacy-coder'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("migrated holder query");
+                assert_eq!(holder, None, "legacy leases fail closed after migration");
             }
         }
     }
