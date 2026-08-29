@@ -2,13 +2,16 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::{
+    os::unix::fs::{DirBuilderExt, PermissionsExt},
+    sync::Arc,
+};
 
 use gym_bot::{
     clock::FixedClock,
     database::open_existing,
     mcp::{
-        BodyMetricsArgs, DEFAULT_LIMIT, GymMcp, MAX_DAYS, McpServer, capability_summary,
+        BodyMetricsArgs, GymMcp, MAX_DAYS, MAX_LIMIT, McpServer, capability_summary,
         connect_mcp_socket, decode_mcp_frame,
     },
 };
@@ -66,7 +69,7 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
             [FIXED_TIME],
         )
         .expect("seed metric");
-    let socket = directory.path().join("mcp.sock");
+    let socket = private_socket_path(&directory);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -77,6 +80,7 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
         let bound = McpServer::bind(&socket, &database, Arc::new(FixedClock::new(FIXED_TIME)))
             .expect("bind production socket");
         assert!(socket.exists());
+        assert_private_socket_mode(&socket);
         let server = tokio::spawn(bound.run());
         let stream = connect_mcp_socket(&socket)
             .await
@@ -115,7 +119,7 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
         assert_eq!(tool.input_schema["properties"]["days"]["maximum"], MAX_DAYS);
         assert_eq!(
             tool.input_schema["properties"]["limit"]["maximum"],
-            DEFAULT_LIMIT
+            MAX_LIMIT
         );
 
         let result = client
@@ -164,10 +168,37 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
 }
 
 #[test]
+fn socket_bind_rejects_a_directory_accessible_to_other_identities() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("make test directory intentionally public");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("runtime");
+
+    let error = runtime
+        .block_on(async {
+            McpServer::bind(
+                directory.path().join("mcp.sock"),
+                database,
+                Arc::new(FixedClock::new(FIXED_TIME)),
+            )
+        })
+        .err()
+        .expect("public parent directory must be rejected");
+    assert_eq!(
+        error.to_string(),
+        "gym MCP socket error: gym MCP socket directory mode 755 permits group or other access"
+    );
+}
+
+#[test]
 fn storage_failure_is_an_internal_protocol_error() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
-    let socket = directory.path().join("mcp.sock");
+    let socket = private_socket_path(&directory);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -221,6 +252,31 @@ fn arguments(value: &serde_json::Value) -> serde_json::Map<String, serde_json::V
     value.as_object().expect("test arguments object").clone()
 }
 
+fn private_socket_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
+    let socket_directory = directory.path().join("socket");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&socket_directory)
+        .expect("private socket directory");
+    socket_directory.join("mcp.sock")
+}
+
+#[cfg(target_os = "linux")]
+fn assert_private_socket_mode(socket: &std::path::Path) {
+    assert_eq!(
+        std::fs::metadata(socket)
+            .expect("socket metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "the Step 2 socket is private to its service identity"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn assert_private_socket_mode(_socket: &std::path::Path) {}
+
 fn protocol_error_code(error: ServiceError) -> ErrorCode {
     match error {
         ServiceError::McpError(error) => error.code,
@@ -236,7 +292,7 @@ proptest! {
             days: Some(days),
             limit: Some(limit),
         }.validate().is_ok();
-        prop_assert_eq!(valid, (1..=MAX_DAYS).contains(&days) && (1..=DEFAULT_LIMIT).contains(&limit));
+        prop_assert_eq!(valid, (1..=MAX_DAYS).contains(&days) && (1..=MAX_LIMIT).contains(&limit));
     }
 
     #[test]

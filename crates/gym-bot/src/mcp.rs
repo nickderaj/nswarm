@@ -3,6 +3,7 @@
 use std::{
     collections::HashMap,
     future::Future,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -31,8 +32,10 @@ use crate::{
 pub const DEFAULT_DAYS: u16 = 56;
 /// Maximum accepted lookback in days.
 pub const MAX_DAYS: u16 = 365;
-/// Default and maximum number of returned body-metric rows.
+/// Default number of returned body-metric rows.
 pub const DEFAULT_LIMIT: u16 = 200;
+/// Maximum accepted number of returned body-metric rows.
+pub const MAX_LIMIT: u16 = 200;
 /// Maximum accepted metric-name length.
 pub const MAX_METRIC_LENGTH: usize = 64;
 
@@ -68,7 +71,7 @@ impl BodyMetricsArgs {
             return Err(McpQueryError::DaysOutOfRange(days));
         }
         let limit = self.limit.unwrap_or(DEFAULT_LIMIT);
-        if !(1..=DEFAULT_LIMIT).contains(&limit) {
+        if !(1..=MAX_LIMIT).contains(&limit) {
             return Err(McpQueryError::LimitOutOfRange(limit));
         }
         Ok(ValidatedBodyMetricsArgs {
@@ -247,7 +250,7 @@ fn body_metrics_tool() -> Tool {
                 "pattern": "^[a-z0-9_]+$"
             },
             "days": {"type": "integer", "minimum": 1, "maximum": MAX_DAYS},
-            "limit": {"type": "integer", "minimum": 1, "maximum": DEFAULT_LIMIT}
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT}
         }
     }))
     .expect("static tool schema is an object");
@@ -304,7 +307,10 @@ impl McpServer {
         clock: Arc<dyn Clock>,
     ) -> Result<Self, McpSocketError> {
         let socket_path = socket_path.as_ref().to_path_buf();
+        ensure_private_socket_parent(&socket_path)?;
         let listener = UnixListener::bind(&socket_path)?;
+        #[cfg(target_os = "linux")]
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
         Ok(Self {
             listener,
             _guard: SocketGuard(socket_path),
@@ -334,6 +340,23 @@ impl McpServer {
             }));
         }
     }
+}
+
+fn ensure_private_socket_parent(socket_path: &Path) -> Result<(), std::io::Error> {
+    let parent = socket_path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "gym MCP socket needs a parent directory",
+        )
+    })?;
+    let mode = std::fs::metadata(parent)?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("gym MCP socket directory mode {mode:o} permits group or other access"),
+        ));
+    }
+    Ok(())
 }
 
 /// Opens the Unix byte stream used by an actual rmcp client.
@@ -379,7 +402,7 @@ pub enum McpQueryError {
     #[error("days must be between 1 and {MAX_DAYS}, got {0}")]
     DaysOutOfRange(u16),
     /// The requested row cap is outside the published tool contract.
-    #[error("limit must be between 1 and {DEFAULT_LIMIT}, got {0}")]
+    #[error("limit must be between 1 and {MAX_LIMIT}, got {0}")]
     LimitOutOfRange(u16),
     /// The gym database failed validation or access.
     #[error(transparent)]
