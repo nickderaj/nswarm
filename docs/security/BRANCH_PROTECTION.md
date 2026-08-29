@@ -23,8 +23,11 @@ Required checks are bound to GitHub Actions app id `15368`, so a status from a
 different integration cannot satisfy the rule. This personal public repository
 does not support GitHub merge queues; GitHub documents that public-repository
 merge queues require organization ownership. Until the repository moves to an
-organization, the same merge-tier workflow is dispatched manually at the exact
-PR head SHA and remains required by branch protection.
+organization, the same merge-tier workflow runs on `pull_request` so its jobs
+are reported to the PR's required-check rollup. It also listens for
+`merge_group` so no workflow change is needed after a future move enables a
+merge queue. `workflow_dispatch` remains available for diagnostics, but a
+manual run is not used to satisfy the PR gate.
 
 The API rejects an empty legacy `contexts` array when an app-bound `checks`
 array is supplied, so the template uses only `checks`. GitHub reports
