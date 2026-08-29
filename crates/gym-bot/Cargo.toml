@@ -13,7 +13,7 @@ keywords = ["fitness", "mcp", "telegram"]
 categories = ["database", "web-programming"]
 
 [dependencies]
-botkit = { path = "../botkit" }
+botkit = { version = "=0.1.0", path = "../botkit" }
 chrono.workspace = true
 jiff.workspace = true
 rmcp.workspace = true

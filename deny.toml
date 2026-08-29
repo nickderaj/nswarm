@@ -8,11 +8,21 @@ allow = [
   "MIT",
   "Unicode-3.0",
 ]
+exceptions = [
+  # Exact build-tool license used by teloxide-core's pinned graph.
+  { allow = ["Apache-2.0 WITH LLVM-exception"], crate = "ar_archive_writer@0.5.3" },
+  # Exact file-level copyleft utility used by dptree; it is not linked into project source.
+  { allow = ["MPL-2.0"], crate = "colored@3.1.1" },
+]
 
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
 highlight = "all"
+skip = [
+  # teloxide and jiff still require syn 2 while current rmcp macros use syn 3.
+  { crate = "syn@2.0.119", reason = "pinned upstream proc-macro major split" },
+]
 
 [sources]
 unknown-registry = "deny"
