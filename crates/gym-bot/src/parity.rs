@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::database::{DatabaseError, open_existing};
-
 /// Current machine-validated intent schema version.
 pub const INTENT_SCHEMA_VERSION: u16 = 1;
+/// Current committed v0 golden-snapshot schema version.
+pub const GOLDEN_SCHEMA_VERSION: u16 = 1;
 
 /// A transport-independent operation applied to both database copies.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -23,6 +23,8 @@ pub struct ParityIntent {
     pub kind: IntentKind,
     /// Exact RFC-3339 timestamp supplied by the harness.
     pub at: String,
+    /// IANA time zone configured in v0 when the intent was captured.
+    pub time_zone: String,
     /// Positive finite kilograms.
     pub kilograms: f64,
 }
@@ -52,6 +54,7 @@ impl ParityIntent {
             });
         }
         DateTime::parse_from_rfc3339(&self.at).map_err(|_| ParityError::InvalidIntentTimestamp)?;
+        jiff::tz::TimeZone::get(&self.time_zone).map_err(|_| ParityError::InvalidIntentTimeZone)?;
         if !self.kilograms.is_finite() || self.kilograms <= 0.0 {
             return Err(ParityError::InvalidIntentWeight);
         }
@@ -67,24 +70,68 @@ pub enum IntentKind {
     LogBodyWeight,
 }
 
-/// Applies the frozen v0 body-weight persistence contract without Python.
-///
-/// Provenance for this SQL is committed beside the fixture. This adapter is
-/// intentionally independent from the v1 command implementation.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoldenSnapshot {
+    schema_version: u16,
+    source: GoldenSource,
+    intent: ParityIntent,
+    table_rows: BTreeMap<String, Vec<Vec<CellValue>>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoldenSource {
+    commit: String,
+    file: String,
+    sha256: String,
+    generator: String,
+}
+
+/// Builds the expected v0 state from an empty frozen fixture and a committed
+/// golden row snapshot captured by the real v0 repository implementation.
 ///
 /// # Errors
 ///
-/// Returns [`ParityError`] if intent validation, database validation, or the
-/// frozen v0 insert fails.
-pub fn apply_v0_intent(database_path: &Path, intent: &ParityIntent) -> Result<(), ParityError> {
+/// Returns [`ParityError`] when the golden document is invalid, does not match
+/// the supplied intent, names an unknown table, or the fixture is not empty.
+pub fn expected_v0_snapshot(
+    empty_fixture_path: &Path,
+    intent: &ParityIntent,
+    golden_bytes: &[u8],
+) -> Result<DatabaseSnapshot, ParityError> {
     intent.validate()?;
-    let connection = open_existing(database_path)?;
-    connection.execute(
-        "INSERT INTO body_metrics (date, metric, value, unit, source) \
-         VALUES (?1, 'weight_kg', ?2, 'kg', 'manual')",
-        (&intent.at, intent.kilograms),
-    )?;
-    Ok(())
+    let golden: GoldenSnapshot = serde_json::from_slice(golden_bytes)?;
+    if golden.schema_version != GOLDEN_SCHEMA_VERSION {
+        return Err(ParityError::GoldenSchemaVersion {
+            expected: GOLDEN_SCHEMA_VERSION,
+            actual: golden.schema_version,
+        });
+    }
+    golden.intent.validate()?;
+    if golden.intent != *intent {
+        return Err(ParityError::GoldenIntentMismatch);
+    }
+    if golden.source.commit.is_empty()
+        || golden.source.file.is_empty()
+        || golden.source.sha256.len() != 64
+        || golden.source.generator.is_empty()
+    {
+        return Err(ParityError::InvalidGoldenProvenance);
+    }
+    let mut snapshot = normalize_database(empty_fixture_path)?;
+    if snapshot.tables.values().any(|table| !table.rows.is_empty()) {
+        return Err(ParityError::GoldenFixtureNotEmpty);
+    }
+    for (table_name, mut rows) in golden.table_rows {
+        let table = snapshot
+            .tables
+            .get_mut(&table_name)
+            .ok_or_else(|| ParityError::UnknownGoldenTable(table_name.clone()))?;
+        rows.sort();
+        table.rows = rows;
+    }
+    Ok(snapshot)
 }
 
 /// Deterministic normalized representation of a complete `SQLite` database.
@@ -144,7 +191,7 @@ pub struct ColumnSnapshot {
 }
 
 /// Lossless deterministic `SQLite` cell representation.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "storage", content = "value", rename_all = "snake_case")]
 pub enum CellValue {
     /// `SQLite` NULL.
@@ -439,12 +486,32 @@ pub enum ParityError {
     /// Fixed timestamp is not RFC-3339.
     #[error("intent timestamp must be RFC-3339")]
     InvalidIntentTimestamp,
+    /// Configured time zone is not available in the IANA database.
+    #[error("intent time_zone must be a valid IANA name")]
+    InvalidIntentTimeZone,
     /// Fixed weight is not positive and finite.
     #[error("intent kilograms must be positive and finite")]
     InvalidIntentWeight,
-    /// Existing database failed v0 validation.
-    #[error(transparent)]
-    Database(#[from] DatabaseError),
+    /// Golden snapshot schema version is not supported.
+    #[error("golden schema version mismatch: expected {expected}, found {actual}")]
+    GoldenSchemaVersion {
+        /// Current version.
+        expected: u16,
+        /// Supplied version.
+        actual: u16,
+    },
+    /// Golden intent and requested intent differ.
+    #[error("golden snapshot intent does not match the requested intent")]
+    GoldenIntentMismatch,
+    /// Golden source metadata is incomplete or malformed.
+    #[error("golden snapshot provenance is invalid")]
+    InvalidGoldenProvenance,
+    /// Golden rows must be layered onto an empty sanitized fixture.
+    #[error("golden snapshot fixture must contain no application rows")]
+    GoldenFixtureNotEmpty,
+    /// Golden document names a table absent from the frozen schema.
+    #[error("golden snapshot names unknown table {0}")]
+    UnknownGoldenTable(String),
     /// `SQLite` could not apply or inspect state.
     #[error("parity SQLite operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),

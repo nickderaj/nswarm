@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "kind": "log_body_weight",
-  "at": "2026-08-29T08:15:30+00:00",
+  "at": "2026-08-29T08:15:30.123456Z",
+  "time_zone": "Europe/London",
   "kilograms": 82.5
 }

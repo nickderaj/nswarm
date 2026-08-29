@@ -4,11 +4,12 @@
   "title": "nswarm gym parity intent v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "kind", "at", "kilograms"],
+  "required": ["schema_version", "kind", "at", "time_zone", "kilograms"],
   "properties": {
     "schema_version": {"const": 1},
     "kind": {"const": "log_body_weight"},
     "at": {"type": "string", "format": "date-time"},
+    "time_zone": {"type": "string", "minLength": 1, "maxLength": 128},
     "kilograms": {"type": "number", "exclusiveMinimum": 0}
   }
 }

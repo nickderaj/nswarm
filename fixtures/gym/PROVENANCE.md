@@ -17,9 +17,16 @@ Because SQLite file headers vary across library versions,
 `scripts/check_gym_fixture.sh` compares normalized dumps, schema version, and
 integrity rather than database bytes.
 
-The v0 baseline intent adapter is a Rust transcription of
-`ActivityRepository.log_metric` and the `/weight` handler at that same commit.
-CI therefore needs neither the private sibling checkout nor its Python
-environment.
+`log-body-weight-v0-golden.json` was captured out of band by loading the real
+`ActivityRepository` from that v0 commit and calling `log_metric` against a
+fresh copy of the empty fixture with the committed instant converted through
+Python `ZoneInfo("Europe/London")`. The repository implementation file's
+SHA-256 is
+`877b310be5f381a834e9ff88515a31b62596d523cbad119f8fa37e17e0d18180`.
+The captured v0 row stores
+`2026-08-29T09:15:30.123456+01:00`, matching `datetime.isoformat()` and the
+configured-zone clock in v0. CI layers those committed golden rows onto the
+empty frozen-schema snapshot; it does not regenerate expected behavior from v1
+SQL or require the private sibling checkout.
 
 The fixed-time Step 2 corpus has an empty nondeterministic-field allow-list.
