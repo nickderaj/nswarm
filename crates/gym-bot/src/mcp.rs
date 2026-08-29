@@ -389,11 +389,8 @@ struct SocketGuard(PathBuf);
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_file(&self.0)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            eprintln!("could not remove MCP socket: {error}");
-        }
+        // Best effort: the socket may already be gone and `Drop` cannot report errors.
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 

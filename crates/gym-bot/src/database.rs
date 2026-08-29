@@ -17,7 +17,7 @@ pub const V0_GYM_SCHEMA_VERSION: i64 = 5;
 pub fn open_existing(path: &Path) -> Result<Connection, DatabaseError> {
     let connection = Connection::open_with_flags(
         path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_WRITE.union(OpenFlags::SQLITE_OPEN_NO_MUTEX),
     )?;
     configure_and_validate(&connection)?;
     Ok(connection)
@@ -32,7 +32,7 @@ pub fn open_existing(path: &Path) -> Result<Connection, DatabaseError> {
 pub fn open_existing_read_only(path: &Path) -> Result<Connection, DatabaseError> {
     let connection = Connection::open_with_flags(
         path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_NO_MUTEX),
     )?;
     configure_and_validate(&connection)?;
     Ok(connection)

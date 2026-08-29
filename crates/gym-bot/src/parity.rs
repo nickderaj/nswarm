@@ -230,7 +230,7 @@ pub struct ForeignKeyViolation {
 pub fn normalize_database(path: &Path) -> Result<DatabaseSnapshot, ParityError> {
     let connection = Connection::open_with_flags(
         path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_NO_MUTEX),
     )?;
     connection.pragma_update(None, "foreign_keys", true)?;
     let schema_version = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
