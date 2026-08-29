@@ -5,7 +5,7 @@ soul = "profiles/coder/SOUL.md"
 skills = "profiles/coder/skills"
 memory = "profiles/coder/memory"
 capabilities = ["repository-read", "repository-write", "evidence-write", "branch-push"]
-forbidden_capabilities = ["coordinate", "verify", "integrate", "merge"]
+forbidden_capabilities = ["network-read", "coordinate", "verify", "integrate", "merge"]
 
 [governance]
 write_approval = true

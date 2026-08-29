@@ -21,8 +21,6 @@ EXPECTED = {
             "technical-writing",
             "show-your-evidence",
         },
-        "capabilities": {"repository-read", "network-read", "evidence-write"},
-        "forbidden": {"repository-write", "branch-push", "integrate", "merge"},
     },
     "coder": {
         "skills": {
@@ -38,8 +36,6 @@ EXPECTED = {
             "show-me-your-work",
             "pause-and-handoff",
         },
-        "capabilities": {"repository-read", "repository-write", "evidence-write", "branch-push"},
-        "forbidden": {"coordinate", "verify", "integrate", "merge"},
     },
 }
 
@@ -56,6 +52,27 @@ def repository_path(value: str, *, kind: str) -> Path:
 
 def fail(message: str) -> None:
     raise ValueError(message)
+
+
+def load_role_capabilities() -> tuple[dict[str, set[str]], set[str]]:
+    path = ROOT / "profiles" / "role-capabilities.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if set(document) != {"schema_version", "roles"} or document["schema_version"] != 1:
+        fail(f"{path.relative_to(ROOT)}: unsupported authority-map schema")
+    if not isinstance(document["roles"], dict) or not document["roles"]:
+        fail(f"{path.relative_to(ROOT)}: role map must not be empty")
+    roles: dict[str, set[str]] = {}
+    for role, capabilities in document["roles"].items():
+        if (
+            not isinstance(role, str)
+            or not isinstance(capabilities, list)
+            or not capabilities
+            or not all(isinstance(capability, str) and capability for capability in capabilities)
+            or len(capabilities) != len(set(capabilities))
+        ):
+            fail(f"{path.relative_to(ROOT)}: invalid capability map for {role!r}")
+        roles[role] = set(capabilities)
+    return roles, set().union(*roles.values())
 
 
 def parse_frontmatter(path: Path) -> dict[str, str]:
@@ -90,7 +107,12 @@ def validate_memory(path: Path) -> None:
         fail(f"{path.relative_to(ROOT)}: memory delimiter does not round-trip")
 
 
-def validate_profile(name: str, expected: dict[str, set[str]]) -> None:
+def validate_profile(
+    name: str,
+    expected: dict[str, set[str]],
+    role_capabilities: dict[str, set[str]],
+    capability_vocabulary: set[str],
+) -> None:
     profile_path = ROOT / "profiles" / name / "profile.toml"
     profile = tomllib.loads(profile_path.read_text(encoding="utf-8"))
     required = {
@@ -111,10 +133,13 @@ def validate_profile(name: str, expected: dict[str, set[str]]) -> None:
         fail(f"{name}: unsupported profile or policy version")
     if profile["role"] != name:
         fail(f"{name}: role mismatch")
-    if set(profile["capabilities"]) != expected["capabilities"]:
-        fail(f"{name}: structural capability drift")
-    if set(profile["forbidden_capabilities"]) != expected["forbidden"]:
-        fail(f"{name}: forbidden capability drift")
+    if name not in role_capabilities:
+        fail(f"{name}: role missing from Rust-checked authority map")
+    granted = role_capabilities[name]
+    if set(profile["capabilities"]) != granted:
+        fail(f"{name}: capabilities differ from Rust-checked authority map")
+    if set(profile["forbidden_capabilities"]) != capability_vocabulary - granted:
+        fail(f"{name}: forbidden capabilities are not the exhaustive authority complement")
     if profile["governance"] != {
         "write_approval": True,
         "background_review": False,
@@ -152,6 +177,7 @@ def validate_profile(name: str, expected: dict[str, set[str]]) -> None:
 
 def main() -> int:
     try:
+        role_capabilities, capability_vocabulary = load_role_capabilities()
         for root_name in ("profiles", "generated/profiles"):
             root = ROOT / root_name
             symlinks = [path for path in root.rglob("*") if path.is_symlink()]
@@ -164,7 +190,12 @@ def main() -> int:
         if actual_generated != expected_generated:
             fail("generated profile inventory drift")
         for profile_name, expected in EXPECTED.items():
-            validate_profile(profile_name, expected)
+            validate_profile(
+                profile_name,
+                expected,
+                role_capabilities,
+                capability_vocabulary,
+            )
     except (OSError, ValueError, tomllib.TOMLDecodeError, json.JSONDecodeError) as error:
         print(f"profile policy: {error}", file=sys.stderr)
         return 1

@@ -311,8 +311,9 @@ impl BotManifest {
     ///
     /// # Errors
     ///
-    /// Returns [`ManifestError`] for a missing variable or a value containing a
-    /// newline or NUL byte.
+    /// Returns [`ManifestError`] for a missing variable or a value that could
+    /// alter systemd `EnvironmentFile` line boundaries through a newline, NUL,
+    /// trailing continuation, or leading quote.
     // coverage-critical
     pub fn render_environment(
         &self,
@@ -326,7 +327,11 @@ impl BotManifest {
             let value = source
                 .get(&name)
                 .ok_or_else(|| ManifestError::MissingSecret(name.clone()))?;
-            if value.contains(['\n', '\r', '\0']) || value.ends_with('\\') {
+            if value.contains(['\n', '\r', '\0'])
+                || value.ends_with('\\')
+                || value.starts_with('"')
+                || value.starts_with('\'')
+            {
                 return Err(ManifestError::UnsafeSecretValue(name));
             }
             rendered.push(format!("{name}={value}"));
@@ -1146,15 +1151,14 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             "value"
         );
         let manifest = BotManifest::parse(MANIFEST).expect("manifest validates");
-        let values = BTreeMap::from([
-            ("GYM_BOT_TOKEN".to_owned(), "continued\\".to_owned()),
-            ("OPENROUTER_API_KEY".to_owned(), "safe".to_owned()),
-        ]);
-        assert!(matches!(
-            manifest.render_environment(&values),
-            Err(ManifestError::UnsafeSecretValue(name)) if name == "GYM_BOT_TOKEN"
-        ));
-        for unsafe_value in ["embedded\nnewline", "embedded\0nul"] {
+        for unsafe_value in [
+            "continued\\",
+            "\"unclosed-double-quote",
+            "'unclosed-single-quote",
+            "embedded\nnewline",
+            "embedded\rreturn",
+            "embedded\0nul",
+        ] {
             let values = BTreeMap::from([
                 ("GYM_BOT_TOKEN".to_owned(), unsafe_value.to_owned()),
                 ("OPENROUTER_API_KEY".to_owned(), "safe".to_owned()),

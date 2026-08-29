@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "roles": {
+    "research": ["repository-read", "network-read", "evidence-write"],
+    "coordinator": ["coordinate", "evidence-write"],
+    "coder": ["repository-read", "repository-write", "evidence-write", "branch-push"],
+    "verifier-reviewer": ["repository-read", "evidence-write", "verify"],
+    "integrator": ["repository-read", "repository-write", "evidence-write", "integrate"],
+    "shipper": ["merge"]
+  }
+}

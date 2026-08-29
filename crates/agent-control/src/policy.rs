@@ -43,6 +43,16 @@ pub enum Role {
 }
 
 impl Role {
+    /// Complete role vocabulary used by generated policy validation.
+    pub const ALL: [Self; 6] = [
+        Self::Research,
+        Self::Coordinator,
+        Self::Coder,
+        Self::VerifierReviewer,
+        Self::Integrator,
+        Self::Shipper,
+    ];
+
     /// Stable database and generated-policy representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -144,6 +154,32 @@ mod tests {
     }
 
     #[test]
+    fn committed_role_capability_map_matches_production_authority() {
+        let document: serde_json::Value =
+            serde_json::from_str(include_str!("../../../profiles/role-capabilities.json"))
+                .expect("role capability map parses");
+        assert_eq!(document["schema_version"], 1);
+        let roles = document["roles"]
+            .as_object()
+            .expect("role capability map contains roles");
+        assert_eq!(roles.len(), Role::ALL.len());
+        for role in Role::ALL {
+            let recorded: Vec<Capability> = serde_json::from_value(
+                roles
+                    .get(role.as_str())
+                    .unwrap_or_else(|| panic!("missing capability map for {role:?}"))
+                    .clone(),
+            )
+            .expect("capability map uses production encodings");
+            assert_eq!(
+                recorded,
+                role.capabilities(),
+                "capability drift for {role:?}"
+            );
+        }
+    }
+
+    #[test]
     fn research_is_physically_read_only() {
         assert!(Role::Research.can(Capability::RepositoryRead));
         assert!(!Role::Research.can(Capability::RepositoryWrite));
@@ -180,14 +216,7 @@ mod tests {
         assert_eq!(Role::Research.as_str(), "research");
         assert_eq!(Role::Coder.as_str(), "coder");
         assert_eq!(Role::Shipper.as_str(), "shipper");
-        for role in [
-            Role::Research,
-            Role::Coordinator,
-            Role::Coder,
-            Role::VerifierReviewer,
-            Role::Integrator,
-            Role::Shipper,
-        ] {
+        for role in Role::ALL {
             assert_eq!(Role::from_name(role.as_str()), Some(role));
         }
         assert_eq!(Role::from_name("deploy"), None);

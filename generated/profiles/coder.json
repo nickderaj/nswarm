@@ -6,6 +6,7 @@
     "branch-push"
   ],
   "forbidden_capabilities": [
+    "network-read",
     "coordinate",
     "verify",
     "integrate",

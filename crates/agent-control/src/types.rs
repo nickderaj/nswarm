@@ -721,7 +721,10 @@ fn require_safe_relative(path: &Path) -> Result<(), BriefError> {
         || path.components().any(|component| {
             matches!(
                 component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                Component::CurDir
+                    | Component::ParentDir
+                    | Component::RootDir
+                    | Component::Prefix(_)
             )
         })
     {
@@ -900,7 +903,7 @@ mod tests {
             }
             assert_eq!(brief.validate(), Err(BriefError::EmptyPathPolicy));
         }
-        for unsafe_path in ["", "/absolute", "crates/../sibling"] {
+        for unsafe_path in ["", "./crates/assigned", "/absolute", "crates/../sibling"] {
             let mut brief = valid_brief();
             brief.paths.readable = vec![PathBuf::from(unsafe_path)];
             assert!(matches!(brief.validate(), Err(BriefError::UnsafePath(_))));

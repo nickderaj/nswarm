@@ -7,6 +7,8 @@
   "forbidden_capabilities": [
     "repository-write",
     "branch-push",
+    "coordinate",
+    "verify",
     "integrate",
     "merge"
   ],

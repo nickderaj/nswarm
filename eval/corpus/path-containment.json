@@ -15,10 +15,11 @@
       {"operation": "read", "path": "crates/assigned/secrets/token", "allowed": false},
       {"operation": "write", "path": "crates/assigned/secrets/token", "allowed": false},
       {"operation": "read", "path": "crates/sibling/src/lib.rs", "allowed": false},
+      {"operation": "write", "path": "./crates/assigned/secrets/token", "allowed": false},
       {"operation": "write", "path": "crates/assigned/../sibling", "allowed": false},
       {"operation": "read", "path": "/etc/passwd", "allowed": false},
       {"operation": "write", "path": "", "allowed": false}
     ]
   },
-  "expected": {"probe_count": 8}
+  "expected": {"probe_count": 9}
 }
