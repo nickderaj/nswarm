@@ -1,6 +1,8 @@
 # nswarm v1 build status
 
-Updated: 2026-08-28 (Europe/London). Active branch: `overnight/bootstrap`.
+Updated: 2026-08-29 (Europe/London). Active branch:
+`codex/step2-gym-spike`, based directly on merged main
+`ac4bfd5f35a1aa2fbbf76ed46f84e7644ca7b049`.
 The frozen `ultron` v0 checkout has not been modified, staged, committed,
 deployed, restarted, or used as a source of private state.
 
@@ -717,13 +719,49 @@ material returned configuration is:
 }
 ```
 
-PR #1 remains blocked with `REVIEW_REQUIRED`: its author and last pusher is
-`nickderaj`, and there is no approval. Trusted collaborator `ultron-git` now
-has Write access and is the owner assigned by the branch's `CODEOWNERS` file.
-Because GitHub evaluates `CODEOWNERS` from the base branch, that assignment
-will govern future PRs after this file reaches `main`; for PR #1, an ordinary
-approval from `ultron-git` can satisfy the one-approval and last-pusher rules.
-The branch also contains merge commit `c119086`; protected `main` requires
-linear history while the bootstrap request forbids history rewriting. The
-recommended narrow resolution remains an explicitly authorized squash merge
-after the final head is approved. No merge has been performed.
+That was the final pre-merge state of the bootstrap branch. PR #1 was
+subsequently approved and squash-merged as
+`ac4bfd5f35a1aa2fbbf76ed46f84e7644ca7b049`; protected `main` is the direct
+base for Step 2. No Step 2 merge has been performed.
+
+## Checkpoint W — Step 2 gym vertical-slice candidate
+
+PR #2 begins the smallest genuine Step 2 slice. The new `gym-bot` crate keeps
+teloxide types at a recorded-update adapter edge and accepts neutral actor,
+`(surface, external_id)`, and text input in its command core. `/weight <kg>`
+uses an injected clock, checks the configured owner before idempotency, rejects
+blank, malformed, non-finite, zero, and negative values, writes the frozen v0
+`body_metrics` intent, and returns the equivalent plain-text response.
+
+The production MCP handler exposes exactly one bounded, read-only
+`body_metrics` tool. An actual rmcp client and server negotiate and exchange
+requests over a temporary Unix socket; contract tests reject malformed frames,
+unknown tools, invalid bounds, and unavailable storage, verify the tools-only
+capability map, and prove socket cleanup. No filesystem, shell, raw SQL,
+arbitrary network, resource, prompt, sampling, or Hermes surface is exposed.
+
+The parity corpus contains a schema-v1 fixed-time `log_body_weight` intent and
+an empty sanitized schema-v5 SQLite fixture reconstructed from frozen v0 commit
+`2d7052011c17bd028fdae0fdfd521918c11de560`. Independent baseline and candidate
+adapters apply the intent to isolated copies. Deterministic snapshots compare
+`user_version`, all 15 application tables, columns, exact DDL, eight indexes,
+all losslessly normalized row values, and foreign-key violations with an empty
+nondeterminism allow-list. Deliberate tests detect missing and extra rows,
+unexpected tables, column/index/schema-version/value drift, and foreign-key
+failures. The parity gate needs neither the sibling v0 checkout nor its Python
+environment.
+
+Fresh focused evidence at checkpoint `146bbff`: strict gym Clippy passes and 24
+gym tests pass, including two real Unix-socket protocol tests, four property
+tests, recorded Telegram-shaped inputs, fixture open/version checks, positive
+parity, and deliberate mismatch cases. The fixture regenerates byte-for-byte.
+
+This checkpoint does not prove live Telegram polling or delivery, Raspberry Pi
+execution, live socket ownership/mode or ACLs, systemd behavior, durable
+cross-restart update idempotency, Hermes compatibility, private-database
+operation, or cutover readiness. Full clean-target `just ci`, exact-final-SHA
+GitHub jobs, independent review, and a security-approved disposition for the
+expanded dependency graph remain pending. The exact-pinned teloxide graph
+currently includes an unmaintained compile-time transitive dependency with no
+safe upgrade; it must not be hidden by a fabricated audit or blanket policy
+exception.

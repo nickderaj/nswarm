@@ -320,9 +320,10 @@ composable boundaries, with cross-domain invariant tests retained.
 
 ## Plan comparison
 
-The branch implements a substantial step-1 skeleton from sections 7.5 and
-8.2.1, but it is not a completed step-1 baseline. Local line coverage and unit
-tests do not substitute for recognized GitHub checks, branch coverage,
-operational merge tools, protected review, or safe runner isolation. Step 2
-must not begin until the real PR checks are green and the protection result has
-been queried back from GitHub.
+At the time of this audit, the branch implemented a substantial step-1 skeleton
+from sections 7.5 and 8.2.1 but was not yet a completed baseline. Local line
+coverage and unit tests did not substitute for recognized GitHub checks,
+branch coverage, operational merge tools, protected review, or safe runner
+isolation. Those gates were subsequently satisfied and PR #1 merged as
+`ac4bfd5f35a1aa2fbbf76ed46f84e7644ca7b049`; this historical finding no longer
+blocks Step 2.

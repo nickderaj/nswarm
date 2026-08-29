@@ -5,4 +5,6 @@ a type-only `teloxide` adapter, a single read-only `body_metrics` MCP tool over
 a Unix socket, and the v0/v1 SQLite-state parity harness.
 
 This is a spike, not a deployable Telegram bot. It performs no Telegram polling
-or delivery and does not include Hermes.
+or delivery and does not include Hermes. Duplicate update keys are retained only
+for the lifetime of one `CommandService`; durable cross-restart idempotency is a
+later storage-boundary decision and is not claimed here.
