@@ -11,8 +11,8 @@ use gym_bot::{
     clock::FixedClock,
     database::open_existing,
     mcp::{
-        BodyMetricsArgs, GymMcp, MAX_DAYS, MAX_LIMIT, McpServer, capability_summary,
-        connect_mcp_socket, decode_mcp_frame,
+        BodyMetricsArgs, GymMcp, MAX_DAYS, MAX_LIMIT, MAX_METRIC_LENGTH, McpServer,
+        capability_summary, connect_mcp_socket, decode_mcp_frame,
     },
 };
 use proptest::prelude::*;
@@ -22,6 +22,30 @@ use rmcp::{
 };
 
 const FIXED_TIME: &str = "2026-08-29T08:15:30+00:00";
+
+#[test]
+fn metric_length_boundary_is_exact() {
+    let maximum = "a".repeat(MAX_METRIC_LENGTH);
+    assert!(
+        BodyMetricsArgs {
+            metric: Some(maximum),
+            days: None,
+            limit: None,
+        }
+        .validate()
+        .is_ok()
+    );
+    let oversized = "a".repeat(MAX_METRIC_LENGTH + 1);
+    assert!(
+        BodyMetricsArgs {
+            metric: Some(oversized),
+            days: None,
+            limit: None,
+        }
+        .validate()
+        .is_err()
+    );
+}
 
 #[test]
 fn production_query_filters_and_caps_rows() {

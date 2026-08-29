@@ -377,7 +377,9 @@ impl DifferenceAllowList {
     }
 
     fn ignores(&self, path: &str) -> bool {
-        self.ignored_paths.iter().any(|ignored| ignored == path)
+        self.ignored_paths
+            .iter()
+            .any(|ignored| ignored.as_str().eq(path))
     }
 }
 

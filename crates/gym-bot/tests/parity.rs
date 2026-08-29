@@ -33,6 +33,29 @@ fn load_intent() -> ParityIntent {
 }
 
 #[test]
+fn golden_provenance_fields_are_validated_independently() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let fixture = common::copy_fixture(&directory, "empty.db");
+    let bytes = std::fs::read(golden_path()).expect("read golden");
+    let golden: serde_json::Value = serde_json::from_slice(&bytes).expect("parse golden");
+
+    for (field, invalid) in [
+        ("commit", ""),
+        ("file", ""),
+        ("sha256", "too-short"),
+        ("generator", ""),
+    ] {
+        let mut candidate = golden.clone();
+        candidate["source"][field] = serde_json::Value::String(invalid.to_owned());
+        let candidate = serde_json::to_vec(&candidate).expect("serialize invalid golden");
+        assert!(matches!(
+            expected_v0_snapshot(&fixture, &load_intent(), &candidate),
+            Err(ParityError::InvalidGoldenProvenance)
+        ));
+    }
+}
+
+#[test]
 fn fixed_time_weight_intent_has_exact_v0_v1_database_parity() {
     let directory = tempfile::tempdir().expect("tempdir");
     let baseline_fixture = common::copy_fixture(&directory, "v0.db");
@@ -306,6 +329,29 @@ fn non_utf8_text_is_normalized_losslessly_and_distinct_from_blobs() {
 }
 
 #[test]
+fn column_nullability_is_normalized_exactly() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "columns.db");
+    let snapshot = normalize_database(&database).expect("normalize fixture");
+    let columns = &snapshot.tables["body_metrics"].columns;
+    let nullability = columns
+        .iter()
+        .map(|column| (column.name.as_str(), column.not_null))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        nullability,
+        vec![
+            ("id", false),
+            ("date", true),
+            ("metric", true),
+            ("value", true),
+            ("unit", true),
+            ("source", true),
+        ]
+    );
+}
+
+#[test]
 fn foreign_key_failures_are_captured_and_diffed() {
     let directory = tempfile::tempdir().expect("tempdir");
     let expected_path = common::copy_fixture(&directory, "expected.db");
@@ -351,5 +397,18 @@ fn only_explicit_exact_paths_can_be_ignored() {
         )
         .expect("allow-listed diff"),
         Vec::new()
+    );
+    assert_eq!(
+        compare_snapshots(
+            &expected,
+            &actual,
+            &DifferenceAllowList::explicit(vec!["/schema_version/child".to_owned()]),
+        )
+        .expect("non-exact allow-list entry"),
+        vec![gym_bot::parity::StateDifference {
+            path: "/schema_version".to_owned(),
+            expected: Some(serde_json::json!(5)),
+            actual: Some(serde_json::json!(6)),
+        }]
     );
 }
