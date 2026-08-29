@@ -13,7 +13,7 @@ pub const V0_GYM_SCHEMA_VERSION: i64 = 5;
 /// # Errors
 ///
 /// Returns [`DatabaseError`] when the database is absent, unreadable, has a
-/// different schema version, or fails its foreign-key check.
+/// different schema version.
 pub fn open_existing(path: &Path) -> Result<Connection, DatabaseError> {
     let connection = Connection::open_with_flags(
         path,
@@ -28,7 +28,7 @@ pub fn open_existing(path: &Path) -> Result<Connection, DatabaseError> {
 /// # Errors
 ///
 /// Returns [`DatabaseError`] when the database is absent, unreadable, has a
-/// different schema version, or fails its foreign-key check.
+/// different schema version.
 pub fn open_existing_read_only(path: &Path) -> Result<Connection, DatabaseError> {
     let connection = Connection::open_with_flags(
         path,
@@ -48,6 +48,18 @@ fn configure_and_validate(connection: &Connection) -> Result<(), DatabaseError> 
             actual: version,
         });
     }
+    Ok(())
+}
+
+/// Performs the full startup validation, including the potentially expensive
+/// scan of every foreign-key-bearing table.
+///
+/// # Errors
+///
+/// Returns [`DatabaseError`] when the file, schema version, or foreign-key
+/// state is invalid.
+pub fn validate_existing(path: &Path) -> Result<(), DatabaseError> {
+    let connection = open_existing_read_only(path)?;
     let violations: i64 =
         connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
             row.get(0)

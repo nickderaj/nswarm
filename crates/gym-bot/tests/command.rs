@@ -11,7 +11,7 @@ use gym_bot::{
         CommandError, CommandInput, CommandResult, CommandService, IgnoreReason, WeightParseError,
         parse_weight_command,
     },
-    database::{DatabaseError, V0_GYM_SCHEMA_VERSION, open_existing},
+    database::{DatabaseError, V0_GYM_SCHEMA_VERSION, open_existing, validate_existing},
 };
 use proptest::prelude::*;
 use rusqlite::Connection;
@@ -302,9 +302,13 @@ fn existing_fixture_open_is_non_migrating_and_fail_closed() {
         )
         .expect("insert invalid foreign keys while enforcement is off");
     assert!(matches!(
-        open_existing(&invalid_foreign_key),
+        validate_existing(&invalid_foreign_key),
         Err(DatabaseError::ForeignKeyViolations(2))
     ));
+    assert!(
+        open_existing(&invalid_foreign_key).is_ok(),
+        "per-command open performs only the cheap schema check"
+    );
 }
 
 fn metric_count(database: &std::path::Path) -> i64 {

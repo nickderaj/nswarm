@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::{
     clock::Clock,
-    database::{DatabaseError, open_existing},
+    database::{DatabaseError, open_existing, validate_existing},
 };
 
 const WEIGHT_USAGE: &str = "Usage: /weight <kg>";
@@ -70,6 +70,7 @@ impl CommandService {
         if processed_updates_path == database_path {
             return Err(CommandError::IdempotencyPathAliasesGymDatabase);
         }
+        validate_existing(&database_path)?;
         let processed = Connection::open_with_flags(
             processed_updates_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE

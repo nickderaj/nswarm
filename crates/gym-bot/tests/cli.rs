@@ -1,5 +1,7 @@
 //! Production binary argument and startup-failure coverage.
 
+mod common;
+
 use std::process::Command;
 
 #[test]
@@ -8,8 +10,9 @@ fn binary_rejects_missing_and_extra_arguments() {
     for (arguments, expected) in [
         (Vec::<&str>::new(), "usage:"),
         (vec!["socket.sock"], "missing existing gym database path"),
+        (vec!["socket.sock", "gym.db"], "missing IANA time-zone name"),
         (
-            vec!["socket.sock", "gym.db", "unexpected"],
+            vec!["socket.sock", "gym.db", "Europe/London", "unexpected"],
             "unexpected extra argument",
         ),
     ] {
@@ -29,10 +32,12 @@ fn binary_rejects_missing_and_extra_arguments() {
 #[test]
 fn binary_builds_runtime_and_reports_socket_bind_failure() {
     let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
     let missing_parent_socket = directory.path().join("missing/mcp.sock");
     let output = Command::new(env!("CARGO_BIN_EXE_gym-bot"))
         .arg(missing_parent_socket)
-        .arg(directory.path().join("gym.db"))
+        .arg(database)
+        .arg("Europe/London")
         .output()
         .expect("run gym MCP binary");
 

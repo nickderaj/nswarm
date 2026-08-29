@@ -26,7 +26,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::{
     clock::Clock,
-    database::{DatabaseError, open_existing_read_only},
+    database::{DatabaseError, open_existing_read_only, validate_existing},
 };
 
 /// Default v0-compatible lookback in days.
@@ -312,6 +312,8 @@ impl McpServer {
         clock: Arc<dyn Clock>,
     ) -> Result<Self, McpSocketError> {
         let socket_path = socket_path.as_ref().to_path_buf();
+        let database_path = database_path.into();
+        validate_existing(&database_path)?;
         ensure_private_socket_parent(&socket_path)?;
         let listener = UnixListener::bind(&socket_path)?;
         #[cfg(target_os = "linux")]
@@ -319,7 +321,7 @@ impl McpServer {
         Ok(Self {
             listener,
             _guard: SocketGuard(socket_path),
-            database_path: database_path.into(),
+            database_path,
             clock,
         })
     }
@@ -429,6 +431,9 @@ pub enum McpSocketError {
     /// Unix socket bind or accept failed.
     #[error("gym MCP socket error: {0}")]
     Io(#[from] std::io::Error),
+    /// Existing gym storage failed startup validation.
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
 }
 
 /// Returns the exact MCP capability map used by contract tests.
