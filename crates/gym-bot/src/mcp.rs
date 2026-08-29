@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+use chrono::{DateTime, Days, SecondsFormat};
 use rmcp::{
     RoleServer, ServerHandler, ServiceExt,
     model::{
@@ -146,17 +147,20 @@ impl GymMcp {
     pub fn body_metrics(&self, args: BodyMetricsArgs) -> Result<Vec<BodyMetric>, McpQueryError> {
         let args = args.validate()?;
         let connection = open_existing_read_only(&self.database_path)?;
-        let modifier = format!("-{} days", args.days);
-        let now = self.clock.now_iso8601();
+        let now = DateTime::parse_from_rfc3339(&self.clock.now_iso8601())?;
+        let cutoff = now
+            .checked_sub_days(Days::new(u64::from(args.days)))
+            .ok_or(McpQueryError::ClockOutOfRange)?
+            .to_rfc3339_opts(SecondsFormat::Micros, false);
         let mut rows = Vec::new();
         if let Some(metric) = args.metric {
             let mut statement = connection.prepare(
                 "SELECT date, metric, value, unit, source FROM body_metrics \
-                 WHERE datetime(date) >= datetime(?1, ?2) AND metric = ?3 \
-                 ORDER BY datetime(date) DESC, id DESC LIMIT ?4",
+                 WHERE metric = ?1 AND date >= ?2 \
+                 ORDER BY date DESC, id DESC LIMIT ?3",
             )?;
             let mapped = statement.query_map(
-                params![now, modifier, metric, i64::from(args.limit)],
+                params![metric, cutoff, i64::from(args.limit)],
                 metric_from_row,
             )?;
             for row in mapped {
@@ -165,13 +169,11 @@ impl GymMcp {
         } else {
             let mut statement = connection.prepare(
                 "SELECT date, metric, value, unit, source FROM body_metrics \
-                 WHERE datetime(date) >= datetime(?1, ?2) \
-                 ORDER BY datetime(date) DESC, id DESC LIMIT ?3",
+                 WHERE date >= ?1 \
+                 ORDER BY date DESC, id DESC LIMIT ?2",
             )?;
-            let mapped = statement.query_map(
-                params![now, modifier, i64::from(args.limit)],
-                metric_from_row,
-            )?;
+            let mapped =
+                statement.query_map(params![cutoff, i64::from(args.limit)], metric_from_row)?;
             for row in mapped {
                 rows.push(row?);
             }
@@ -230,6 +232,9 @@ impl ServerHandler for GymMcp {
             }
             McpQueryError::Database(_) | McpQueryError::Sqlite(_) => {
                 ErrorData::internal_error("body_metrics storage is unavailable", None)
+            }
+            McpQueryError::ClockTimestamp(_) | McpQueryError::ClockOutOfRange => {
+                ErrorData::internal_error("body_metrics clock is invalid", None)
             }
         })?;
         let structured = serde_json::to_value(&rows)
@@ -404,6 +409,12 @@ pub enum McpQueryError {
     /// The requested row cap is outside the published tool contract.
     #[error("limit must be between 1 and {MAX_LIMIT}, got {0}")]
     LimitOutOfRange(u16),
+    /// Injected clock did not return RFC-3339.
+    #[error("body_metrics clock did not return RFC-3339: {0}")]
+    ClockTimestamp(#[from] chrono::ParseError),
+    /// Subtracting the bounded lookback exceeded the timestamp range.
+    #[error("body_metrics clock cannot represent the requested lookback")]
+    ClockOutOfRange,
     /// The gym database failed validation or access.
     #[error(transparent)]
     Database(#[from] DatabaseError),

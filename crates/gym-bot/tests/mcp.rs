@@ -55,6 +55,22 @@ fn production_query_filters_and_caps_rows() {
         .expect("default unfiltered query");
     assert_eq!(all_rows.len(), 3);
     assert_eq!(all_rows[2].metric, "resting_hr");
+
+    let query_plan = open_existing(&database)
+        .expect("open fixture for query plan")
+        .query_row(
+            "EXPLAIN QUERY PLAN \
+             SELECT date, metric, value, unit, source FROM body_metrics \
+             WHERE metric = ?1 AND date >= ?2 \
+             ORDER BY date DESC, id DESC LIMIT ?3",
+            ("weight_kg", "2026-08-22T08:15:30.000000+00:00", 200),
+            |row| row.get::<_, String>(3),
+        )
+        .expect("metric query plan");
+    assert!(
+        query_plan.contains("body_metrics_metric_date"),
+        "bounded metric query must use the existing composite index: {query_plan}"
+    );
 }
 
 #[test]
