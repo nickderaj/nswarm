@@ -1,0 +1,37 @@
+[Unit]
+Description=nswarm Hermes gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes-gateway
+Group=hermes-gateway
+ExecStart=/opt/nswarm/hermes/bin/hermes gateway --host 127.0.0.1 --port 8642
+WorkingDirectory=/opt/nswarm/hermes
+EnvironmentFile=/etc/nswarm/hermes-gateway.env
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+ReadWritePaths=/var/lib/hermes-gateway
+
+[Install]
+WantedBy=multi-user.target

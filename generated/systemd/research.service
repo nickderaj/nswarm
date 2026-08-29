@@ -1,0 +1,45 @@
+[Unit]
+Description=nswarm research bot
+After=network-online.target hermes-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=research-agent
+Group=research-agent
+SupplementaryGroups=research-access
+ExecStart=/opt/nswarm/research/bin/research-bot
+WorkingDirectory=/opt/nswarm/research
+EnvironmentFile=/etc/nswarm/research.env
+RuntimeDirectory=research
+RuntimeDirectoryMode=0750
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+MemoryMax=1G
+CPUQuota=100%
+ReadWritePaths=/var/lib/research-agent /var/lib/nswarm/research
+InaccessiblePaths=/var/lib/nswarm/gym /var/lib/nswarm/tutor /var/lib/nswarm/trading
+
+[Install]
+WantedBy=multi-user.target

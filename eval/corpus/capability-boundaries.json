@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "capability-boundaries",
+  "package": "agent-control",
+  "test": "policy::tests::eval_capability_corpus_enforces_role_boundaries",
+  "input": {
+    "assertions": [
+      {"role": "research", "capability": "repository-read", "allowed": true},
+      {"role": "research", "capability": "repository-write", "allowed": false},
+      {"role": "coder", "capability": "repository-write", "allowed": true},
+      {"role": "coder", "capability": "integrate", "allowed": false},
+      {"role": "coder", "capability": "merge", "allowed": false},
+      {"role": "verifier-reviewer", "capability": "verify", "allowed": true},
+      {"role": "verifier-reviewer", "capability": "integrate", "allowed": false},
+      {"role": "integrator", "capability": "integrate", "allowed": true},
+      {"role": "integrator", "capability": "merge", "allowed": false},
+      {"role": "shipper", "capability": "merge", "allowed": true},
+      {"role": "shipper", "capability": "repository-write", "allowed": false}
+    ]
+  },
+  "expected": {"assertion_count": 11}
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "path-containment",
+  "package": "agent-control",
+  "test": "types::tests::eval_path_corpus_enforces_containment",
+  "input": {
+    "policy": {
+      "readable": ["crates/assigned"],
+      "writable": ["crates/assigned/src"],
+      "forbidden": ["crates/assigned/secrets", "crates/sibling"]
+    },
+    "probes": [
+      {"operation": "read", "path": "crates/assigned/README.md", "allowed": true},
+      {"operation": "write", "path": "crates/assigned/src/lib.rs", "allowed": true},
+      {"operation": "read", "path": "crates/assigned/secrets/token", "allowed": false},
+      {"operation": "write", "path": "crates/assigned/secrets/token", "allowed": false},
+      {"operation": "read", "path": "crates/sibling/src/lib.rs", "allowed": false},
+      {"operation": "write", "path": "./crates/assigned/secrets/token", "allowed": false},
+      {"operation": "write", "path": "crates/assigned/../sibling", "allowed": false},
+      {"operation": "read", "path": "/etc/passwd", "allowed": false},
+      {"operation": "write", "path": "", "allowed": false}
+    ]
+  },
+  "expected": {"probe_count": 9}
+}

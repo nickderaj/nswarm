@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "exact-sha",
+  "package": "agent-control",
+  "test": "store::tests::eval_exact_sha_corpus_invalidates_stale_verification",
+  "input": {
+    "candidate_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "stale_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "abbreviated_sha": "abc123"
+  },
+  "expected": {
+    "abbreviated_sha_accepted": false,
+    "stale_verdict_accepted": false
+  }
+}

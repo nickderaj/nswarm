@@ -1,0 +1,10 @@
+/target/
+/.idea/
+/.vscode/
+*.db
+*.db-shm
+*.db-wal
+*.profraw
+coverage/
+artifacts/
+secrets/*.age.key

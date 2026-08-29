@@ -1,0 +1,16 @@
+[package]
+name = "research-bot"
+description = "Non-writable research profile scaffold for nswarm policy validation"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["agents", "research"]
+categories = ["command-line-utilities"]
+
+[lints]
+workspace = true

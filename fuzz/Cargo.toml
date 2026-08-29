@@ -1,0 +1,25 @@
+[package]
+name = "nswarm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"
+
+[dependencies]
+fleet = { path = "../crates/fleet" }
+libfuzzer-sys = { version = "=0.4.13", default-features = false, features = ["arbitrary-derive", "link_libfuzzer"] }
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false

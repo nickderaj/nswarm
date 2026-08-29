@@ -1,0 +1,13 @@
+# Security and acceptance policy require dedicated owner review.
+/.github/ @ultron-git
+/scripts/ @ultron-git
+/supply-chain/ @ultron-git
+/audits/ @ultron-git
+/profiles/ @ultron-git
+/eval/ @ultron-git
+/generated/ @ultron-git
+/deny.toml @ultron-git
+/mutants.toml @ultron-git
+/Cargo.toml @ultron-git
+/Cargo.lock @ultron-git
+/rust-toolchain.toml @ultron-git

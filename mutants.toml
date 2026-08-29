@@ -1,0 +1,4 @@
+timeout_multiplier = 3.0
+minimum_test_timeout = 20.0
+examine_re = ["crates/.*/src/.*\\.rs$"]
+exclude_re = ["crates/fleet/src/main\\.rs$"]

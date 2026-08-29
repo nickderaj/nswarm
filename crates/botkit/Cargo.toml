@@ -1,0 +1,20 @@
+[package]
+name = "botkit"
+description = "Transport-neutral runtime contracts shared by nswarm bots"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["agents", "bots", "runtime"]
+categories = ["api-bindings"]
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

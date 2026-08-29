@@ -1,0 +1,17 @@
+profile_version = 1
+policy_version = "v1"
+role = "coder"
+soul = "profiles/coder/SOUL.md"
+skills = "profiles/coder/skills"
+memory = "profiles/coder/memory"
+capabilities = ["repository-read", "repository-write", "evidence-write", "branch-push"]
+forbidden_capabilities = ["network-read", "coordinate", "verify", "integrate", "merge"]
+
+[governance]
+write_approval = true
+background_review = false
+curator = false
+
+[network]
+default = "deny"
+brief_allow_list_required = true
