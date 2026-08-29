@@ -2,18 +2,18 @@
   "required_status_checks": {
     "strict": true,
     "checks": [
-      { "context": "PR / quality", "app_id": 15368 },
-      { "context": "PR / dependencies", "app_id": 15368 },
-      { "context": "PR / coverage", "app_id": 15368 },
-      { "context": "PR / msrv", "app_id": 15368 },
-      { "context": "PR / current-stable", "app_id": 15368 },
-      { "context": "PR / aarch64-compile", "app_id": 15368 },
-      { "context": "PR / bounded-fuzz", "app_id": 15368 },
-      { "context": "PR / reproducibility", "app_id": 15368 },
-      { "context": "Merge queue / sanitizers", "app_id": 15368 },
-      { "context": "Merge queue / miri", "app_id": 15368 },
-      { "context": "Merge queue / mutation", "app_id": 15368 },
-      { "context": "Merge queue / aarch64-hosted", "app_id": 15368 }
+      { "context": "quality", "app_id": 15368 },
+      { "context": "dependencies", "app_id": 15368 },
+      { "context": "coverage", "app_id": 15368 },
+      { "context": "msrv", "app_id": 15368 },
+      { "context": "current-stable", "app_id": 15368 },
+      { "context": "aarch64-compile", "app_id": 15368 },
+      { "context": "bounded-fuzz", "app_id": 15368 },
+      { "context": "reproducibility", "app_id": 15368 },
+      { "context": "sanitizers", "app_id": 15368 },
+      { "context": "miri", "app_id": 15368 },
+      { "context": "mutation", "app_id": 15368 },
+      { "context": "aarch64-hosted", "app_id": 15368 }
     ]
   },
   "enforce_admins": true,

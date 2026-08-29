@@ -676,25 +676,28 @@ Sanitizer passed, and mutation tested 494 candidates with 342 caught, 152
 unviable, and zero survivors.
 
 After those results, `main` protection was applied and queried back through the
-GitHub API. The material returned configuration is:
+GitHub API. A subsequent exact check-runs query established that GitHub reports
+the bare job names below; the Actions UI's composite labels (for example,
+`PR / quality`) are display labels rather than status contexts. The corrected
+material returned configuration is:
 
 ```json
 {
   "required_status_checks": {
     "strict": true,
     "checks": [
-      {"context":"PR / quality","app_id":15368},
-      {"context":"PR / dependencies","app_id":15368},
-      {"context":"PR / coverage","app_id":15368},
-      {"context":"PR / msrv","app_id":15368},
-      {"context":"PR / current-stable","app_id":15368},
-      {"context":"PR / aarch64-compile","app_id":15368},
-      {"context":"PR / bounded-fuzz","app_id":15368},
-      {"context":"PR / reproducibility","app_id":15368},
-      {"context":"Merge queue / sanitizers","app_id":15368},
-      {"context":"Merge queue / miri","app_id":15368},
-      {"context":"Merge queue / mutation","app_id":15368},
-      {"context":"Merge queue / aarch64-hosted","app_id":15368}
+      {"context":"quality","app_id":15368},
+      {"context":"dependencies","app_id":15368},
+      {"context":"coverage","app_id":15368},
+      {"context":"msrv","app_id":15368},
+      {"context":"current-stable","app_id":15368},
+      {"context":"aarch64-compile","app_id":15368},
+      {"context":"bounded-fuzz","app_id":15368},
+      {"context":"reproducibility","app_id":15368},
+      {"context":"sanitizers","app_id":15368},
+      {"context":"miri","app_id":15368},
+      {"context":"mutation","app_id":15368},
+      {"context":"aarch64-hosted","app_id":15368}
     ]
   },
   "enforce_admins": true,
@@ -714,12 +717,13 @@ GitHub API. The material returned configuration is:
 }
 ```
 
-PR #1 is correctly blocked with `REVIEW_REQUIRED`: its author and last pusher
-is `nickderaj`, there are no reviews, the only collaborator is `nickderaj`, and
-every protected CODEOWNERS path also names only `@nickderaj`. A second trusted
-Write/Maintain collaborator must accept access, become the relevant CODEOWNER,
-and approve a head they did not push. The branch also contains merge commit
-`c119086`; protected `main` requires linear history while the bootstrap request
-forbids squash and history rewriting. The recommended narrow resolution is an
-explicit owner authorization to squash-merge PR #1 after trusted approval. No
-merge has been performed.
+PR #1 remains blocked with `REVIEW_REQUIRED`: its author and last pusher is
+`nickderaj`, and there is no approval. Trusted collaborator `ultron-git` now
+has Write access and is the owner assigned by the branch's `CODEOWNERS` file.
+Because GitHub evaluates `CODEOWNERS` from the base branch, that assignment
+will govern future PRs after this file reaches `main`; for PR #1, an ordinary
+approval from `ultron-git` can satisfy the one-approval and last-pusher rules.
+The branch also contains merge commit `c119086`; protected `main` requires
+linear history while the bootstrap request forbids history rewriting. The
+recommended narrow resolution remains an explicitly authorized squash merge
+after the final head is approved. No merge has been performed.

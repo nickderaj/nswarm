@@ -31,6 +31,12 @@ array is supplied, so the template uses only `checks`. GitHub reports
 `allow_fork_syncing` disabled for this branch; the template matches that actual
 state.
 
+Each required context is the exact `check_run.name` returned by GitHub's API.
+The Actions UI may display a composite workflow/job label such as
+`PR / quality`, but the corresponding required context is `quality`. Requiring
+the composite display label leaves the rule permanently waiting for a status
+that no check run reports.
+
 Required signed commits are not enabled in this bootstrap. The existing
 `overnight/bootstrap` history predates a signing policy and contains unsigned
 commits; GitHub's signed-commit rule would therefore require rewriting that
