@@ -8,4 +8,13 @@ cleanup() {
 trap cleanup EXIT
 
 ./scripts/generate_gym_fixture.sh "$temporary_dir/v0-gym-v5.sqlite3"
-cmp fixtures/gym/v0-gym-v5.sqlite3 "$temporary_dir/v0-gym-v5.sqlite3"
+
+snapshot() {
+  local database=$1
+  sqlite3 "$database" 'PRAGMA user_version; PRAGMA integrity_check;'
+  sqlite3 "$database" .dump
+}
+
+diff -u \
+  <(snapshot fixtures/gym/v0-gym-v5.sqlite3) \
+  <(snapshot "$temporary_dir/v0-gym-v5.sqlite3")
