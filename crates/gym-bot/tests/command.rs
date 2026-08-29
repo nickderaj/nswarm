@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use botkit::{SurfaceId, UpdateKey};
 use gym_bot::{
-    clock::{Clock, FixedClock, SystemClock},
+    clock::{Clock, FixedClock, SystemClock, timestamp_in_timezone},
     command::{
         CommandError, CommandInput, CommandResult, CommandService, IgnoreReason, WeightParseError,
         parse_weight_command,
@@ -82,11 +82,22 @@ fn weight_command_writes_exact_v0_intent_and_response() {
 }
 
 #[test]
-fn production_clock_returns_rfc3339_utc_with_microseconds() {
-    let timestamp = SystemClock.now_iso8601();
-    assert!(timestamp.ends_with('Z'));
+fn production_clock_returns_rfc3339_in_the_configured_zone() {
+    let timestamp = SystemClock::new("Europe/London")
+        .expect("installed IANA zone")
+        .now_iso8601();
     assert_eq!(timestamp.matches('.').count(), 1);
     chrono::DateTime::parse_from_rfc3339(&timestamp).expect("production clock is RFC-3339");
+    assert_eq!(
+        timestamp_in_timezone("2026-08-29T08:15:30.123456Z", "Europe/London")
+            .expect("fixed zoned timestamp"),
+        "2026-08-29T09:15:30.123456+01:00"
+    );
+    assert_eq!(
+        timestamp_in_timezone("2026-01-29T08:15:30Z", "Europe/London")
+            .expect("fixed winter timestamp"),
+        "2026-01-29T08:15:30+00:00"
+    );
 }
 
 #[test]

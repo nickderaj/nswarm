@@ -14,13 +14,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let program = arguments.next().unwrap_or_default();
     let Some(socket_path) = arguments.next().map(PathBuf::from) else {
         return Err(format!(
-            "usage: {} <socket-path> <existing-gym-db>",
+            "usage: {} <socket-path> <existing-gym-db> <iana-time-zone>",
             PathBuf::from(program).display()
         )
         .into());
     };
     let Some(database_path) = arguments.next().map(PathBuf::from) else {
         return Err("missing existing gym database path".into());
+    };
+    let Some(time_zone) = arguments.next() else {
+        return Err("missing IANA time-zone name".into());
     };
     if arguments.next().is_some() {
         return Err("unexpected extra argument".into());
@@ -32,7 +35,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime.block_on(run_mcp_server(
         socket_path,
         database_path,
-        Arc::new(SystemClock),
+        Arc::new(SystemClock::new(
+            time_zone.to_str().ok_or("time zone must be UTF-8")?,
+        )?),
     ))?;
     Ok(())
 }

@@ -15,6 +15,7 @@ categories = ["database", "web-programming"]
 [dependencies]
 botkit = { path = "../botkit" }
 chrono.workspace = true
+jiff.workspace = true
 rmcp.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
