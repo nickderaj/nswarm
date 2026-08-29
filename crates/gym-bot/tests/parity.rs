@@ -39,8 +39,10 @@ fn fixed_time_weight_intent_has_exact_v0_v1_database_parity() {
     let service = CommandService::new(
         "fixture-owner",
         &candidate,
+        directory.path().join("processed.db"),
         Arc::new(FixedClock::new(&intent.at)),
-    );
+    )
+    .expect("command service");
     let result = service
         .handle(&CommandInput {
             actor_id: "fixture-owner".to_owned(),

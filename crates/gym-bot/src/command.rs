@@ -1,12 +1,12 @@
 //! Transport-neutral gym command handling.
 
 use std::{
-    collections::HashSet,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
 use botkit::UpdateKey;
+use rusqlite::{Connection, OpenFlags, params};
 use thiserror::Error;
 
 use crate::{
@@ -32,7 +32,7 @@ pub struct CommandInput {
 pub enum IgnoreReason {
     /// The actor does not match the configured single owner.
     NotOwner,
-    /// The surface/external-id pair was already handled in this process.
+    /// The surface/external-id pair was already handled, including before a restart.
     DuplicateUpdate,
 }
 
@@ -50,23 +50,47 @@ pub struct CommandService {
     owner_id: String,
     database_path: PathBuf,
     clock: Arc<dyn Clock>,
-    processed: Mutex<HashSet<UpdateKey>>,
+    processed: Mutex<Connection>,
 }
 
 impl CommandService {
-    /// Creates a command service against an existing v0 gym database copy.
-    #[must_use]
+    /// Creates a command service with a durable generic idempotency sidecar.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommandError`] when the sidecar cannot be opened or initialized.
     pub fn new(
         owner_id: impl Into<String>,
         database_path: impl Into<PathBuf>,
+        processed_updates_path: impl AsRef<Path>,
         clock: Arc<dyn Clock>,
-    ) -> Self {
-        Self {
-            owner_id: owner_id.into(),
-            database_path: database_path.into(),
-            clock,
-            processed: Mutex::new(HashSet::new()),
+    ) -> Result<Self, CommandError> {
+        let database_path = database_path.into();
+        let processed_updates_path = processed_updates_path.as_ref();
+        if processed_updates_path == database_path {
+            return Err(CommandError::IdempotencyPathAliasesGymDatabase);
         }
+        let processed = Connection::open_with_flags(
+            processed_updates_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        processed.busy_timeout(std::time::Duration::from_secs(5))?;
+        processed.execute_batch(
+            "CREATE TABLE IF NOT EXISTS processed_updates (\
+                 surface TEXT NOT NULL, \
+                 external_id TEXT NOT NULL, \
+                 PRIMARY KEY (surface, external_id)\
+             ) WITHOUT ROWID; \
+             PRAGMA user_version=1;",
+        )?;
+        Ok(Self {
+            owner_id: owner_id.into(),
+            database_path,
+            clock,
+            processed: Mutex::new(processed),
+        })
     }
 
     /// Returns the database path used by this service.
@@ -88,11 +112,18 @@ impl CommandService {
         if input.actor_id != self.owner_id {
             return Ok(CommandResult::Ignored(IgnoreReason::NotOwner));
         }
-        let mut processed = self
+        let processed = self
             .processed
             .lock()
             .map_err(|_| CommandError::IdempotencyUnavailable)?;
-        if !processed.insert(input.update.clone()) {
+        let inserted = processed.execute(
+            "INSERT OR IGNORE INTO processed_updates (surface, external_id) VALUES (?1, ?2)",
+            params![
+                input.update.surface.as_str(),
+                input.update.external_id.as_str()
+            ],
+        )?;
+        if inserted == 0 {
             return Ok(CommandResult::Ignored(IgnoreReason::DuplicateUpdate));
         }
         drop(processed);
@@ -163,9 +194,12 @@ pub enum WeightParseError {
 /// Command execution failure.
 #[derive(Debug, Error)]
 pub enum CommandError {
-    /// The in-process idempotency guard was poisoned.
+    /// The durable idempotency connection guard was poisoned.
     #[error("command idempotency guard unavailable")]
     IdempotencyUnavailable,
+    /// The sidecar must never alias the frozen v0 gym database.
+    #[error("processed-update sidecar must differ from the gym database")]
+    IdempotencyPathAliasesGymDatabase,
     /// The gym database failed validation or access.
     #[error(transparent)]
     Database(#[from] DatabaseError),

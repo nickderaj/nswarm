@@ -11,6 +11,6 @@ responsible for assigning the eventual service group and deliberately widening
 directory/socket access only after group ownership is correct.
 
 This is a spike, not a deployable Telegram bot. It performs no Telegram polling
-or delivery and does not include Hermes. Duplicate update keys are retained only
-for the lifetime of one `CommandService`; durable cross-restart idempotency is a
-later storage-boundary decision and is not claimed here.
+or delivery and does not include Hermes. Generic `(surface, external_id)` update
+keys are persisted in a separate SQLite sidecar so restarts cannot replay a
+command and the frozen v0 gym schema remains unchanged.

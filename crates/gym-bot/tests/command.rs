@@ -8,7 +8,7 @@ use botkit::{SurfaceId, UpdateKey};
 use gym_bot::{
     clock::{Clock, FixedClock, SystemClock},
     command::{
-        CommandInput, CommandResult, CommandService, IgnoreReason, WeightParseError,
+        CommandError, CommandInput, CommandResult, CommandService, IgnoreReason, WeightParseError,
         parse_weight_command,
     },
     database::{DatabaseError, V0_GYM_SCHEMA_VERSION, open_existing},
@@ -34,7 +34,13 @@ fn input(actor: &str, surface: &str, external_id: &str, text: &str) -> CommandIn
 fn weight_command_writes_exact_v0_intent_and_response() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
-    let service = CommandService::new("owner", &database, Arc::new(FixedClock::new(FIXED_TIME)));
+    let service = CommandService::new(
+        "owner",
+        &database,
+        directory.path().join("processed.db"),
+        Arc::new(FixedClock::new(FIXED_TIME)),
+    )
+    .expect("command service");
     assert_eq!(service.database_path(), database);
 
     let result = service
@@ -87,7 +93,13 @@ fn production_clock_returns_rfc3339_utc_with_microseconds() {
 fn owner_rejection_does_not_consume_update_or_write_state() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
-    let service = CommandService::new("owner", &database, Arc::new(FixedClock::new(FIXED_TIME)));
+    let service = CommandService::new(
+        "owner",
+        &database,
+        directory.path().join("processed.db"),
+        Arc::new(FixedClock::new(FIXED_TIME)),
+    )
+    .expect("command service");
     let rejected = service
         .handle(&input("intruder", "telegram", "42", "/weight 80"))
         .expect("owner rejection is ordinary");
@@ -107,7 +119,14 @@ fn owner_rejection_does_not_consume_update_or_write_state() {
 fn duplicate_identity_is_the_generic_surface_external_id_pair() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
-    let service = CommandService::new("owner", &database, Arc::new(FixedClock::new(FIXED_TIME)));
+    let processed = directory.path().join("processed.db");
+    let service = CommandService::new(
+        "owner",
+        &database,
+        &processed,
+        Arc::new(FixedClock::new(FIXED_TIME)),
+    )
+    .expect("command service");
     let telegram = input("owner", "telegram", "43", "/weight 81");
     assert!(matches!(
         service.handle(&telegram),
@@ -122,13 +141,52 @@ fn duplicate_identity_is_the_generic_surface_external_id_pair() {
         Ok(CommandResult::Reply(_))
     ));
     assert_eq!(metric_count(&database), 2);
+
+    drop(service);
+    let restarted = CommandService::new(
+        "owner",
+        &database,
+        &processed,
+        Arc::new(FixedClock::new(FIXED_TIME)),
+    )
+    .expect("restarted command service");
+    assert_eq!(
+        restarted
+            .handle(&telegram)
+            .expect("restart duplicate is ordinary"),
+        CommandResult::Ignored(IgnoreReason::DuplicateUpdate)
+    );
+    assert_eq!(metric_count(&database), 2);
+    let processed_connection = Connection::open(&processed).expect("open processed sidecar");
+    let durable_keys = processed_connection
+        .prepare("SELECT surface, external_id FROM processed_updates ORDER BY surface")
+        .expect("prepare processed query")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("query processed keys")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read processed keys");
+    assert_eq!(
+        durable_keys,
+        vec![
+            ("telegram".to_owned(), "43".to_owned()),
+            ("web".to_owned(), "43".to_owned()),
+        ]
+    );
 }
 
 #[test]
 fn blank_malformed_non_finite_and_non_positive_weights_are_rejected() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
-    let service = CommandService::new("owner", &database, Arc::new(FixedClock::new(FIXED_TIME)));
+    let service = CommandService::new(
+        "owner",
+        &database,
+        directory.path().join("processed.db"),
+        Arc::new(FixedClock::new(FIXED_TIME)),
+    )
+    .expect("command service");
     let invalid = [
         "",
         "/weight",
@@ -180,6 +238,15 @@ fn existing_fixture_open_is_non_migrating_and_fail_closed() {
     assert!(matches!(
         open_existing(&directory.path().join("missing.db")),
         Err(DatabaseError::Sqlite(_))
+    ));
+    assert!(matches!(
+        CommandService::new(
+            "owner",
+            &database,
+            &database,
+            Arc::new(FixedClock::new(FIXED_TIME)),
+        ),
+        Err(CommandError::IdempotencyPathAliasesGymDatabase)
     ));
 
     let invalid_foreign_key = common::copy_fixture(&directory, "invalid-fk.db");
