@@ -172,13 +172,14 @@ fn storage_failure_is_an_internal_protocol_error() {
         let bound = McpServer::bind(&socket, &database, Arc::new(FixedClock::new(FIXED_TIME)))
             .expect("bind production socket");
         let server = tokio::spawn(bound.run());
-        let client = ().serve(
-            connect_mcp_socket(&socket)
-                .await
-                .expect("connect Unix socket"),
-        )
-        .await
-        .expect("real MCP handshake");
+        let client = ()
+            .serve(
+                connect_mcp_socket(&socket)
+                    .await
+                    .expect("connect Unix socket"),
+            )
+            .await
+            .expect("real MCP handshake");
         std::fs::rename(&database, directory.path().join("gym-unavailable.db"))
             .expect("make database unavailable");
 
