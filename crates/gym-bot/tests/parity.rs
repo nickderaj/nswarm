@@ -61,6 +61,7 @@ fn fixed_time_weight_intent_has_exact_v0_v1_database_parity() {
     let candidate = normalize_database(&candidate).expect("normalize v1");
     assert_eq!(baseline.schema_version, 5);
     assert_eq!(baseline.tables.len(), 15);
+    assert_eq!(baseline.schema_objects.len(), 8);
     assert!(baseline.foreign_key_violations.is_empty());
     assert!(
         compare_snapshots(&baseline, &candidate, &DifferenceAllowList::empty())
@@ -150,6 +151,29 @@ fn unexpected_tables_schema_version_and_column_drift_are_detected() {
         diff.path == "/tables/body_metrics/sql"
             || diff.path.starts_with("/tables/body_metrics/columns/")
     }));
+}
+
+#[test]
+fn index_drift_is_detected() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let expected_path = common::copy_fixture(&directory, "expected.db");
+    let actual_path = common::copy_fixture(&directory, "actual.db");
+    Connection::open(&actual_path)
+        .expect("open candidate")
+        .execute("DROP INDEX body_metrics_metric_date", [])
+        .expect("induce index drift");
+
+    let differences = compare_snapshots(
+        &normalize_database(&expected_path).expect("expected snapshot"),
+        &normalize_database(&actual_path).expect("actual snapshot"),
+        &DifferenceAllowList::empty(),
+    )
+    .expect("index diff");
+    assert!(
+        differences
+            .iter()
+            .any(|diff| diff.path == "/schema_objects/index~1body_metrics_metric_date")
+    );
 }
 
 #[test]

@@ -158,6 +158,47 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
 }
 
 #[test]
+fn storage_failure_is_an_internal_protocol_error() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let socket = directory.path().join("mcp.sock");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+
+    runtime.block_on(async {
+        let bound = McpServer::bind(&socket, &database, Arc::new(FixedClock::new(FIXED_TIME)))
+            .expect("bind production socket");
+        let server = tokio::spawn(bound.run());
+        let client = ().serve(
+            connect_mcp_socket(&socket)
+                .await
+                .expect("connect Unix socket"),
+        )
+        .await
+        .expect("real MCP handshake");
+        std::fs::rename(&database, directory.path().join("gym-unavailable.db"))
+            .expect("make database unavailable");
+
+        assert_eq!(
+            protocol_error_code(
+                client
+                    .call_tool(CallToolRequestParams::new("body_metrics"))
+                    .await
+                    .expect_err("storage failure is a protocol error"),
+            ),
+            ErrorCode::INTERNAL_ERROR
+        );
+
+        client.cancel().await.expect("close MCP client");
+        server.abort();
+        assert!(server.await.expect_err("cancel server").is_cancelled());
+    });
+}
+
+#[test]
 fn rmcp_request_decoder_rejects_malformed_frames() {
     assert!(decode_mcp_frame(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).is_ok());
     for malformed in [
@@ -198,9 +239,9 @@ proptest! {
             days: None,
             limit: None,
         }.validate().is_ok();
-        let expected = !metric.trim().is_empty()
-            && metric.trim().len() <= 64
-            && metric.trim().bytes().all(|byte| {
+        let expected = !metric.is_empty()
+            && metric.len() <= 64
+            && metric.bytes().all(|byte| {
                 byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
             });
         prop_assert_eq!(valid, expected);

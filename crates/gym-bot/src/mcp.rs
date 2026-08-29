@@ -61,7 +61,7 @@ impl BodyMetricsArgs {
     pub fn validate(self) -> Result<ValidatedBodyMetricsArgs, McpQueryError> {
         let metric = self
             .metric
-            .map(|metric| validate_metric(metric.trim()))
+            .map(|metric| validate_metric(&metric))
             .transpose()?;
         let days = self.days.unwrap_or(DEFAULT_DAYS);
         if !(1..=MAX_DAYS).contains(&days) {
@@ -219,9 +219,16 @@ impl ServerHandler for GymMcp {
         let arguments = request.arguments.unwrap_or_default();
         let args: BodyMetricsArgs = serde_json::from_value(Value::Object(arguments))
             .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
-        let rows = self
-            .body_metrics(args)
-            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
+        let rows = self.body_metrics(args).map_err(|error| match error {
+            McpQueryError::InvalidMetric
+            | McpQueryError::DaysOutOfRange(_)
+            | McpQueryError::LimitOutOfRange(_) => {
+                ErrorData::invalid_params(error.to_string(), None)
+            }
+            McpQueryError::Database(_) | McpQueryError::Sqlite(_) => {
+                ErrorData::internal_error("body_metrics storage is unavailable", None)
+            }
+        })?;
         let structured = serde_json::to_value(&rows)
             .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
         Ok(CallToolResult::structured(structured).into())

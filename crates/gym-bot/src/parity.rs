@@ -94,8 +94,23 @@ pub struct DatabaseSnapshot {
     pub schema_version: i64,
     /// Every application table, keyed deterministically by name.
     pub tables: BTreeMap<String, TableSnapshot>,
+    /// Every index, view, and trigger, keyed by type and name.
+    pub schema_objects: BTreeMap<String, SchemaObjectSnapshot>,
     /// Every foreign-key violation. A valid snapshot has none.
     pub foreign_key_violations: Vec<ForeignKeyViolation>,
+}
+
+/// One non-table object from `sqlite_schema`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SchemaObjectSnapshot {
+    /// `SQLite` object kind (`index`, `view`, or `trigger`).
+    pub kind: String,
+    /// Object name.
+    pub name: String,
+    /// Table or view the object belongs to.
+    pub table: String,
+    /// Exact DDL, absent for `SQLite`'s implicit auto-indexes.
+    pub sql: Option<String>,
 }
 
 /// Normalized schema and row state for one table.
@@ -182,6 +197,23 @@ pub fn normalize_database(path: &Path) -> Result<DatabaseSnapshot, ParityError> 
         let (name, sql) = table_row?;
         tables.insert(name.clone(), snapshot_table(&connection, &name, sql)?);
     }
+    let mut schema_objects = BTreeMap::new();
+    let mut object_statement = connection.prepare(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema \
+         WHERE type != 'table' ORDER BY type, name",
+    )?;
+    let object_rows = object_statement.query_map([], |row| {
+        Ok(SchemaObjectSnapshot {
+            kind: row.get(0)?,
+            name: row.get(1)?,
+            table: row.get(2)?,
+            sql: row.get(3)?,
+        })
+    })?;
+    for object in object_rows {
+        let object = object?;
+        schema_objects.insert(format!("{}/{}", object.kind, object.name), object);
+    }
     let mut foreign_key_violations = Vec::new();
     let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check")?;
     let rows = foreign_keys.query_map([], |row| {
@@ -199,6 +231,7 @@ pub fn normalize_database(path: &Path) -> Result<DatabaseSnapshot, ParityError> 
     Ok(DatabaseSnapshot {
         schema_version,
         tables,
+        schema_objects,
         foreign_key_violations,
     })
 }
