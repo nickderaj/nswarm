@@ -1,0 +1,201 @@
+//! Transport-neutral `/weight` command integration and property tests.
+
+mod common;
+
+use std::sync::Arc;
+
+use botkit::{SurfaceId, UpdateKey};
+use gym_bot::{
+    clock::FixedClock,
+    command::{
+        CommandInput, CommandResult, CommandService, IgnoreReason, WeightParseError,
+        parse_weight_command,
+    },
+    database::{DatabaseError, V0_GYM_SCHEMA_VERSION, open_existing},
+};
+use proptest::prelude::*;
+use rusqlite::Connection;
+
+const FIXED_TIME: &str = "2026-08-29T08:15:30+00:00";
+
+fn input(actor: &str, surface: &str, external_id: &str, text: &str) -> CommandInput {
+    CommandInput {
+        actor_id: actor.to_owned(),
+        update: UpdateKey::new(
+            SurfaceId::new(surface).expect("valid test surface"),
+            external_id,
+        )
+        .expect("valid test update"),
+        text: text.to_owned(),
+    }
+}
+
+#[test]
+fn weight_command_writes_exact_v0_intent_and_response() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let service = CommandService::new("owner", &database, Arc::new(FixedClock::new(FIXED_TIME)));
+
+    let result = service
+        .handle(&input("owner", "telegram", "41", "/weight 82.5kg"))
+        .expect("command succeeds");
+
+    assert_eq!(
+        result,
+        CommandResult::Reply("✅ Logged weight: 82.5 kg".to_owned())
+    );
+    let connection = open_existing(&database).expect("open written fixture");
+    let row = connection
+        .query_row(
+            "SELECT id, date, metric, value, unit, source FROM body_metrics",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .expect("body metric row");
+    assert_eq!(
+        row,
+        (
+            1,
+            FIXED_TIME.to_owned(),
+            "weight_kg".to_owned(),
+            82.5,
+            "kg".to_owned(),
+            "manual".to_owned()
+        )
+    );
+}
+
+#[test]
+fn owner_rejection_does_not_consume_update_or_write_state() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let service = CommandService::new("owner", &database, Arc::new(FixedClock::new(FIXED_TIME)));
+    let rejected = service
+        .handle(&input("intruder", "telegram", "42", "/weight 80"))
+        .expect("owner rejection is ordinary");
+    assert_eq!(rejected, CommandResult::Ignored(IgnoreReason::NotOwner));
+
+    let accepted = service
+        .handle(&input("owner", "telegram", "42", "/weight 80"))
+        .expect("same key remains available to owner");
+    assert_eq!(
+        accepted,
+        CommandResult::Reply("✅ Logged weight: 80 kg".to_owned())
+    );
+    assert_eq!(metric_count(&database), 1);
+}
+
+#[test]
+fn duplicate_identity_is_the_generic_surface_external_id_pair() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let service = CommandService::new("owner", &database, Arc::new(FixedClock::new(FIXED_TIME)));
+    let telegram = input("owner", "telegram", "43", "/weight 81");
+    assert!(matches!(
+        service.handle(&telegram),
+        Ok(CommandResult::Reply(_))
+    ));
+    assert_eq!(
+        service.handle(&telegram).expect("duplicate is ordinary"),
+        CommandResult::Ignored(IgnoreReason::DuplicateUpdate)
+    );
+    assert!(matches!(
+        service.handle(&input("owner", "web", "43", "/weight 81")),
+        Ok(CommandResult::Reply(_))
+    ));
+    assert_eq!(metric_count(&database), 2);
+}
+
+#[test]
+fn blank_malformed_non_finite_and_non_positive_weights_are_rejected() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let service = CommandService::new("owner", &database, Arc::new(FixedClock::new(FIXED_TIME)));
+    let invalid = [
+        "",
+        "/weight",
+        "/weight kg",
+        "/weight nope",
+        "/weight NaN",
+        "/weight inf",
+        "/weight -inf",
+        "/weight 0",
+        "/weight -0.1",
+        "/weight 80 extra",
+        "/Weight 80",
+    ];
+    for (index, text) in invalid.into_iter().enumerate() {
+        assert_eq!(
+            service
+                .handle(&input("owner", "telegram", &index.to_string(), text))
+                .expect("invalid command has usage reply"),
+            CommandResult::Reply("Usage: /weight <kg>".to_owned()),
+            "input {text:?}"
+        );
+    }
+    assert_eq!(metric_count(&database), 0);
+}
+
+#[test]
+fn existing_fixture_open_is_non_migrating_and_fail_closed() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let connection = open_existing(&database).expect("v0 fixture opens");
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("user version");
+    assert_eq!(version, V0_GYM_SCHEMA_VERSION);
+    drop(connection);
+
+    let drifted = Connection::open(&database).expect("open to induce schema drift");
+    drifted
+        .pragma_update(None, "user_version", V0_GYM_SCHEMA_VERSION + 1)
+        .expect("drift version");
+    drop(drifted);
+    assert!(matches!(
+        open_existing(&database),
+        Err(DatabaseError::SchemaVersion {
+            expected: V0_GYM_SCHEMA_VERSION,
+            actual
+        }) if actual == V0_GYM_SCHEMA_VERSION + 1
+    ));
+    assert!(matches!(
+        open_existing(&directory.path().join("missing.db")),
+        Err(DatabaseError::Sqlite(_))
+    ));
+}
+
+fn metric_count(database: &std::path::Path) -> i64 {
+    open_existing(database)
+        .expect("open fixture")
+        .query_row("SELECT count(*) FROM body_metrics", [], |row| row.get(0))
+        .expect("metric count")
+}
+
+proptest! {
+    #[test]
+    fn every_positive_finite_decimal_round_trips(value in 0.001_f64..1000.0) {
+        let text = format!("/weight {value}kg");
+        let parsed = parse_weight_command(&text).expect("positive finite property input");
+        prop_assert_eq!(parsed.kilograms.to_bits(), value.to_bits());
+    }
+
+    #[test]
+    fn arbitrary_text_never_yields_an_invalid_weight(text in ".{0,256}") {
+        if let Ok(parsed) = parse_weight_command(&text) {
+            prop_assert!(parsed.kilograms.is_finite());
+            prop_assert!(parsed.kilograms > 0.0);
+        } else {
+            prop_assert_eq!(parse_weight_command(&text), Err(WeightParseError::Usage));
+        }
+    }
+}
