@@ -217,6 +217,29 @@ fn blob_values_are_normalized_losslessly() {
 }
 
 #[test]
+fn non_utf8_text_is_normalized_losslessly_and_distinct_from_blobs() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "non-utf8.db");
+    Connection::open(&database)
+        .expect("open candidate")
+        .execute_batch(
+            "CREATE TABLE byte_values (value); \
+             INSERT INTO byte_values VALUES (CAST(x'80ff' AS TEXT)); \
+             INSERT INTO byte_values VALUES (x'80ff');",
+        )
+        .expect("insert representative byte values");
+
+    let snapshot = normalize_database(&database).expect("normalize non-UTF-8 text database");
+    assert_eq!(
+        snapshot.tables["byte_values"].rows,
+        vec![
+            vec![CellValue::NonUtf8Text("80ff".to_owned())],
+            vec![CellValue::Blob("80ff".to_owned())],
+        ]
+    );
+}
+
+#[test]
 fn foreign_key_failures_are_captured_and_diffed() {
     let directory = tempfile::tempdir().expect("tempdir");
     let expected_path = common::copy_fixture(&directory, "expected.db");

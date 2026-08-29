@@ -155,6 +155,8 @@ pub enum CellValue {
     Real(u64),
     /// UTF-8 `SQLite` text.
     Text(String),
+    /// Non-UTF-8 `SQLite` text encoded as lowercase hexadecimal.
+    NonUtf8Text(String),
     /// `SQLite` blob encoded as lowercase hexadecimal.
     Blob(String),
 }
@@ -282,7 +284,10 @@ fn normalize_cell(value: ValueRef<'_>) -> CellValue {
         ValueRef::Null => CellValue::Null,
         ValueRef::Integer(value) => CellValue::Integer(value),
         ValueRef::Real(value) => CellValue::Real(value.to_bits()),
-        ValueRef::Text(value) => CellValue::Text(String::from_utf8_lossy(value).into_owned()),
+        ValueRef::Text(value) => std::str::from_utf8(value).map_or_else(
+            |_| CellValue::NonUtf8Text(hex(value)),
+            |value| CellValue::Text(value.to_owned()),
+        ),
         ValueRef::Blob(value) => CellValue::Blob(hex(value)),
     }
 }
