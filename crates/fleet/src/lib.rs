@@ -487,12 +487,7 @@ pub fn plan_repository(
     host_root: &Path,
     secrets: &BTreeMap<String, String>,
 ) -> Result<String, ManifestError> {
-    if !host_root.is_absolute() {
-        return Err(ManifestError::PathNotAbsolute {
-            field: "host_root",
-            path: host_root.to_path_buf(),
-        });
-    }
+    require_absolute("host_root", host_root)?;
     validate_repository(repository_root)?;
     let mut output = String::new();
     for (_, manifest) in discover_manifests(repository_root)? {
@@ -642,8 +637,12 @@ fn validate_identifier(field: &'static str, value: &str) -> Result<(), ManifestE
 }
 
 fn require_absolute(field: &'static str, path: &Path) -> Result<(), ManifestError> {
-    if !path.is_absolute() {
-        return Err(ManifestError::PathNotAbsolute {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(ManifestError::UnsafeHostPath {
             field,
             path: path.to_path_buf(),
         });
@@ -655,9 +654,15 @@ fn require_absolute(field: &'static str, path: &Path) -> Result<(), ManifestErro
 fn require_safe_relative(field: &'static str, path: &Path) -> Result<(), ManifestError> {
     if path.is_absolute()
         || path.as_os_str().is_empty()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::RootDir))
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir
+                    | Component::RootDir
+                    | Component::Prefix(_)
+                    | Component::CurDir
+            )
+        })
     {
         return Err(ManifestError::UnsafeRepositoryPath {
             field,
@@ -697,9 +702,9 @@ pub enum ManifestError {
         /// Rejected value.
         value: String,
     },
-    /// Host paths must be explicit and absolute.
-    #[error("{field} must be absolute: {path}", path = .path.display())]
-    PathNotAbsolute {
+    /// Host paths must be normalized and absolute.
+    #[error("{field} must be a normalized absolute path: {path}", path = .path.display())]
+    UnsafeHostPath {
         /// Invalid manifest field.
         field: &'static str,
         /// Rejected path.
@@ -936,7 +941,7 @@ deny_paths = ["/srv/nswarm/tutor"]
                 Err(ManifestError::EmptyResourceLimit)
             ));
         }
-        for path in ["", "/absolute", "profiles/../sibling"] {
+        for path in ["", "/absolute", "profiles/../sibling", "./profiles/soul"] {
             let mut candidate = manifest.clone();
             candidate.agent.soul = PathBuf::from(path);
             assert!(matches!(
@@ -960,6 +965,42 @@ deny_paths = ["/srv/nswarm/tutor"]
                 Err(ManifestError::InvalidSecretName(name)) if name == secret
             ));
         }
+    }
+
+    #[test]
+    fn host_paths_reject_lexical_traversal_before_containment_checks() {
+        let manifest = BotManifest::parse(MANIFEST).expect("manifest validates");
+        let unsafe_path = PathBuf::from("/mnt/media/../ultron-state");
+
+        let mut candidates = Vec::new();
+        let mut candidate = manifest.clone();
+        candidate.bot.prefix = unsafe_path.clone();
+        candidates.push(("bot.prefix", candidate));
+        let mut candidate = manifest.clone();
+        candidate.bot.state = unsafe_path.clone();
+        candidates.push(("bot.state", candidate));
+        let mut candidate = manifest.clone();
+        candidate.bot.data = unsafe_path.clone();
+        candidates.push(("bot.data", candidate));
+        let mut candidate = manifest.clone();
+        candidate.surface.socket = unsafe_path.clone();
+        candidates.push(("surface.socket", candidate));
+
+        for (expected_field, candidate) in candidates {
+            assert!(matches!(
+                candidate.validate(),
+                Err(ManifestError::UnsafeHostPath { field, path })
+                    if field == expected_field && path == unsafe_path
+            ));
+        }
+
+        let mut deny_shadow = manifest;
+        deny_shadow.sandbox.deny_paths = vec![unsafe_path.clone()];
+        assert!(matches!(
+            deny_shadow.validate(),
+            Err(ManifestError::UnsafeHostPath { field: "sandbox.deny_paths", path })
+                if path == unsafe_path
+        ));
     }
 
     #[test]
@@ -1098,6 +1139,44 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         assert!(unit.contains("IPAddressDeny=any"));
         assert!(unit.contains("IPAddressAllow=localhost"));
         assert!(unit.contains("User=hermes-gateway"));
+    }
+
+    #[test]
+    fn gateway_and_planning_roots_reject_lexical_traversal() {
+        let source = r#"
+user = "hermes-gateway"
+prefix = "/opt/nswarm/hermes"
+state = "/var/lib/hermes-gateway"
+port = 8642
+revision = "v2026.8.19"
+secrets_allow = ["OPENROUTER_API_KEY"]
+"#;
+        let gateway = GatewayManifest::parse(source).expect("gateway validates");
+        let unsafe_path = PathBuf::from("/mnt/media/../ultron-state");
+
+        for (expected_field, candidate) in {
+            let mut prefix = gateway.clone();
+            prefix.prefix = unsafe_path.clone();
+            let mut state = gateway;
+            state.state = unsafe_path.clone();
+            [("prefix", prefix), ("state", state)]
+        } {
+            assert!(matches!(
+                candidate.validate(),
+                Err(ManifestError::UnsafeHostPath { field, path })
+                    if field == expected_field && path == unsafe_path
+            ));
+        }
+
+        assert!(matches!(
+            plan_repository(
+                std::path::Path::new("unused-repository"),
+                &unsafe_path,
+                &BTreeMap::new(),
+            ),
+            Err(ManifestError::UnsafeHostPath { field: "host_root", path })
+                if path == unsafe_path
+        ));
     }
 
     #[test]
