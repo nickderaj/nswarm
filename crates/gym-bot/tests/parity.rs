@@ -9,8 +9,8 @@ use gym_bot::{
     clock::FixedClock,
     command::{CommandInput, CommandResult, CommandService},
     parity::{
-        DifferenceAllowList, ParityError, ParityIntent, apply_v0_intent, compare_snapshots,
-        normalize_database,
+        CellValue, DifferenceAllowList, ParityError, ParityIntent, apply_v0_intent,
+        compare_snapshots, normalize_database,
     },
 };
 use rusqlite::Connection;
@@ -198,6 +198,22 @@ fn column_value_drift_is_detected_without_an_allow_list() {
     assert!(differences.iter().any(|diff| {
         diff.path.starts_with("/tables/body_metrics/rows/0/") && diff.expected != diff.actual
     }));
+}
+
+#[test]
+fn blob_values_are_normalized_losslessly() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "blob.db");
+    Connection::open(&database)
+        .expect("open candidate")
+        .execute_batch("CREATE TABLE blobs (value BLOB); INSERT INTO blobs VALUES (x'00ff10');")
+        .expect("insert representative blob");
+
+    let snapshot = normalize_database(&database).expect("normalize blob database");
+    assert_eq!(
+        snapshot.tables["blobs"].rows,
+        vec![vec![CellValue::Blob("00ff10".to_owned())]]
+    );
 }
 
 #[test]

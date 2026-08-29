@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use botkit::{SurfaceId, UpdateKey};
 use gym_bot::{
-    clock::FixedClock,
+    clock::{Clock, FixedClock, SystemClock},
     command::{
         CommandInput, CommandResult, CommandService, IgnoreReason, WeightParseError,
         parse_weight_command,
@@ -35,6 +35,7 @@ fn weight_command_writes_exact_v0_intent_and_response() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
     let service = CommandService::new("owner", &database, Arc::new(FixedClock::new(FIXED_TIME)));
+    assert_eq!(service.database_path(), database);
 
     let result = service
         .handle(&input("owner", "telegram", "41", "/weight 82.5kg"))
@@ -72,6 +73,14 @@ fn weight_command_writes_exact_v0_intent_and_response() {
             "manual".to_owned()
         )
     );
+}
+
+#[test]
+fn production_clock_returns_rfc3339_utc_with_microseconds() {
+    let timestamp = SystemClock.now_iso8601();
+    assert!(timestamp.ends_with('Z'));
+    assert_eq!(timestamp.matches('.').count(), 1);
+    chrono::DateTime::parse_from_rfc3339(&timestamp).expect("production clock is RFC-3339");
 }
 
 #[test]
@@ -171,6 +180,19 @@ fn existing_fixture_open_is_non_migrating_and_fail_closed() {
     assert!(matches!(
         open_existing(&directory.path().join("missing.db")),
         Err(DatabaseError::Sqlite(_))
+    ));
+
+    let invalid_foreign_key = common::copy_fixture(&directory, "invalid-fk.db");
+    Connection::open(&invalid_foreign_key)
+        .expect("open fixture to induce foreign-key drift")
+        .execute_batch(
+            "PRAGMA foreign_keys=OFF; \
+             INSERT INTO session_items (session_id, position, movement_id) VALUES (99, 1, 88);",
+        )
+        .expect("insert invalid foreign keys while enforcement is off");
+    assert!(matches!(
+        open_existing(&invalid_foreign_key),
+        Err(DatabaseError::ForeignKeyViolations(2))
     ));
 }
 

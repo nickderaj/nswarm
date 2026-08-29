@@ -46,6 +46,12 @@ fn production_query_filters_and_caps_rows() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].date, FIXED_TIME);
     assert_eq!(rows[0].metric, "weight_kg");
+
+    let all_rows = service
+        .body_metrics(BodyMetricsArgs::default())
+        .expect("default unfiltered query");
+    assert_eq!(all_rows.len(), 3);
+    assert_eq!(all_rows[2].metric, "resting_hr");
 }
 
 #[test]
