@@ -731,37 +731,46 @@ teloxide types at a recorded-update adapter edge and accepts neutral actor,
 `(surface, external_id)`, and text input in its command core. `/weight <kg>`
 uses an injected clock, checks the configured owner before idempotency, rejects
 blank, malformed, non-finite, zero, and negative values, writes the frozen v0
-`body_metrics` intent, and returns the equivalent plain-text response.
+`body_metrics` intent, and matches Python's six-significant-digit success
+format. A separate SQLite sidecar persists generic update identities across
+service restarts without changing the v0 gym schema.
 
 The production MCP handler exposes exactly one bounded, read-only
 `body_metrics` tool. An actual rmcp client and server negotiate and exchange
 requests over a temporary Unix socket; contract tests reject malformed frames,
 unknown tools, invalid bounds, and unavailable storage, verify the tools-only
-capability map, and prove socket cleanup. No filesystem, shell, raw SQL,
+capability map, prove socket cleanup, refuse a public runtime directory, and on
+Linux enforce socket mode `0600`. No filesystem, shell, raw SQL,
 arbitrary network, resource, prompt, sampling, or Hermes surface is exposed.
 
-The parity corpus contains a schema-v1 fixed-time `log_body_weight` intent and
-an empty sanitized schema-v5 SQLite fixture reconstructed from frozen v0 commit
-`2d7052011c17bd028fdae0fdfd521918c11de560`. Independent baseline and candidate
-adapters apply the intent to isolated copies. Deterministic snapshots compare
+The parity corpus contains a schema-v1 fixed-time `log_body_weight` intent, an
+empty sanitized schema-v5 SQLite fixture reconstructed from frozen v0 commit
+`2d7052011c17bd028fdae0fdfd521918c11de560`, and a golden row captured by that
+commit's real `ActivityRepository.log_metric`. CI layers the committed golden
+row onto the empty schema; it does not regenerate expected state from v1 SQL.
+The candidate converts the fixed instant through the production configured-zone
+clock. Deterministic snapshots compare
 `user_version`, all 15 application tables, columns, exact DDL, eight indexes,
 all losslessly normalized row values, and foreign-key violations with an empty
 nondeterminism allow-list. Deliberate tests detect missing and extra rows,
 unexpected tables, column/index/schema-version/value drift, and foreign-key
-failures. The parity gate needs neither the sibling v0 checkout nor its Python
-environment.
+failures, including a deliberate UTC-text regression. The parity gate needs
+neither the sibling v0 checkout nor its Python environment.
 
-Fresh focused evidence at checkpoint `146bbff`: strict gym Clippy passes and 24
-gym tests pass, including two real Unix-socket protocol tests, four property
-tests, recorded Telegram-shaped inputs, fixture open/version checks, positive
-parity, and deliberate mismatch cases. The fixture regenerates byte-for-byte.
+Fresh focused evidence at checkpoint `0cc7f8c`: strict gym Clippy passes and 32
+gym tests pass, including real Unix-socket protocol tests, four property tests,
+recorded Telegram-shaped inputs, startup/schema checks, positive parity, and
+deliberate mismatch cases. Fixture verification compares normalized dumps,
+schema version, and integrity across SQLite library versions. `cargo deny check`
+passes after removing an abandoned docs-only macro from the graph and recording
+only exact-package license and duplicate-major exceptions.
 
 This checkpoint does not prove live Telegram polling or delivery, Raspberry Pi
-execution, live socket ownership/mode or ACLs, systemd behavior, durable
-cross-restart update idempotency, Hermes compatibility, private-database
-operation, or cutover readiness. Full clean-target `just ci`, exact-final-SHA
-GitHub jobs, independent review, and a security-approved disposition for the
-expanded dependency graph remain pending. The exact-pinned teloxide graph
-currently includes an unmaintained compile-time transitive dependency with no
-safe upgrade; it must not be hidden by a fabricated audit or blanket policy
-exception.
+execution, Fleet-assigned socket group ownership, systemd behavior, Hermes
+compatibility, private-database operation, or cutover readiness. The Step 2
+parser deliberately omits bare `/weight` history and rejects trailing tokens
+and Python underscore numerics. MCP accept retry, connection caps, handshake
+timeouts, and stale-socket recovery remain pre-deployment work. Full
+clean-target `just ci`, exact-final-SHA GitHub jobs, independent re-review, and
+an explicitly approved cargo-vet trust disposition for the expanded graph
+remain pending.
