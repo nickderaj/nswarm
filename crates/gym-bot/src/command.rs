@@ -142,9 +142,29 @@ impl CommandService {
         )?;
         Ok(CommandResult::Reply(format!(
             "✅ Logged weight: {} kg",
-            parsed.kilograms
+            format_v0_general(parsed.kilograms)
         )))
     }
+}
+
+fn format_v0_general(value: f64) -> String {
+    const SIGNIFICANT_DIGITS: usize = 6;
+    let scientific = format!("{value:.precision$e}", precision = SIGNIFICANT_DIGITS - 1);
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("Rust scientific formatting always contains an exponent");
+    let exponent: i32 = exponent
+        .parse()
+        .expect("Rust scientific formatting always emits an integer exponent");
+    if !(-4..i32::try_from(SIGNIFICANT_DIGITS).expect("small precision")).contains(&exponent) {
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+        return format!("{mantissa}e{exponent:+03}");
+    }
+    let decimal_places =
+        usize::try_from(i32::try_from(SIGNIFICANT_DIGITS - 1).expect("small precision") - exponent)
+            .expect("fixed notation has a non-negative decimal count");
+    let fixed = format!("{value:.decimal_places$}");
+    fixed.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 /// A validated body-weight command.

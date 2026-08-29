@@ -82,6 +82,39 @@ fn weight_command_writes_exact_v0_intent_and_response() {
 }
 
 #[test]
+fn weight_success_response_matches_python_general_formatting() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let service = CommandService::new(
+        "owner",
+        &database,
+        directory.path().join("processed.db"),
+        Arc::new(FixedClock::new(FIXED_TIME)),
+    )
+    .expect("command service");
+    for (index, (value, expected)) in [
+        ("1234567", "1.23457e+06"),
+        ("82.123456789", "82.1235"),
+        ("0.00001", "1e-05"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            service
+                .handle(&input(
+                    "owner",
+                    "telegram",
+                    &format!("format-{index}"),
+                    &format!("/weight {value}"),
+                ))
+                .expect("formatted command"),
+            CommandResult::Reply(format!("✅ Logged weight: {expected} kg"))
+        );
+    }
+}
+
+#[test]
 fn production_clock_returns_rfc3339_in_the_configured_zone() {
     let timestamp = SystemClock::new("Europe/London")
         .expect("installed IANA zone")
