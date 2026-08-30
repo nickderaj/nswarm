@@ -2,8 +2,32 @@
   "schema_version": 1,
   "source": {
     "repository": "nickderaj/ultron",
+    "commit_sha": "2d7052011c17bd028fdae0fdfd521918c11de560",
     "path": "apps/gym",
-    "frozen_schema_version": 5
+    "frozen_schema_version": 5,
+    "surface_sha256": {
+      "telegram_commands": "ad67dbefc11d544431d7e7239f8ce38488d81638fe72eb52fd9590c4d184c7e5",
+      "mcp_tools": "fed4a2b38c25898fe7c4e224ae1fea2caf165e3882c7595d5096fe50a1fb27a7"
+    },
+    "source_files": {
+      "apps/gym/src/gym/__main__.py": "68ba3877ee9d511643f881f8951e5f369c6a7950a6685cf47c599204f50af041",
+      "apps/gym/src/gym/agent/mcp_server.py": "c7e58e739d129c76f6b58ba686d0ca16934bcbe1c1c5f7d657cdb8f30dc2bfde",
+      "apps/gym/src/gym/agent/server.py": "d2889841bef21865340c8a32310546bc5b94a8897d40a6b2a194bd0577a06fba",
+      "apps/gym/src/gym/config.py": "e0a70ae967826d95f80cb5e7ed0f3b6677a2c0b374aa4523e6d0cd3b519053de",
+      "apps/gym/src/gym/controllers/gym_controller.py": "88755ecf3f52d3e912da5dc7c3bc8ce2be6f240ff17f9bd991b335d86fef95f4",
+      "apps/gym/src/gym/db/migrations.py": "46a626ddca2e946eb6291701ad5e6b58f9cc2df11685f132092d3382d1d685eb",
+      "apps/gym/src/gym/db/schema.py": "3ab8de4524a5d1b222ee65c968362dfaa53f1c76e07a75a9c90a46896744ddc4",
+      "apps/gym/src/gym/importers/health.py": "df4952d0696f29aa887e24e7216728ea12569c8a089b1dc914904ab257aa36b6",
+      "apps/gym/src/gym/importers/receiver.py": "0e191eeef6208390f7faceb98806b4c30b4e0adca646bee0d2ccd0dcbafef97d",
+      "apps/gym/src/gym/repositories/activity.py": "877b310be5f381a834e9ff88515a31b62596d523cbad119f8fa37e17e0d18180",
+      "apps/gym/src/gym/repositories/strength.py": "df56ac07d0f068e2b86bd6022e27553a1e7a6c1a0642c3d3b7d2c992d8eb0187",
+      "apps/gym/src/gym/services/batch_service.py": "70b68e44a45a6e03b93c0b177e89b71a9dd3854ccb332b95dbc0b4a4069d6730",
+      "apps/gym/src/gym/services/coach_service.py": "4b608f80d5060d9799437e84af1ab44dbc27af618f816f76df6091890da27232",
+      "apps/gym/src/gym/services/export_service.py": "e42b01249a9b54832c1cfcb12e1d2c763be5368f10b7530a514472fd797ec625",
+      "apps/gym/src/gym/services/hermes_service.py": "53739eb8ea8f5a626f306992af610ba2723f253f62c14ec5b32032710b37a786",
+      "apps/gym/src/gym/services/reflection_service.py": "25201e692cef09487ec644ebcb5300cd669bfaeabe7a08a1d0f95e053b917538",
+      "docs/refactor/V1_REBUILD_PLAN.md": "14ba3c1c951389e9b744c67cbc9ca781eee669220deb3b2ca43b5ebf52ecee8f"
+    }
   },
   "dispositions": {
     "step2": "Already supplied by the merged Step 2 slice.",
@@ -16,10 +40,18 @@
     {
       "id": "telegram.commands",
       "category": "telegram",
-      "surface": ["gym", "cardio", "run", "weight", "batch", "plan", "plans", "rate", "adherence", "cost", "sync", "export", "import_zip", "preference", "help"],
+      "surface": ["gym", "cardio", "run", "weight", "batch", "plan", "plans", "rate", "adherence", "cost", "sync", "export", "preference", "help"],
       "source_refs": ["apps/gym/src/gym/__main__.py:46-62", "apps/gym/src/gym/__main__.py:400-421"],
       "disposition": "ported",
       "reason": "Port transport-neutral parsing and service calls; keep Telegram types at the adapter edge."
+    },
+    {
+      "id": "telegram.approval-callback",
+      "category": "telegram",
+      "surface": ["gym-preference:<id>:accept", "gym-preference:<id>:reject", "owner guard", "processed update dedup", "single-review transition"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:418", "apps/gym/src/gym/__main__.py:236-259", "apps/gym/src/gym/__main__.py:630-638", "apps/gym/src/gym/services/reflection_service.py:109-129"],
+      "disposition": "ported",
+      "reason": "Decode Keep/Reject callback queries at the Telegram edge, preserve generic update identity for owner guard and deduplication, and apply an idempotent SQLite review transition."
     },
     {
       "id": "telegram.owner-dedup",
@@ -40,10 +72,10 @@
     {
       "id": "telegram.free-text-batch",
       "category": "telegram",
-      "surface": ["non-command text", "durable batch append", "20-message auto-flush trigger"],
+      "surface": ["non-command text", "durable batch append"],
       "source_refs": ["apps/gym/src/gym/__main__.py:179-202", "apps/gym/src/gym/services/batch_service.py:13-81"],
       "disposition": "ported",
-      "reason": "Batch routing is deterministic and remains available without an agent."
+      "reason": "Deterministic batch routing and durable append remain available; extraction and automatic flush are owned by telegram.free-text-agent and scheduler.batch-retry."
     },
     {
       "id": "telegram.free-text-agent",
@@ -90,16 +122,16 @@
       "category": "scheduler",
       "surface": ["persisted batch claims", "manual retry", "restart recovery", "snapshot discard", "12-hour due scan"],
       "source_refs": ["apps/gym/src/gym/services/batch_service.py:13-81", "apps/gym/src/gym/__main__.py:505-603"],
-      "disposition": "ported",
-      "reason": "Failed extraction retains the buffer; successful snapshot discard does not delete messages appended concurrently."
+      "disposition": "blocked_d23",
+      "reason": "Durable claims, snapshots, restart recovery, and concurrent-append-safe completion are ported, but production retry and due-scan processing require the D23-blocked extraction path."
     },
     {
       "id": "scheduler.maintenance",
       "category": "scheduler",
       "surface": ["Health staleness notice", "nightly reflection claim", "morning approval prompt"],
       "source_refs": ["apps/gym/src/gym/__main__.py:604-651", "apps/gym/src/gym/services/reflection_service.py:64-94"],
-      "disposition": "ported",
-      "reason": "Port deterministic claims and restart behavior; agent-backed reflection remains unavailable under D23."
+      "disposition": "blocked_d23",
+      "reason": "The deterministic storage primitives are ported, but the production scheduler is deferred with the D23-blocked nightly reflection workflow."
     },
     {
       "id": "health.receiver",
@@ -120,7 +152,7 @@
     {
       "id": "health.zip-backfill",
       "category": "health",
-      "surface": ["owner-only export.zip import", "basename-only archive selection"],
+      "surface": ["import_zip", "owner-only export.zip import", "basename-only archive selection"],
       "source_refs": ["apps/gym/src/gym/__main__.py:347-365", "apps/gym/src/gym/importers/health.py:140-261"],
       "disposition": "deferred",
       "reason": "The HTTP receiver and deterministic JSON contract cover parallel operation; large private Apple export ingestion is not required to start the disposable trial."
@@ -144,7 +176,7 @@
     {
       "id": "config.startup",
       "category": "runtime",
-      "surface": ["required Telegram token", "required owner ID", "timezone", "data root", "Health receiver", "learning hours", "migrations before polling"],
+      "surface": ["required Telegram token", "required owner ID", "timezone", "data root", "Health receiver", "frozen schema validation before polling"],
       "source_refs": ["apps/gym/src/gym/config.py:14-95", "apps/gym/src/gym/__main__.py:67-90", "apps/gym/src/gym/__main__.py:535-564"],
       "disposition": "ported",
       "reason": "Validate secret presence without logging values, open only the explicit copied database, and stop services gracefully."
