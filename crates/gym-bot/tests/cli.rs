@@ -27,7 +27,7 @@ fn binary_rejects_arguments_and_missing_settings_without_secret_output() {
 #[test]
 fn binary_validates_disposable_database_before_binding_socket() {
     let directory = tempfile::tempdir().expect("tempdir");
-    std::fs::set_permissions(directory.path(), Permissions::from_mode(0o750))
+    std::fs::set_permissions(directory.path(), Permissions::from_mode(0o2750))
         .expect("group-readable runtime directory");
     let database = common::copy_fixture(&directory, "gym.db");
     let output = Command::new(env!("CARGO_BIN_EXE_gym-bot"))

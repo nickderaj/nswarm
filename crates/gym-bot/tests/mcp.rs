@@ -30,6 +30,11 @@ fn public_server_wrappers_accept_real_mcp_connections() {
         let directory = tempfile::tempdir().expect("tempdir");
         let database = common::copy_fixture(&directory, "gym.db");
         let socket = private_socket_path(&directory);
+        std::fs::set_permissions(
+            socket.parent().expect("socket parent"),
+            std::fs::Permissions::from_mode(0o2750),
+        )
+        .expect("setgid socket parent");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
