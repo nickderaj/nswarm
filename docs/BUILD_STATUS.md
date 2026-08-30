@@ -1,5 +1,15 @@
 # nswarm v1 build status
 
+## Checkpoint Z — Step 4 gym parallel-run candidate
+
+PR #5 is based directly on merged PR #4
+`b150ced3e77bfc83d47d3e75bb11864eebe0e72b`. The implementation and remaining
+external gates are recorded in [`gym/STEP4_STATUS.md`](gym/STEP4_STATUS.md).
+The v0 checkout remains read-only and no production credential or private gym
+database has been accessed. D23/D24 remain unresolved, so conversation behavior
+is explicitly unavailable rather than built against the invalidated warm-agent
+assumption.
+
 Updated: 2026-08-30 (Europe/London). Active branch:
 `codex/post-step3-followups`, based directly on merged PR #3 main
 `c8c1b69390f607be7f0ae895441b2141c74a3d93`.

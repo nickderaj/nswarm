@@ -15,6 +15,7 @@ done
 python3 scripts/policy_check.py
 python3 scripts/check_gym_inventory.py
 python3 -m unittest scripts/test_gym_sqlite_copy.py
+python3 -m unittest scripts/test_gym_socket_contract.py
 ./scripts/run_gym_parity.sh
 python3 scripts/validate_profiles.py
 ./scripts/check_generated.sh

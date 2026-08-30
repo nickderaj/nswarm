@@ -1,15 +1,15 @@
 # gym-bot
 
-The Step 2 vertical slice for gym: a transport-neutral `/weight <kg>` command,
-a type-only `teloxide` adapter, a single read-only `body_metrics` MCP tool over
-a Unix socket, and the v0/v1 SQLite-state parity harness.
+The Step 4 gym port builds on the Step 2 slice with transport-neutral strength,
+cardio, body-metric, plan, preference, batch and Health services; recorded
+Telegram/HTTP adapter contracts; the reviewed 13-tool MCP surface; and expanded
+v0/v1 SQLite-state parity.
 
-The spike refuses to bind outside an owner-only `0700` runtime directory and
-sets and verifies socket mode `0600` on every supported Unix platform. Fleet
-remains responsible for the eventual service group. Moving to the intended
-shared `0750` directory and `0660` socket is a deliberate later change: set and
-verify group ownership first, then relax both the private-parent check and the
-socket-mode enforcement together.
+The runtime requires a non-world-accessible group-readable parent and sets mode
+`0660` on `/run/gym/mcp.sock`. Fleet renders `RuntimeDirectoryMode=0750`,
+`UMask=0007`, and the dedicated `gym-access` group. D23/D24 remain unresolved,
+so `boss-agent` is the only authorized peer and no Hermes gateway identity is
+granted yet.
 
 This is a spike, not a deployable Telegram bot. It performs no Telegram polling
 or delivery and does not include Hermes. Generic `(surface, external_id)` update

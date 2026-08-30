@@ -49,6 +49,10 @@ macOS cannot validate Linux users, groups or systemd sandbox behavior. On a
 throwaway Linux host, then on the Pi, run the committed Fleet/socket verifier
 before starting the trial. Do not claim production readiness until it proves:
 
+```console
+sudo scripts/verify_gym_socket_linux.sh /run/gym/mcp.sock gym-access
+```
+
 - `/run/gym` is not world-accessible;
 - `/run/gym/mcp.sock` is group-owned by `gym-access` with mode `0660`;
 - only `boss-agent` and the selected gateway identity, once D23/D24 approve one,

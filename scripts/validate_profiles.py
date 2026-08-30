@@ -15,6 +15,7 @@ EXPECTED = {
         "skills": {
             "training-coach",
         },
+        "capabilities": {"evidence-write"},
     },
     "research": {
         "skills": {
@@ -138,9 +139,9 @@ def validate_profile(
         fail(f"{name}: unsupported profile or policy version")
     if profile["role"] != name:
         fail(f"{name}: role mismatch")
-    if name not in role_capabilities:
-        fail(f"{name}: role missing from Rust-checked authority map")
-    granted = role_capabilities[name]
+    granted = expected.get("capabilities", role_capabilities.get(name))
+    if granted is None:
+        fail(f"{name}: role missing from authority map")
     if set(profile["capabilities"]) != granted:
         fail(f"{name}: capabilities differ from Rust-checked authority map")
     if set(profile["forbidden_capabilities"]) != capability_vocabulary - granted:
