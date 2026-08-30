@@ -11,6 +11,7 @@
 pub mod clock;
 pub mod command;
 pub mod database;
+pub mod health;
 pub mod mcp;
 pub mod parity;
 pub mod service;
