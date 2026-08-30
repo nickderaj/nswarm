@@ -12,10 +12,13 @@ belong in this repository.
 ## Current status
 
 Step 1 merged as `ac4bfd5f35a1aa2fbbf76ed46f84e7644ca7b049` in PR #1.
-Step 2 is in progress on `codex/step2-gym-spike`: a transport-neutral gym
-command, bounded read-only MCP-over-Unix-socket surface, and sanitized
-SQLite-state parity harness. See
-[`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md) for verified checkpoints and
+Step 2 merged as `5d3f7ef4cb449df3cd9a90d4742a651140c6f3d9` in PR #2.
+Step 3 is an architecture-gate spike on `codex/step3-hermes-spike`. The pinned
+Hermes `v2026.8.19` HTTP session route constructs a fresh `AIAgent` for every
+request, including repeated turns on one explicit session ID. D23 and §6.3
+must therefore be revisited before any `botkit` conversation code is written.
+See [`docs/HERMES_SPIKE.md`](docs/HERMES_SPIKE.md) for the reproducible evidence
+and [`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md) for verified checkpoints and
 remaining gates.
 
 ## Tenancy
