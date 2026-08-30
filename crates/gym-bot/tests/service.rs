@@ -248,7 +248,13 @@ fn new_deterministic_writes_propagate_storage_failures() {
         } else {
             service.handle(&request(action))
         };
-        assert!(matches!(result, Err(ServiceError::Sqlite(_))), "{action}");
+        assert!(
+            matches!(
+                result,
+                Err(ServiceError::Sqlite(_) | ServiceError::Batch(_))
+            ),
+            "{action}"
+        );
     }
 }
 

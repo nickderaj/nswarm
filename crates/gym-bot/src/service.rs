@@ -7,12 +7,13 @@ use std::{
     sync::Arc,
 };
 
-use chrono::{DateTime, Duration, FixedOffset};
+use chrono::{DateTime, FixedOffset};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
+    batch::{BatchError, BatchService},
     clock::Clock,
     command::{WeightParseError, parse_weight_command},
     database::{DatabaseError, open_existing},
@@ -307,7 +308,7 @@ impl GymService {
 
     fn batch(
         &self,
-        connection: &Connection,
+        _connection: &Connection,
         request: &ServiceRequest,
         text: &str,
     ) -> Result<String, ServiceError> {
@@ -319,13 +320,10 @@ impl GymService {
         if tokens.next().is_some() {
             return Ok(BATCH_USAGE.to_owned());
         }
+        let batch = BatchService::new(&self.database_path);
         match subcommand.as_str() {
             "status" => {
-                let (count, earliest): (i64, Option<String>) = connection.query_row(
-                    "SELECT count(*), min(sent_at) FROM batch_buffer WHERE chat_id=?1",
-                    [chat_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )?;
+                let (count, earliest) = batch.status(chat_id)?;
                 Ok(format!(
                     "Batch: {count} messages{}",
                     earliest
@@ -334,49 +332,26 @@ impl GymService {
                 ))
             }
             "cancel" => {
-                let transaction = connection.unchecked_transaction()?;
-                let count: i64 = transaction.query_row(
-                    "SELECT count(*) FROM batch_buffer WHERE chat_id=?1",
-                    [chat_id],
-                    |row| row.get(0),
-                )?;
-                transaction.execute("DELETE FROM batch_buffer WHERE chat_id=?1", [chat_id])?;
-                transaction.execute("DELETE FROM batch_state WHERE chat_id=?1", [chat_id])?;
-                transaction.commit()?;
+                let count = batch.cancel(chat_id)?;
                 Ok(format!("Cancelled batch with {count} buffered messages."))
             }
-            "flush" | "retry" => batch_flush_reply(connection, chat_id),
+            "flush" | "retry" => batch_flush_reply(&batch, chat_id),
             "toggle" => {
-                let active = connection
-                    .query_row(
-                        "SELECT 1 FROM batch_state WHERE chat_id=?1",
-                        [chat_id],
-                        |_| Ok(()),
-                    )
-                    .optional()?
-                    .is_some();
+                let active = batch.active(chat_id)?;
                 if active {
-                    batch_flush_reply(connection, chat_id)
+                    batch_flush_reply(&batch, chat_id)
                 } else {
-                    self.open_batch(connection, chat_id)
+                    self.open_batch(&batch, chat_id)
                 }
             }
-            "open" => self.open_batch(connection, chat_id),
+            "open" => self.open_batch(&batch, chat_id),
             _ => Ok(BATCH_USAGE.to_owned()),
         }
     }
 
-    fn open_batch(&self, connection: &Connection, chat_id: i64) -> Result<String, ServiceError> {
+    fn open_batch(&self, batch: &BatchService, chat_id: i64) -> Result<String, ServiceError> {
         let now = DateTime::<FixedOffset>::parse_from_rfc3339(&self.clock.now_iso8601())?;
-        connection.execute(
-            "INSERT INTO batch_state (chat_id,opened_at,auto_flush_at) VALUES (?1,?2,?3) \
-             ON CONFLICT(chat_id) DO UPDATE SET opened_at=excluded.opened_at,auto_flush_at=excluded.auto_flush_at",
-            params![
-                chat_id,
-                now.to_rfc3339(),
-                (now + Duration::hours(12)).to_rfc3339()
-            ],
-        )?;
+        batch.open(chat_id, now)?;
         Ok(
             "Batch opened. Send entries as normal messages; use /batch again when ready."
                 .to_owned(),
@@ -431,12 +406,8 @@ impl GymService {
     }
 }
 
-fn batch_flush_reply(connection: &Connection, chat_id: i64) -> Result<String, ServiceError> {
-    let count: i64 = connection.query_row(
-        "SELECT count(*) FROM batch_buffer WHERE chat_id=?1",
-        [chat_id],
-        |row| row.get(0),
-    )?;
+fn batch_flush_reply(batch: &BatchService, chat_id: i64) -> Result<String, ServiceError> {
+    let (count, _) = batch.status(chat_id)?;
     Ok(if count == 0 {
         "No active batch.".to_owned()
     } else {
@@ -773,6 +744,9 @@ pub enum ServiceError {
     /// A deterministic read or write failed.
     #[error("gym service storage failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// Durable batch storage failed.
+    #[error(transparent)]
+    Batch(#[from] BatchError),
     /// The injected clock did not return the documented RFC-3339 shape.
     #[error("gym service clock returned an invalid timestamp: {0}")]
     Time(#[from] chrono::ParseError),

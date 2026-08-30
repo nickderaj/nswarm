@@ -50,6 +50,41 @@ impl BatchService {
         Ok(())
     }
 
+    /// Returns the buffered count and earliest source timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BatchError`] when storage is unavailable.
+    pub fn status(&self, chat_id: i64) -> Result<(usize, Option<String>), BatchError> {
+        let connection = open_existing(&self.database_path)?;
+        let (count, earliest): (i64, Option<String>) = connection.query_row(
+            "SELECT count(*), min(sent_at) FROM batch_buffer WHERE chat_id=?1",
+            [chat_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((
+            usize::try_from(count).map_err(|_| BatchError::CountOutOfRange)?,
+            earliest,
+        ))
+    }
+
+    /// Reports whether a batch is open for the conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BatchError`] when storage is unavailable.
+    pub fn active(&self, chat_id: i64) -> Result<bool, BatchError> {
+        let connection = open_existing(&self.database_path)?;
+        Ok(connection
+            .query_row(
+                "SELECT 1 FROM batch_state WHERE chat_id=?1",
+                [chat_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     /// Adds one source message exactly once while the batch is active.
     ///
     /// # Errors
@@ -65,18 +100,10 @@ impl BatchService {
         if text.trim().is_empty() || text.len() > 10_000 {
             return Err(BatchError::InvalidEntry);
         }
-        let connection = open_existing(&self.database_path)?;
-        let active = connection
-            .query_row(
-                "SELECT 1 FROM batch_state WHERE chat_id=?1",
-                [chat_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !active {
+        if !self.active(chat_id)? {
             return Ok(false);
         }
+        let connection = open_existing(&self.database_path)?;
         Ok(connection.execute(
             "INSERT INTO batch_buffer (chat_id,message_id,text,sent_at) VALUES (?1,?2,?3,?4) \
              ON CONFLICT(chat_id,message_id) DO NOTHING",
