@@ -758,20 +758,28 @@ unexpected tables, column/index/schema-version/value drift, and foreign-key
 failures, including a deliberate UTC-text regression. The parity gate needs
 neither the sibling v0 checkout nor its Python environment.
 
-Fresh focused evidence at checkpoint `0cc7f8c`: strict gym Clippy passes and 32
-gym tests pass, including real Unix-socket protocol tests, four property tests,
-recorded Telegram-shaped inputs, startup/schema checks, positive parity, and
-deliberate mismatch cases. Fixture verification compares normalized dumps,
-schema version, and integrity across SQLite library versions. `cargo deny check`
-passes after removing an abandoned docs-only macro from the graph and recording
-only exact-package license and duplicate-major exceptions.
+Fresh local evidence against code checkpoint `201261d`: all 38 gym tests and
+131 workspace tests pass, including real Unix-socket protocol tests on macOS,
+four property tests, recorded Telegram-shaped inputs, startup/schema checks,
+positive parity, and deliberate mismatch cases. The complete `just ci` gate
+passes both from the ordinary target and a brand-new isolated target, covering
+strict Clippy and rustdoc, generated and policy checks, feature powerset,
+deny/vet/machete, coverage, and semver checks. Coverage is 94.44% for `gym-bot`,
+97.02% repository-wide, 95.55% across changed executable lines, and 296/296
+configured critical branch outcomes. Focused mutation tests process all 126 gym
+mutants with 63 caught, 63 unviable, and zero survivors or timeouts.
+
+The expanded dependency graph passes all four Cargo Deny categories. Cargo Vet
+reports 46 fully audited packages, 12 partially audited packages, and 156
+explicit exemptions using the configured imported audit registries. The
+repository-local Aquamarine shim displaces an abandoned docs-only macro chain;
+its graph-wide and non-propagating publication limitations and upstream removal
+trigger are documented beside the shim.
 
 This checkpoint does not prove live Telegram polling or delivery, Raspberry Pi
 execution, Fleet-assigned socket group ownership, systemd behavior, Hermes
 compatibility, private-database operation, or cutover readiness. The Step 2
 parser deliberately omits bare `/weight` history and rejects trailing tokens
 and Python underscore numerics. MCP accept retry, connection caps, handshake
-timeouts, and stale-socket recovery remain pre-deployment work. Full
-clean-target `just ci`, exact-final-SHA GitHub jobs, independent re-review, and
-an explicitly approved cargo-vet trust disposition for the expanded graph
-remain pending.
+timeouts, and stale-socket recovery remain pre-deployment work. Exact-final-SHA
+GitHub jobs and independent re-review remain pending.
