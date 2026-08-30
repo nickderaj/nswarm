@@ -129,3 +129,35 @@ fn every_batch_operation_fails_closed_when_storage_disappears() {
     assert!(batch.snapshot(1).is_err());
     assert!(batch.cancel(1).is_err());
 }
+
+#[test]
+fn batch_mutations_propagate_sql_failures() {
+    for operation in ["open", "append", "complete", "cancel"] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = common::copy_fixture(&directory, "gym.db");
+        let connection = rusqlite::Connection::open(&database).expect("fixture");
+        connection
+            .execute_batch(match operation {
+                "open" => "CREATE TRIGGER fail BEFORE INSERT ON batch_state BEGIN SELECT RAISE(ABORT,'fixture'); END",
+                "append" => "INSERT INTO batch_state VALUES (1,'now','later'); CREATE TRIGGER fail BEFORE INSERT ON batch_buffer BEGIN SELECT RAISE(ABORT,'fixture'); END",
+                "complete" => "INSERT INTO batch_state VALUES (1,'now','later'); INSERT INTO batch_buffer (chat_id,message_id,text,sent_at) VALUES (1,1,'x','now'); CREATE TRIGGER fail BEFORE DELETE ON batch_buffer BEGIN SELECT RAISE(ABORT,'fixture'); END",
+                "cancel" => "INSERT INTO batch_state VALUES (1,'now','later'); CREATE TRIGGER fail BEFORE DELETE ON batch_state BEGIN SELECT RAISE(ABORT,'fixture'); END",
+                _ => unreachable!(),
+            })
+            .expect("failure fixture");
+        drop(connection);
+        let batch = BatchService::new(database);
+        let result = match operation {
+            "open" => batch.open(1, at("2026-08-30T09:00:00+01:00")),
+            "append" => batch
+                .append(1, 1, "x", at("2026-08-30T09:00:00+01:00"))
+                .map(|_| ()),
+            "complete" => batch
+                .snapshot(1)
+                .and_then(|snapshot| batch.complete(1, &snapshot)),
+            "cancel" => batch.cancel(1).map(|_| ()),
+            _ => unreachable!(),
+        };
+        assert!(result.is_err(), "{operation}");
+    }
+}
