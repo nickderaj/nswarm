@@ -227,11 +227,7 @@ impl BotManifest {
             "RuntimeDirectoryMode=0750".to_owned(),
             "Restart=on-failure".to_owned(),
             "RestartSec=5s".to_owned(),
-            if self.surface.socket_group.is_empty() {
-                "UMask=0077".to_owned()
-            } else {
-                "UMask=0007".to_owned()
-            },
+            "UMask=0007".to_owned(),
             "NoNewPrivileges=true".to_owned(),
             "CapabilityBoundingSet=".to_owned(),
             "AmbientCapabilities=".to_owned(),
@@ -1053,20 +1049,6 @@ deny_paths = ["/srv/nswarm/tutor"]
                 Err(ManifestError::InvalidSocketGroup | ManifestError::InvalidIdentifier { .. })
             ));
         }
-    }
-
-    #[test]
-    fn empty_internal_socket_group_retains_private_umask_rendering() {
-        let mut manifest = BotManifest::parse(MANIFEST).expect("manifest");
-        manifest.surface.socket_group.clear();
-        assert_eq!(
-            if manifest.surface.socket_group.is_empty() {
-                "UMask=0077"
-            } else {
-                "UMask=0007"
-            },
-            "UMask=0077"
-        );
     }
 
     #[test]

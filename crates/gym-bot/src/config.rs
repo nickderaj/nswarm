@@ -159,9 +159,7 @@ mod tests {
 
     #[test]
     fn environment_loader_executes_without_exposing_values() {
-        let result = GymConfig::from_env();
-        if let Err(error) = result {
-            assert!(!error.to_string().contains("synthetic-secret"));
-        }
+        let error = GymConfig::from_env().expect_err("test environment has no gym token");
+        assert!(!error.to_string().contains("synthetic-secret"));
     }
 }
