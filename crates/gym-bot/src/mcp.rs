@@ -335,10 +335,11 @@ impl McpServer {
         validate_existing(&database_path)?;
         ensure_private_socket_parent(&socket_path)?;
         let listener = UnixListener::bind(&socket_path)?;
+        let guard = SocketGuard(socket_path.clone());
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
         Ok(Self {
             listener,
-            _guard: SocketGuard(socket_path),
+            _guard: guard,
             database_path,
             clock,
         })

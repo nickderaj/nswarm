@@ -4,12 +4,12 @@ The Step 2 vertical slice for gym: a transport-neutral `/weight <kg>` command,
 a type-only `teloxide` adapter, a single read-only `body_metrics` MCP tool over
 a Unix socket, and the v0/v1 SQLite-state parity harness.
 
-The spike refuses to bind outside an owner-only runtime directory and sets and
-verifies socket mode `0600` on every supported Unix platform. Fleet remains
-responsible for assigning the eventual service group. Moving to the intended
+The spike refuses to bind outside an owner-only `0700` runtime directory and
+sets and verifies socket mode `0600` on every supported Unix platform. Fleet
+remains responsible for the eventual service group. Moving to the intended
 shared `0750` directory and `0660` socket is a deliberate later change: set and
-verify the group ownership first, then relax both the private-parent check and
-the socket-mode enforcement together.
+verify group ownership first, then relax both the private-parent check and the
+socket-mode enforcement together.
 
 This is a spike, not a deployable Telegram bot. It performs no Telegram polling
 or delivery and does not include Hermes. Generic `(surface, external_id)` update

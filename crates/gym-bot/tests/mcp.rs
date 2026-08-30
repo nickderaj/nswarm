@@ -179,7 +179,7 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
         let bound = McpServer::bind(&socket, &database, Arc::new(FixedClock::new(FIXED_TIME)))
             .expect("bind production socket");
         assert!(socket.exists());
-        assert_private_socket_mode(&socket);
+        assert_private_socket_boundary(&socket);
         let server = tokio::spawn(bound.run());
         let stream = connect_mcp_socket(&socket)
             .await
@@ -360,8 +360,16 @@ fn private_socket_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
     socket_directory.join("mcp.sock")
 }
 
-#[cfg(target_os = "linux")]
-fn assert_private_socket_mode(socket: &std::path::Path) {
+fn assert_private_socket_boundary(socket: &std::path::Path) {
+    assert_eq!(
+        std::fs::metadata(socket.parent().expect("socket parent"))
+            .expect("socket parent metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "the portable access boundary is private to its service identity"
+    );
     assert_eq!(
         std::fs::metadata(socket)
             .expect("socket metadata")
@@ -372,9 +380,6 @@ fn assert_private_socket_mode(socket: &std::path::Path) {
         "the Step 2 socket is private to its service identity"
     );
 }
-
-#[cfg(not(target_os = "linux"))]
-const fn assert_private_socket_mode(_socket: &std::path::Path) {}
 
 fn protocol_error_code(error: ServiceError) -> ErrorCode {
     match error {
