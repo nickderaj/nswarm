@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -11,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+MSRV_RESOLVER_ENV = "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS"
 
 
 def command(
@@ -43,6 +46,13 @@ def package_delta(
 ) -> tuple[list[str], list[str]]:
     """Return new and removed package identities in deterministic order."""
     return sorted(current_names - baseline_names), sorted(baseline_names - current_names)
+
+
+def semver_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """Use Cargo's MSRV-aware resolver for semver-checks scratch packages."""
+    configured = dict(environment)
+    configured[MSRV_RESOLVER_ENV] = "fallback"
+    return configured
 
 
 def current_workspace_package_names() -> set[str]:
@@ -128,7 +138,12 @@ def main() -> int:
     for package in new_packages:
         print(f"semver: {package} is new; establishing its initial public API baseline")
         semver.extend(("--exclude", package))
-    subprocess.run(semver, cwd=ROOT, check=True)
+    subprocess.run(
+        semver,
+        cwd=ROOT,
+        check=True,
+        env=semver_environment(os.environ),
+    )
     return 0
 
 

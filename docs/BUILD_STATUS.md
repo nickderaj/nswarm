@@ -1,8 +1,8 @@
 # nswarm v1 build status
 
-Updated: 2026-08-29 (Europe/London). Active branch:
-`codex/step2-gym-spike`, based directly on merged main
-`ac4bfd5f35a1aa2fbbf76ed46f84e7644ca7b049`.
+Updated: 2026-08-30 (Europe/London). Active branch:
+`codex/step3-hermes-spike`, based directly on merged PR #2 main
+`5d3f7ef4cb449df3cd9a90d4742a651140c6f3d9`.
 The frozen `ultron` v0 checkout has not been modified, staged, committed,
 deployed, restarted, or used as a source of private state.
 
@@ -798,3 +798,69 @@ parser deliberately omits bare `/weight` history and rejects trailing tokens
 and Python underscore numerics. MCP accept retry, connection caps, handshake
 timeouts, and stale-socket recovery remain pre-deployment work. Exact-final-SHA
 GitHub jobs and independent re-review remain pending.
+
+## Checkpoint X — Step 3 Hermes HTTP architecture gate
+
+PR #2 was verified merged into protected `origin/main` at
+`5d3f7ef4cb449df3cd9a90d4742a651140c6f3d9` before the Step 3 branch was
+created. The frozen v0 checkout remained clean and read-only.
+
+The reviewed Hermes pin is `v2026.8.19`: annotated tag object
+`b05e680e63d39d5a8e3ec0f5842a41d1c4209c03`, peeled source commit
+`fcbd1076a93841fa88855acce810e342a5b78101`, package `hermes-agent==0.20.5`,
+Python `>=3.11,<3.14`. Relevant source and lockfile bytes are fail-closed
+SHA-256 pins.
+
+The first Step 3 gate failed. The authenticated
+`POST /api/sessions/{id}/chat` handler calls `_run_agent`, which constructs a
+fresh `AIAgent` unconditionally for every request. The API adapter has no agent
+cache; only the native messaging path uses the gateway's LRU. MCP discovery is
+process-wide, and the exact system prompt can be restored from SQLite after its
+first construction, but each request still rebuilds the agent object, memory,
+tool snapshot and in-memory state.
+
+The deterministic route harness used the pinned Python 3.12.12 environment on
+Darwin arm64, an ephemeral loopback listener, temporary state, explicit session
+IDs, real aiohttp/SessionDB/executor code and a fake local provider boundary.
+Thirty new-session samples measured 0.347/0.390/0.411/0.584/0.654 ms
+(min/median/mean/p95/max). Thirty repeated-session samples measured
+0.338/0.359/0.372/0.433/0.446 ms. The separate global route prime was
+90.796 ms. All 62 chat calls invoked the factory; the 31 repeated-session calls
+created 31 distinct agent instances. These numbers are route overhead, not
+live-provider, real-agent-construction, growing-transcript, provider-cache or
+Pi latency. The new/repeated classes exercise the same fake-agent path and are
+not represented as actual cold/warm agent-construction measurements.
+
+The full authenticated `/v1/capabilities` response and its canonical hash are
+committed with the raw samples. Contract tests fail if the response, pin,
+source call graph, sample summaries, outcome or sanitization drifts.
+
+Decision: D23/§6.3 must be revisited before any `botkit` conversation code.
+D24 was not reached and remains unevaluated. In required measurement order,
+the two-profile multiplex gateway, Pi RSS/latency, credential/profile/tool/socket
+isolation, dedicated-user Linux sandbox, gym MCP attachment and prompt-size
+phases were intentionally not run. No fallback topology is selected without
+that evidence. See [`HERMES_SPIKE.md`](HERMES_SPIKE.md) for method, exact
+limitations and the first blocked Pi rerun command.
+
+Crates.io owner lookup was attempted with `cargo owner --list nswarm`; the
+registry required an owner token and no credential was supplied. Reserving or
+publishing `nswarm` remains a separate owner action and did not block this safe
+spike work.
+
+Local validation passed the exact source verifier, eleven evidence-integrity
+and derivation checks, policy,
+profile and generated-file checks, Fleet validation, formatting, check, eval,
+Clippy, all 131 Rust tests, rustdoc, feature-power-set checks, deny, vet,
+machete, coverage and semver unit tests. Repository coverage was 97.02%, with
+296/296 marked critical branch outcomes covered. The previously red standard
+semver comparison is repaired by applying Cargo's MSRV-aware resolver fallback
+inside the semver runner. Its unlocked scratch packages now select transitive
+versions compatible with Rust 1.90; the comparison passes all four shared
+crates locally without changing the workspace lock, MSRV, or semver policy.
+
+The full source verifier now compares the annotated tag object as well as the
+peeled commit and source bytes. Committed checks exercise tag-object drift and
+evidence derivation, but core CI deliberately does not fetch the external
+Hermes repository; exact source-byte/call-graph verification remains a required
+run against a checked-out source tree.

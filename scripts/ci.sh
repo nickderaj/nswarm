@@ -33,4 +33,5 @@ python3 scripts/check_coverage.py target/coverage.json origin/main
 
 require_command cargo-semver-checks
 python3 -m unittest scripts/test_check_semver.py
+python3 -m unittest scripts/test_hermes_gateway_spike.py
 python3 scripts/check_semver.py origin/main
