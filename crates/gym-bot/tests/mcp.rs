@@ -43,12 +43,11 @@ fn public_server_wrappers_accept_real_mcp_connections() {
         runtime.block_on(async {
             let clock = Arc::new(FixedClock::new(FIXED_TIME));
             let server = if group_aware {
-                tokio::spawn(run_mcp_server_for_group(
-                    socket.clone(),
-                    current_group(),
-                    database,
-                    clock,
-                ))
+                let group = directory_group(socket.parent().expect("socket parent"));
+                let server_socket = socket.clone();
+                tokio::spawn(async move {
+                    run_mcp_server_for_group(server_socket, &group, database, clock).await
+                })
             } else {
                 tokio::spawn(run_mcp_server(socket.clone(), database, clock))
             };
@@ -68,27 +67,21 @@ fn public_server_wrappers_accept_real_mcp_connections() {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn current_group() -> &'static str {
-    use std::sync::OnceLock;
-    static GROUP: OnceLock<String> = OnceLock::new();
-    GROUP.get_or_init(|| {
-        String::from_utf8(
-            std::process::Command::new("id")
-                .arg("-gn")
-                .output()
-                .expect("query group")
-                .stdout,
-        )
+fn directory_group(path: &std::path::Path) -> String {
+    let output = std::process::Command::new("stat")
+        .args(if cfg!(target_os = "linux") {
+            ["-c", "%G"]
+        } else {
+            ["-f", "%Sg"]
+        })
+        .arg(path)
+        .output()
+        .expect("query directory group");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
         .expect("UTF-8 group")
         .trim()
         .to_owned()
-    })
-}
-
-#[cfg(not(target_os = "linux"))]
-const fn current_group() -> &'static str {
-    "fixture-group"
 }
 
 #[test]

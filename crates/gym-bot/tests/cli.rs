@@ -35,7 +35,7 @@ fn binary_validates_disposable_database_before_binding_socket() {
         .env("GYM_DATA_DIR", directory.path())
         .env("TIMEZONE", "Europe/London")
         .env("NSWARM_MCP_SOCKET", "/definitely/missing/mcp.sock")
-        .env("NSWARM_MCP_SOCKET_GROUP", primary_group())
+        .env("NSWARM_MCP_SOCKET_GROUP", directory_group(directory.path()))
         .output()
         .expect("run configured binary");
     assert!(!output.status.success());
@@ -68,7 +68,7 @@ fn configured_binary_reaches_bound_runtime_and_stays_alive() {
         .env("GYM_DATA_DIR", directory.path())
         .env("TIMEZONE", "UTC")
         .env("NSWARM_MCP_SOCKET", directory.path().join("mcp.sock"))
-        .env("NSWARM_MCP_SOCKET_GROUP", primary_group())
+        .env("NSWARM_MCP_SOCKET_GROUP", directory_group(directory.path()))
         .spawn()
         .expect("start configured service");
     std::thread::sleep(Duration::from_millis(100));
@@ -77,11 +77,16 @@ fn configured_binary_reaches_bound_runtime_and_stays_alive() {
     child.wait().expect("reap service");
 }
 
-fn primary_group() -> String {
-    let output = Command::new("id")
-        .arg("-gn")
+fn directory_group(path: &std::path::Path) -> String {
+    let output = Command::new("stat")
+        .args(if cfg!(target_os = "linux") {
+            ["-c", "%G"]
+        } else {
+            ["-f", "%Sg"]
+        })
+        .arg(path)
         .output()
-        .expect("query primary group");
+        .expect("query directory group");
     assert!(output.status.success());
     String::from_utf8(output.stdout)
         .expect("group name is UTF-8")
