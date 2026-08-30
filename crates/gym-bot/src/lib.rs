@@ -13,4 +13,5 @@ pub mod command;
 pub mod database;
 pub mod mcp;
 pub mod parity;
+pub mod service;
 pub mod telegram;
