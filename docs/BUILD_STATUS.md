@@ -739,8 +739,9 @@ The production MCP handler exposes exactly one bounded, read-only
 `body_metrics` tool. An actual rmcp client and server negotiate and exchange
 requests over a temporary Unix socket; contract tests reject malformed frames,
 unknown tools, invalid bounds, and unavailable storage, verify the tools-only
-capability map, prove socket cleanup, refuse a public runtime directory, and on
-Linux enforce socket mode `0600`. No filesystem, shell, raw SQL,
+capability map, prove socket cleanup, refuse a public runtime directory, and
+enforce socket mode `0600` on every supported Unix platform. No filesystem,
+shell, raw SQL,
 arbitrary network, resource, prompt, sampling, or Hermes surface is exposed.
 
 The parity corpus contains a schema-v1 fixed-time `log_body_weight` intent, an
