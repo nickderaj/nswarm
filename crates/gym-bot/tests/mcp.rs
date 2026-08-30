@@ -11,8 +11,8 @@ use gym_bot::{
     clock::FixedClock,
     database::open_existing,
     mcp::{
-        BodyMetricsArgs, GymMcp, MAX_DAYS, MAX_LIMIT, MAX_METRIC_LENGTH, McpQueryError, McpServer,
-        capability_summary, connect_mcp_socket, decode_mcp_frame,
+        BodyMetricsArgs, GYM_TOOL_NAMES, GymMcp, MAX_DAYS, MAX_LIMIT, MAX_METRIC_LENGTH,
+        McpQueryError, McpServer, capability_summary, connect_mcp_socket, decode_mcp_frame,
     },
 };
 use proptest::prelude::*;
@@ -245,25 +245,7 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
             ])
         );
 
-        let listed = client
-            .list_tools(None)
-            .await
-            .expect("tools/list over socket");
-        assert_eq!(listed.tools.len(), 1);
-        let tool = &listed.tools[0];
-        assert_eq!(tool.name, "body_metrics");
-        assert_eq!(
-            tool.annotations
-                .as_ref()
-                .and_then(|value| value.read_only_hint),
-            Some(true)
-        );
-        assert_eq!(tool.input_schema["additionalProperties"], false);
-        assert_eq!(tool.input_schema["properties"]["days"]["maximum"], MAX_DAYS);
-        assert_eq!(
-            tool.input_schema["properties"]["limit"]["maximum"],
-            MAX_LIMIT
-        );
+        assert_reviewed_tool_list(&client).await;
 
         let result = client
             .call_tool(
@@ -276,6 +258,8 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
         let structured = result.structured_content.expect("structured body metrics");
         assert_eq!(structured.as_array().expect("row array").len(), 1);
         assert_eq!(structured[0]["value"], 82.5);
+
+        assert_reviewed_write(&client).await;
 
         assert_eq!(
             protocol_error_code(
@@ -308,6 +292,57 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
             "socket guard removes cancelled server path"
         );
     });
+}
+
+async fn assert_reviewed_tool_list(client: &rmcp::service::RunningService<rmcp::RoleClient, ()>) {
+    let listed = client
+        .list_tools(None)
+        .await
+        .expect("tools/list over socket");
+    assert_eq!(
+        listed
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<std::collections::BTreeSet<_>>(),
+        GYM_TOOL_NAMES.into_iter().collect()
+    );
+    let tool = listed
+        .tools
+        .iter()
+        .find(|tool| tool.name == "body_metrics")
+        .expect("body_metrics tool");
+    assert_eq!(
+        tool.annotations
+            .as_ref()
+            .and_then(|value| value.read_only_hint),
+        Some(true)
+    );
+    assert_eq!(tool.input_schema["additionalProperties"], false);
+    assert_eq!(tool.input_schema["properties"]["days"]["maximum"], MAX_DAYS);
+    assert_eq!(
+        tool.input_schema["properties"]["limit"]["maximum"],
+        MAX_LIMIT
+    );
+}
+
+async fn assert_reviewed_write(client: &rmcp::service::RunningService<rmcp::RoleClient, ()>) {
+    let preference = client
+        .call_tool(
+            CallToolRequestParams::new("record_preference").with_arguments(arguments(
+                &serde_json::json!({
+                    "key":"warmup",
+                    "value":"short",
+                    "evidence":"owner stated this in the current turn"
+                }),
+            )),
+        )
+        .await
+        .expect("reviewed write over socket");
+    assert_eq!(
+        preference.structured_content.expect("write result")["id"],
+        1
+    );
 }
 
 #[test]

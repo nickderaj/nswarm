@@ -18,7 +18,7 @@ use rmcp::{
     },
     service::RequestContext,
 };
-use rusqlite::params;
+use rusqlite::{Connection, OptionalExtension, params, types::ValueRef};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -26,7 +26,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::{
     clock::Clock,
-    database::{DatabaseError, open_existing_read_only, validate_existing},
+    database::{DatabaseError, open_existing, open_existing_read_only, validate_existing},
 };
 
 /// Default v0-compatible lookback in days.
@@ -39,6 +39,22 @@ pub const DEFAULT_LIMIT: u16 = 200;
 pub const MAX_LIMIT: u16 = 200;
 /// Maximum accepted metric-name length.
 pub const MAX_METRIC_LENGTH: usize = 64;
+/// Exact reviewed v0 gym MCP allow-list.
+pub const GYM_TOOL_NAMES: [&str; 13] = [
+    "recent_sets",
+    "exercise_catalogue",
+    "volume_summary",
+    "body_metrics",
+    "recent_runs",
+    "pace_trend",
+    "interval_history",
+    "heart_rate_series",
+    "weekly_load",
+    "preferences",
+    "record_preference",
+    "propose_plan",
+    "plan_feedback",
+];
 
 /// Unix byte stream used by the rmcp client/server transport.
 pub type McpSocketStream = UnixStream;
@@ -215,7 +231,7 @@ impl ServerHandler for GymMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("nswarm-gym", env!("CARGO_PKG_VERSION")))
-            .with_instructions("One bounded read-only body_metrics tool; no other surfaces")
+            .with_instructions("Reviewed gym tools only; no resources, prompts, sampling, filesystem, shell, network, or raw SQL")
     }
 
     fn list_tools(
@@ -223,9 +239,7 @@ impl ServerHandler for GymMcp {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, ErrorData>> + Send + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(vec![
-            body_metrics_tool(),
-        ])))
+        std::future::ready(Ok(ListToolsResult::with_all_items(gym_tools())))
     }
 
     async fn call_tool(
@@ -233,65 +247,303 @@ impl ServerHandler for GymMcp {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        if request.name != "body_metrics" {
+        if !GYM_TOOL_NAMES.contains(&request.name.as_ref()) {
             return Err(ErrorData::new(
                 ErrorCode::METHOD_NOT_FOUND,
                 "unknown gym tool",
                 None,
             ));
         }
-        let arguments = request.arguments.unwrap_or_default();
-        let args: BodyMetricsArgs = serde_json::from_value(Value::Object(arguments))
-            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
-        let rows = self.body_metrics(args).map_err(|error| match error {
-            McpQueryError::InvalidMetric
-            | McpQueryError::DaysOutOfRange(_)
-            | McpQueryError::LimitOutOfRange(_) => {
-                ErrorData::invalid_params(error.to_string(), None)
-            }
-            McpQueryError::Database(_)
-            | McpQueryError::Sqlite(_)
-            | McpQueryError::StoredTimestamp(_) => {
-                ErrorData::internal_error("body_metrics storage is unavailable", None)
-            }
-            McpQueryError::ClockTimestamp(_) | McpQueryError::ClockOutOfRange => {
-                ErrorData::internal_error("body_metrics clock is invalid", None)
-            }
-        })?;
-        let structured = serde_json::to_value(&rows)
-            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        let arguments = Value::Object(request.arguments.unwrap_or_default());
+        if request.name == "body_metrics" {
+            let args: BodyMetricsArgs = serde_json::from_value(arguments)
+                .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
+            let rows = self.body_metrics(args).map_err(|error| match error {
+                McpQueryError::InvalidMetric
+                | McpQueryError::DaysOutOfRange(_)
+                | McpQueryError::LimitOutOfRange(_) => {
+                    ErrorData::invalid_params(error.to_string(), None)
+                }
+                McpQueryError::Database(_)
+                | McpQueryError::Sqlite(_)
+                | McpQueryError::StoredTimestamp(_) => {
+                    ErrorData::internal_error("body_metrics storage is unavailable", None)
+                }
+                McpQueryError::ClockTimestamp(_) | McpQueryError::ClockOutOfRange => {
+                    ErrorData::internal_error("body_metrics clock is invalid", None)
+                }
+            })?;
+            let structured = serde_json::to_value(&rows)
+                .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+            return Ok(CallToolResult::structured(structured).into());
+        }
+        let structured = self
+            .call_reviewed_tool(&request.name, &arguments)
+            .map_err(|error| match error {
+                McpToolError::Invalid(message) => ErrorData::invalid_params(message, None),
+                McpToolError::Storage(_) => {
+                    ErrorData::internal_error("gym tool storage is unavailable", None)
+                }
+            })?;
         Ok(CallToolResult::structured(structured).into())
     }
 }
 
-fn body_metrics_tool() -> Tool {
-    let schema: JsonObject = serde_json::from_value(json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "metric": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": MAX_METRIC_LENGTH,
-                "pattern": "^[a-z0-9_]+$"
-            },
-            "days": {"type": "integer", "minimum": 1, "maximum": MAX_DAYS},
-            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT}
+impl GymMcp {
+    fn call_reviewed_tool(&self, name: &str, arguments: &Value) -> Result<Value, McpToolError> {
+        let connection = open_existing_read_only(&self.database_path)?;
+        let object = arguments
+            .as_object()
+            .ok_or_else(|| McpToolError::Invalid("arguments must be an object".to_owned()))?;
+        match name {
+            "recent_sets" => query_json(
+                &connection,
+                "SELECT s.started_at, m.name AS exercise, e.reps, e.weight_kg, e.rpe \
+                 FROM efforts e JOIN session_items i ON i.id=e.session_item_id \
+                 JOIN sessions s ON s.id=i.session_id JOIN movements m ON m.id=i.movement_id \
+                 WHERE m.modality='strength' ORDER BY s.started_at DESC, e.position DESC LIMIT ?1",
+                [rusqlite::types::Value::Integer(bounded(object, "limit", 200, 1, 200)?)],
+            ),
+            "exercise_catalogue" => no_arguments(object).and_then(|()| query_json_no_params(&connection,
+                "SELECT m.name AS exercise, m.muscle_groups, m.equipment, max(s.started_at) AS last_done, \
+                 max(e.weight_kg) AS best_weight_kg, max(e.reps) AS best_reps FROM movements m \
+                 LEFT JOIN session_items i ON i.movement_id=m.id LEFT JOIN sessions s ON s.id=i.session_id \
+                 LEFT JOIN efforts e ON e.session_item_id=i.id WHERE m.modality='strength' \
+                 GROUP BY m.id ORDER BY last_done DESC, m.name")),
+            "volume_summary" => query_json(&connection,
+                "SELECT strftime('%Y-%W', s.started_at) AS week, coalesce(m.muscle_groups, 'unclassified') AS muscle_groups, \
+                 count(e.id) AS hard_sets, sum(coalesce(e.reps,0)*coalesce(e.weight_kg,0)) AS tonnage, \
+                 count(DISTINCT s.id) AS sessions FROM efforts e JOIN session_items i ON i.id=e.session_item_id \
+                 JOIN sessions s ON s.id=i.session_id JOIN movements m ON m.id=i.movement_id \
+                 WHERE m.modality='strength' GROUP BY week, muscle_groups ORDER BY week DESC, muscle_groups LIMIT ?1",
+                [rusqlite::types::Value::Integer(bounded(object, "weeks", 8, 1, 52)? * 53)]),
+            "recent_runs" => query_json(&connection,
+                "SELECT s.started_at, s.source, m.name AS activity, e.duration_s, e.distance_m, e.avg_hr, \
+                 CASE WHEN e.distance_m > 0 THEN e.duration_s/(e.distance_m/1000.0) END AS seconds_per_km \
+                 FROM efforts e JOIN session_items i ON i.id=e.session_item_id JOIN sessions s ON s.id=i.session_id \
+                 JOIN movements m ON m.id=i.movement_id WHERE m.modality='cardio' ORDER BY s.started_at DESC LIMIT 200", []),
+            "pace_trend" => query_json_no_params(&connection,
+                "SELECT s.started_at, m.name AS activity, e.distance_m, e.duration_s, e.avg_hr, \
+                 e.duration_s/(e.distance_m/1000.0) AS seconds_per_km FROM efforts e \
+                 JOIN session_items i ON i.id=e.session_item_id JOIN sessions s ON s.id=i.session_id \
+                 JOIN movements m ON m.id=i.movement_id WHERE m.modality='cardio' AND e.distance_m > 0 \
+                 ORDER BY s.started_at DESC LIMIT 200"),
+            "interval_history" => query_json(&connection,
+                "SELECT s.started_at, m.name AS activity, x.position, x.distance_m, x.duration_s, x.avg_hr \
+                 FROM effort_splits x JOIN session_items i ON i.id=x.session_item_id JOIN sessions s ON s.id=i.session_id \
+                 JOIN movements m ON m.id=i.movement_id ORDER BY s.started_at DESC, x.position LIMIT ?1",
+                [rusqlite::types::Value::Integer(bounded(object, "limit", 100, 1, 200)?)]),
+            "heart_rate_series" => query_json(&connection,
+                "SELECT s.started_at, m.name AS activity, h.at, h.bpm FROM hr_samples h \
+                 JOIN session_items i ON i.id=h.session_item_id JOIN sessions s ON s.id=i.session_id \
+                 JOIN movements m ON m.id=i.movement_id ORDER BY s.started_at DESC, h.at LIMIT ?1",
+                [rusqlite::types::Value::Integer(bounded(object, "samples", 5000, 1, 5000)?)]),
+            "weekly_load" => query_json_no_params(&connection,
+                "SELECT substr(s.started_at,1,10) AS day, count(DISTINCT s.id) AS sessions, \
+                 sum(coalesce(e.reps,0)*coalesce(e.weight_kg,0)) AS tonnage, sum(coalesce(e.distance_m,0)) AS distance_m \
+                 FROM efforts e JOIN session_items i ON i.id=e.session_item_id JOIN sessions s ON s.id=i.session_id \
+                 GROUP BY day ORDER BY day DESC LIMIT 364"),
+            "preferences" => no_arguments(object).and_then(|()| query_json_no_params(&connection,
+                "SELECT key, value, confidence, source, evidence FROM preferences WHERE active=1 ORDER BY updated_at DESC LIMIT 200")),
+            "record_preference" => record_preference(&self.database_path, object),
+            "propose_plan" => propose_plan(&self.database_path, object),
+            "plan_feedback" => plan_feedback(&connection, object),
+            _ => Err(McpToolError::Invalid("unknown gym tool".to_owned())),
         }
-    }))
-    .expect("static tool schema is an object");
-    Tool::new(
-        "body_metrics",
-        "Read recent body metrics with bounded filters",
-        schema,
+    }
+}
+
+fn gym_tools() -> Vec<Tool> {
+    GYM_TOOL_NAMES
+        .into_iter()
+        .map(|name| {
+            let write = matches!(name, "record_preference" | "propose_plan");
+            Tool::new(
+                name,
+                format!("Reviewed gym {name} operation"),
+                generic_schema(name),
+            )
+            .with_annotations(
+                ToolAnnotations::new()
+                    .read_only(!write)
+                    .destructive(false)
+                    .idempotent(!write)
+                    .open_world(false),
+            )
+        })
+        .collect()
+}
+
+fn generic_schema(name: &str) -> JsonObject {
+    let properties = match name {
+        "body_metrics" => {
+            json!({"metric":{"type":"string","minLength":1,"maxLength":MAX_METRIC_LENGTH,"pattern":"^[a-z0-9_]+$"},"days":{"type":"integer","minimum":1,"maximum":MAX_DAYS},"limit":{"type":"integer","minimum":1,"maximum":MAX_LIMIT}})
+        }
+        "record_preference" => {
+            json!({"key":{"type":"string","minLength":1,"maxLength":80},"value":{"type":"string","minLength":1,"maxLength":500},"evidence":{"type":"string","minLength":1,"maxLength":1000}})
+        }
+        "propose_plan" => {
+            json!({"focus":{"type":"string","minLength":1,"maxLength":200},"rationale":{"type":"string","minLength":1,"maxLength":2000},"items":{"type":"array","minItems":1,"maxItems":20}})
+        }
+        "plan_feedback" => json!({"plan_id":{"type":"integer","minimum":1}}),
+        _ => json!({}),
+    };
+    serde_json::from_value(
+        json!({"type":"object","additionalProperties":false,"properties":properties}),
     )
-    .with_annotations(
-        ToolAnnotations::new()
-            .read_only(true)
-            .destructive(false)
-            .idempotent(true)
-            .open_world(false),
-    )
+    .expect("static schema")
+}
+
+fn no_arguments(object: &serde_json::Map<String, Value>) -> Result<(), McpToolError> {
+    if object.is_empty() {
+        Ok(())
+    } else {
+        Err(McpToolError::Invalid(
+            "tool accepts no arguments".to_owned(),
+        ))
+    }
+}
+
+fn bounded(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    default: i64,
+    min: i64,
+    max: i64,
+) -> Result<i64, McpToolError> {
+    let value = object.get(key).map_or(Ok(default), |value| {
+        value
+            .as_i64()
+            .ok_or_else(|| McpToolError::Invalid(format!("{key} must be an integer")))
+    })?;
+    if (min..=max).contains(&value) {
+        Ok(value)
+    } else {
+        Err(McpToolError::Invalid(format!(
+            "{key} must be between {min} and {max}"
+        )))
+    }
+}
+
+fn query_json_no_params(connection: &Connection, sql: &str) -> Result<Value, McpToolError> {
+    query_json(connection, sql, [])
+}
+
+fn query_json<const N: usize>(
+    connection: &Connection,
+    sql: &str,
+    params: [rusqlite::types::Value; N],
+) -> Result<Value, McpToolError> {
+    let mut statement = connection.prepare(sql)?;
+    let names = statement
+        .column_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(params), |row| {
+            let mut object = serde_json::Map::new();
+            for (index, name) in names.iter().enumerate() {
+                let value = match row.get_ref(index)? {
+                    ValueRef::Null => Value::Null,
+                    ValueRef::Integer(value) => json!(value),
+                    ValueRef::Real(value) => json!(value),
+                    ValueRef::Text(value) => {
+                        Value::String(String::from_utf8_lossy(value).into_owned())
+                    }
+                    ValueRef::Blob(_) => Value::String("<blob>".to_owned()),
+                };
+                object.insert(name.clone(), value);
+            }
+            Ok(Value::Object(object))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Value::Array(rows))
+}
+
+fn required_string(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    max: usize,
+) -> Result<String, McpToolError> {
+    let value = object
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= max)
+        .ok_or_else(|| McpToolError::Invalid(format!("{key} must be 1..={max} characters")))?;
+    Ok(value.to_owned())
+}
+
+fn record_preference(
+    path: &Path,
+    object: &serde_json::Map<String, Value>,
+) -> Result<Value, McpToolError> {
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "key" | "value" | "evidence"))
+    {
+        return Err(McpToolError::Invalid("unknown preference field".to_owned()));
+    }
+    let connection = open_existing(path)?;
+    connection.execute("INSERT INTO preferences (key,value,confidence,source,evidence,active,reviewed_at) VALUES (?1,?2,1.0,'stated',?3,1,CURRENT_TIMESTAMP)", params![required_string(object,"key",80)?,required_string(object,"value",500)?,required_string(object,"evidence",1000)?])?;
+    Ok(json!({"id":connection.last_insert_rowid()}))
+}
+
+fn propose_plan(
+    path: &Path,
+    object: &serde_json::Map<String, Value>,
+) -> Result<Value, McpToolError> {
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "focus" | "rationale" | "items" | "for_date"))
+    {
+        return Err(McpToolError::Invalid("unknown plan field".to_owned()));
+    }
+    let focus = required_string(object, "focus", 200)?;
+    let rationale = required_string(object, "rationale", 2000)?;
+    let items = object
+        .get("items")
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty() && items.len() <= 20)
+        .ok_or_else(|| McpToolError::Invalid("items must contain 1..=20 entries".to_owned()))?;
+    let plan = json!({"focus":focus,"rationale":rationale,"items":items});
+    let connection = open_existing(path)?;
+    connection.execute(
+        "INSERT INTO workout_plans (for_date,focus,plan_json,rationale) VALUES (?1,?2,?3,?4)",
+        params![
+            object.get("for_date").and_then(Value::as_str),
+            focus,
+            plan.to_string(),
+            rationale
+        ],
+    )?;
+    Ok(json!({"id":connection.last_insert_rowid(),"plan":plan}))
+}
+
+fn plan_feedback(
+    connection: &Connection,
+    object: &serde_json::Map<String, Value>,
+) -> Result<Value, McpToolError> {
+    if object.keys().any(|key| key != "plan_id") {
+        return Err(McpToolError::Invalid("unknown feedback field".to_owned()));
+    }
+    let id = bounded(object, "plan_id", 0, 1, i64::MAX)?;
+    connection.query_row("SELECT status,rating,feedback FROM workout_plans WHERE id=?1", [id], |row| Ok(json!({"id":id,"status":row.get::<_,String>(0)?,"rating":row.get::<_,Option<i64>>(1)?,"feedback":row.get::<_,Option<String>>(2)?}))).optional()?.ok_or_else(|| McpToolError::Invalid(format!("unknown plan: {id}")))
+}
+
+#[derive(Debug, Error)]
+enum McpToolError {
+    #[error("{0}")]
+    Invalid(String),
+    #[error(transparent)]
+    Storage(#[from] DatabaseError),
+}
+
+impl From<rusqlite::Error> for McpToolError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(DatabaseError::Sqlite(error))
+    }
 }
 
 /// Runs the production MCP server until its task is cancelled or an accept
