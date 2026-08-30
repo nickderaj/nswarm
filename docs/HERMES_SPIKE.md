@@ -42,8 +42,10 @@ The distinction between durable and warm state matters:
   state, and runs the turn on that new object.
 
 Persisted transcript/prompt continuity may preserve an upstream provider's
-byte-prefix cache. It is not evidence of the long-lived, in-memory `AIAgent`
-reuse asserted by D23/§6.3 and cannot retain other reusable agent state.
+byte-prefix cache. Whether it does, and how much that reduces token cost, remain
+open quantities for the D23 revision. This spike proves that the first claimed
+benefit—avoiding fixed local construction work—does not exist on the HTTP
+route; it does not prove that the separate provider-cache benefit is lost.
 
 ## Executable trial
 
@@ -77,38 +79,45 @@ Results:
 
 | Class | n | min | median | mean | p95 | max |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| New explicit session | 30 | 0.348 ms | 0.403 ms | 0.405 ms | 0.474 ms | 0.542 ms |
-| Repeated explicit session | 30 | 0.340 ms | 0.372 ms | 0.378 ms | 0.431 ms | 0.470 ms |
+| New explicit session | 30 | 0.347 ms | 0.390 ms | 0.411 ms | 0.584 ms | 0.654 ms |
+| Repeated explicit session | 30 | 0.338 ms | 0.359 ms | 0.372 ms | 0.433 ms | 0.446 ms |
 
-The separate global route prime was 84.470 ms. Across all 62 chat calls (route
+The separate global route prime was 90.796 ms. Across all 62 chat calls (route
 prime, 30 new-session calls, repeated-session prime, and 30 repeated-session
 calls), the agent factory ran 62 times. The 31 calls for the repeated session
 created 31 distinct instances. The complete raw samples, environment,
 capabilities response, source anchors, and excluded claims are in
 [`../spikes/hermes/evidence/http-reuse.json`](../spikes/hermes/evidence/http-reuse.json).
 
-These are route-overhead timings with a deterministic fake provider. They are
-not live-model latency, actual `AIAgent` initialization latency, provider-side
-prompt-cache latency, or Raspberry Pi latency. Their purpose is to prove the
-factory and state lifecycle, which they do deterministically.
+These are two classes of route-overhead timing with a deterministic fake agent;
+they are not cold/warm `AIAgent` timings. Actual construction latency,
+growing-transcript reload cost, live-model latency, provider-side prompt-cache
+latency, and Raspberry Pi latency remain unmeasured. The fixed two-message
+history deliberately proves durable reload while keeping the lifecycle trial
+deterministic; it does not measure the reload curve before compaction.
 
 ## Validation
 
-The exact source verifier, eight spike regression tests, repository policy
-check, formatting check, and diff hygiene pass locally. The standard `just ci`
+The exact source verifier, eleven evidence-integrity and derivation checks,
+repository policy check, formatting check, and diff hygiene pass locally. The
+standard `just ci`
 run passed its policy, profile, generated-file, Fleet, formatting, check, eval,
 Clippy, 131-test, rustdoc, feature-power-set, dependency audit, vet, machete,
 coverage, and Python-test stages. Repository coverage was 97.02% and all 296
 marked critical branch outcomes were covered.
 
-The final standard semver stage is currently blocked by an upstream-resolution
-condition that also affects unchanged `origin/main`: the workspace locks
-`takecell==0.1.1`, but `cargo-semver-checks` creates an unlocked scratch package
-and selects `takecell==0.1.2`, whose Rust 1.96 requirement exceeds the
-repository's Rust 1.90 MSRV. The same semver comparison passes for all four
-shared crates when run with Cargo's MSRV-aware resolver fallback. This spike
-does not change the semver gate because that work is in the separately recorded
-Step 2 follow-up batch.
+The previously red standard semver stage is repaired without changing the Rust
+1.90 MSRV or weakening the comparison. `cargo-semver-checks` creates unlocked
+scratch packages; the runner now explicitly uses Cargo's MSRV-aware resolver
+fallback, selecting the newest compatible transitive versions instead of
+`takecell==0.1.2`, which requires Rust 1.96. The formerly failing command passes
+for all four shared crates locally without a shell-level override.
+
+The committed Python checks exercise pin parsing, annotated-tag drift,
+`sys.path` restoration, evidence integrity and summary derivation. Core CI does
+not fetch the external Hermes repository, so the full source-byte/call-graph
+verification remains an explicit execution gate against an already checked-out
+source tree rather than a claim of continuous upstream monitoring.
 
 ## Recorded capabilities contract
 

@@ -22,15 +22,16 @@ environment, run the authenticated loopback route probe with:
 
 The route probe uses explicit durable session IDs and a deterministic fake
 provider boundary. It measures only the HTTP/session/SQLite/executor route with
-`time.perf_counter_ns`; it does not claim live-provider or provider-side prompt
-cache latency. The first global route prime is reported separately, then 30
-new-session calls and 30 repeated calls to one explicit session are recorded.
+`time.perf_counter_ns`; it does not claim actual `AIAgent` construction,
+growing-transcript, live-provider, or provider-side prompt-cache latency. The
+first global route prime is reported separately, then 30 new-session calls and
+30 repeated calls to one explicit session are recorded.
 
-The verifier fails closed on a different Git commit, package version, Python
-requirement, or relevant source byte. It also checks the load-bearing call
-path: session chat delegates to `_run_agent`, `_run_agent` constructs an agent
-for each request, and only the native messaging gateway contains the live-agent
-cache.
+The verifier fails closed on a different Git commit, annotated tag object,
+package version, Python requirement, or relevant source byte. It also checks
+the load-bearing call path: session chat delegates to `_run_agent`, `_run_agent`
+constructs an agent for each request, and only the native messaging gateway
+contains the live-agent cache.
 
 No profile state, credentials, transcripts, caches, or owner-specific paths are
 stored here. Runtime measurements and their limitations are recorded separately

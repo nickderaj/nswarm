@@ -822,12 +822,14 @@ tool snapshot and in-memory state.
 The deterministic route harness used the pinned Python 3.12.12 environment on
 Darwin arm64, an ephemeral loopback listener, temporary state, explicit session
 IDs, real aiohttp/SessionDB/executor code and a fake local provider boundary.
-Thirty new-session samples measured 0.348/0.403/0.405/0.474/0.542 ms
+Thirty new-session samples measured 0.347/0.390/0.411/0.584/0.654 ms
 (min/median/mean/p95/max). Thirty repeated-session samples measured
-0.340/0.372/0.378/0.431/0.470 ms. The separate global route prime was
-84.470 ms. All 62 chat calls invoked the factory; the 31 repeated-session calls
+0.338/0.359/0.372/0.433/0.446 ms. The separate global route prime was
+90.796 ms. All 62 chat calls invoked the factory; the 31 repeated-session calls
 created 31 distinct agent instances. These numbers are route overhead, not
-live-provider, real-agent-construction, provider-cache or Pi latency.
+live-provider, real-agent-construction, growing-transcript, provider-cache or
+Pi latency. The new/repeated classes exercise the same fake-agent path and are
+not represented as actual cold/warm agent-construction measurements.
 
 The full authenticated `/v1/capabilities` response and its canonical hash are
 committed with the raw samples. Contract tests fail if the response, pin,
@@ -846,13 +848,19 @@ registry required an owner token and no credential was supplied. Reserving or
 publishing `nswarm` remains a separate owner action and did not block this safe
 spike work.
 
-Local validation passed the exact source verifier, eight spike tests, policy,
+Local validation passed the exact source verifier, eleven evidence-integrity
+and derivation checks, policy,
 profile and generated-file checks, Fleet validation, formatting, check, eval,
 Clippy, all 131 Rust tests, rustdoc, feature-power-set checks, deny, vet,
 machete, coverage and semver unit tests. Repository coverage was 97.02%, with
-296/296 marked critical branch outcomes covered. The standard `just ci` semver
-comparison then encountered an unchanged-main resolver limitation: its unlocked
-scratch package selected `takecell==0.1.2` (Rust 1.96) above the repository's
-Rust 1.90 MSRV even though `Cargo.lock` pins `0.1.1`. The comparison passed for
-all four shared crates under Cargo's MSRV-aware resolver fallback. The deferred
-semver-gate follow-up was not changed in this PR.
+296/296 marked critical branch outcomes covered. The previously red standard
+semver comparison is repaired by applying Cargo's MSRV-aware resolver fallback
+inside the semver runner. Its unlocked scratch packages now select transitive
+versions compatible with Rust 1.90; the comparison passes all four shared
+crates locally without changing the workspace lock, MSRV, or semver policy.
+
+The full source verifier now compares the annotated tag object as well as the
+peeled commit and source bytes. Committed checks exercise tag-object drift and
+evidence derivation, but core CI deliberately does not fetch the external
+Hermes repository; exact source-byte/call-graph verification remains a required
+run against a checked-out source tree.
