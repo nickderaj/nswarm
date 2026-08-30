@@ -173,7 +173,9 @@ async fn read_request(stream: &mut TcpStream) -> Result<ParsedRequest, RequestEr
     })
 }
 
-fn find_header_end(bytes: &[u8]) -> Option<usize> {
+#[doc(hidden)]
+#[must_use]
+pub fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
@@ -216,13 +218,16 @@ struct ParsedRequest {
     body: Vec<u8>,
 }
 
+#[doc(hidden)]
 #[derive(Default)]
-struct RateLimiter {
+pub struct RateLimiter {
     requests: Mutex<VecDeque<Instant>>,
 }
 
 impl RateLimiter {
-    fn allow(&self, now: Instant) -> bool {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn allow(&self, now: Instant) -> bool {
         let Ok(mut requests) = self.requests.lock() else {
             return false;
         };
@@ -278,24 +283,4 @@ pub enum HealthServerError {
     /// Listener bind or accept failed.
     #[error("Health listener failed: {0}")]
     Io(#[from] io::Error),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{RateLimiter, find_header_end};
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn header_boundary_and_rate_window_are_exact() {
-        assert_eq!(find_header_end(b"a\r\n\r\nb"), Some(1));
-        assert_eq!(find_header_end(b"no boundary"), None);
-
-        let limiter = RateLimiter::default();
-        let start = Instant::now();
-        for _ in 0..30 {
-            assert!(limiter.allow(start));
-        }
-        assert!(!limiter.allow(start));
-        assert!(limiter.allow(start + Duration::from_secs(60)));
-    }
 }
