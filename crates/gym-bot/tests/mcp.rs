@@ -159,7 +159,7 @@ fn query_includes_a_whole_second_exactly_at_the_cutoff() {
 #[test]
 fn selected_non_rfc3339_timestamp_fails_the_whole_query() {
     let directory = tempfile::tempdir().expect("tempdir");
-    let database = common::copy_fixture(&directory, "corrupt.db");
+    let database = common::copy_fixture(&directory, "offset-free.db");
     open_existing(&database)
         .expect("open fixture")
         .execute_batch(
@@ -182,7 +182,7 @@ fn selected_non_rfc3339_timestamp_fails_the_whole_query() {
 #[test]
 fn malformed_timestamp_outside_the_candidate_window_is_not_a_table_audit() {
     let directory = tempfile::tempdir().expect("tempdir");
-    let database = common::copy_fixture(&directory, "bounded.db");
+    let database = common::copy_fixture(&directory, "out-of-window.db");
     open_existing(&database)
         .expect("open fixture")
         .execute_batch(

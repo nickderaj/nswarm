@@ -379,8 +379,6 @@ impl DifferenceAllowList {
     }
 
     fn ignores(&self, path: &str) -> bool {
-        // Method syntax preserves exact equality without a redundant operator
-        // mutant or a broad exclusion around parity-drift detection.
         self.ignored_paths
             .iter()
             .any(|ignored| ignored.as_str().eq(path))

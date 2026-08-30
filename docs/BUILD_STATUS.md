@@ -870,12 +870,12 @@ run against a checked-out source tree.
 PR #3 was verified merged into protected `origin/main` at
 `c8c1b69390f607be7f0ae895441b2141c74a3d93` before this branch was created.
 The missing protected-CI invocation identified in PR #3 review is repaired:
-`scripts/test_hermes_gateway_spike.py` now runs beside the semver runner tests in
-the required `dependencies` job. This makes the eleven deterministic pin,
-capability-response, source-anchor, sample-summary, outcome, and sanitization
-checks required PR evidence rather than a local-only `just ci` gate. The full
-external source-byte verifier remains intentionally manual because ordinary CI
-does not fetch Hermes.
+`scripts/test_hermes_gateway_spike.py` now runs near the start of the required
+`quality` job, before the Rust build and test stages. This makes the eleven
+deterministic pin, capability-response, source-anchor, sample-summary, outcome,
+and sanitization checks fast required PR evidence rather than a local-only
+`just ci` gate. The full external source-byte verifier remains intentionally
+manual because ordinary CI does not fetch Hermes.
 
 The stored `body_metrics.date` policy is now explicit and tested. Every row in
 the bounded indexed candidate window must parse as RFC 3339 with an explicit
@@ -886,18 +886,36 @@ written is therefore unsupported. Rows lexically outside the candidate window
 are not audited by that call. Focused tests cover both the fail-closed selected
 row and the bounded-query distinction.
 
-The mutation-driven spellings are retained without exclusions. Named database
-flag constants and adjacent comments explain that `OpenFlags::union` avoids
-redundant bitwise-operator mutants while preserving mutation coverage around
-database validation. The parity snapshot and exact path `.eq()` spellings now
-carry the same local rationale; no function-level mutation skip was added.
+The frozen v0 source does not prove that production data satisfies this policy.
+Its batch and Apple Health paths accept `datetime` values without requiring an
+offset and persist `.isoformat()` unchanged; v0 tests include offset-free Apple
+Health timestamps. Before Step 4 uses a production database copy, run this
+read-only corpus check on the Pi:
+
+```sql
+SELECT COUNT(*) FROM body_metrics
+WHERE date NOT GLOB '*[+-][0-9][0-9]:[0-9][0-9]'
+  AND date NOT GLOB '*Z';
+```
+
+A non-zero result blocks cutover readiness: add representative sanitized rows
+to the fixture and define a reviewed migration before running v1 against the
+copy. No production-corpus compliance or migration is claimed by this PR.
+
+The mutation-driven database-flag spellings are retained without exclusions.
+Named database flag constants and adjacent comments explain that
+`OpenFlags::union` avoids redundant bitwise-operator mutants while preserving
+mutation coverage around database validation. The parity snapshot uses the same
+equivalent flag case. The inaccurate rationale beside exact path `.eq()` was
+removed: its `==` to `!=` mutant is meaningful and the exact-path test already
+kills it. No function-level mutation skip was added.
 
 The Step 3 semver repair remains the single implementation. The runner applies
 Cargo's MSRV-aware incompatible-Rust-version fallback only to its unlocked
 scratch packages, so Rust 1.90 comparisons select compatible transitives without
 changing the workspace lockfile, MSRV, or compatibility policy. This cleanup
-duplicates no resolver logic and only makes the Hermes evidence tests share the
-same required PR job.
+duplicates no resolver logic; the Hermes evidence tests remain an independent
+early step in the required `quality` job.
 
 Chrono-to-Jiff was measured and rejected for this cleanup. The locked normal
 `gym-bot` graph has 177 unique entries. It resolves one `chrono 0.4.45` and one
