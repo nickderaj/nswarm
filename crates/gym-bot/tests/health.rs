@@ -88,6 +88,23 @@ fn malformed_or_late_failure_rolls_back_the_whole_payload() {
     assert_eq!(count(&connection, "external_activities"), 0);
 }
 
+#[test]
+fn health_validation_rejects_bounds_unknown_fields_and_non_finite_values() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let importer = HealthImporter::new(database);
+    for payload in [
+        br#"{"unknown":true}"#.as_slice(),
+        br#"{"workouts":[{"external_id":"x","started_at":"2026-08-30T09:00:00+01:00","activity":"Run","duration_s":0}],"metrics":[]}"#,
+        br#"{"workouts":[{"external_id":"x","started_at":"2026-08-30T09:00:00+01:00","activity":"Run","duration_s":1,"distance_m":-1}],"metrics":[]}"#,
+        br#"{"workouts":[{"external_id":"x","started_at":"2026-08-30T09:00:00+01:00","activity":"Run","duration_s":1,"hr_samples":[{"at":"bad","bpm":1}]}],"metrics":[]}"#,
+        br#"{"workouts":[],"metrics":[{"external_id":"x","at":"2026-08-30T09:00:00+01:00","metric":"hrv_ms","value":-1,"unit":"ms"}]}"#,
+    ] {
+        assert!(importer.import_json(payload).is_err());
+    }
+    assert!(importer.import_json(&vec![b' '; 1_048_577]).is_err());
+}
+
 fn count(connection: &Connection, table: &str) -> i64 {
     connection
         .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {

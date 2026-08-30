@@ -343,6 +343,90 @@ async fn assert_reviewed_write(client: &rmcp::service::RunningService<rmcp::Role
         preference.structured_content.expect("write result")["id"],
         1
     );
+    let plan = client
+        .call_tool(
+            CallToolRequestParams::new("propose_plan").with_arguments(arguments(
+                &serde_json::json!({"focus":"legs","rationale":"fixture","items":[{"exercise":"squat","sets":[{"reps":5}]}]}),
+            )),
+        )
+        .await
+        .expect("propose plan");
+    let id = plan.structured_content.expect("plan result")["id"]
+        .as_i64()
+        .expect("plan id");
+    let feedback = client
+        .call_tool(
+            CallToolRequestParams::new("plan_feedback")
+                .with_arguments(arguments(&serde_json::json!({"plan_id":id}))),
+        )
+        .await
+        .expect("plan feedback");
+    assert_eq!(
+        feedback.structured_content.expect("feedback result")["status"],
+        "proposed"
+    );
+}
+
+#[test]
+fn every_reviewed_read_tool_executes_fixed_sql() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let socket = private_socket_path(&directory);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let server = tokio::spawn(
+            McpServer::bind(&socket, &database, Arc::new(FixedClock::new(FIXED_TIME)))
+                .expect("bind")
+                .run(),
+        );
+        let client =
+            ().serve(connect_mcp_socket(&socket).await.expect("connect"))
+                .await
+                .expect("handshake");
+        for tool in GYM_TOOL_NAMES.into_iter().filter(|name| {
+            !matches!(
+                *name,
+                "body_metrics" | "record_preference" | "propose_plan" | "plan_feedback"
+            )
+        }) {
+            let result = client
+                .call_tool(CallToolRequestParams::new(tool))
+                .await
+                .expect("fixed read tool");
+            assert!(result.structured_content.is_some(), "{tool}");
+        }
+        for (tool, arguments_value) in [
+            ("recent_sets", serde_json::json!({"limit":0})),
+            (
+                "record_preference",
+                serde_json::json!({"key":"","value":"x","evidence":"x"}),
+            ),
+            (
+                "propose_plan",
+                serde_json::json!({"focus":"x","rationale":"x","items":[]}),
+            ),
+            ("plan_feedback", serde_json::json!({"plan_id":999})),
+        ] {
+            assert_eq!(
+                protocol_error_code(
+                    client
+                        .call_tool(
+                            CallToolRequestParams::new(tool)
+                                .with_arguments(arguments(&arguments_value))
+                        )
+                        .await
+                        .expect_err("invalid args")
+                ),
+                ErrorCode::INVALID_PARAMS
+            );
+        }
+        client.cancel().await.expect("close");
+        server.abort();
+    });
 }
 
 #[test]

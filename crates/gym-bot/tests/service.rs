@@ -140,3 +140,48 @@ fn malformed_commands_do_not_write_partial_rows() {
         0
     );
 }
+
+#[test]
+fn every_deterministic_read_and_usage_path_is_exercised() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let service = GymService::new(&database, Arc::new(FixedClock::new(NOW)));
+    for (text, expected) in [
+        ("/weight", "No weights logged yet."),
+        ("/gym", "No strength workouts logged yet."),
+        ("/gym bench", "No bench logged yet."),
+        ("/cardio", "Usage:"),
+        ("/rate", "Usage:"),
+        ("/rate 4", "No plan to rate yet."),
+        ("/plans", "No plans yet."),
+        ("/plan 99", "No plan #99."),
+        ("/plan", "Agent-dependent"),
+        ("/sync", "Apple Health: 0 records"),
+        ("/preference", "Usage:"),
+        ("/help", "/gym"),
+    ] {
+        assert!(
+            service
+                .handle(&request(text))
+                .expect("deterministic path")
+                .contains(expected),
+            "{text} did not contain {expected}"
+        );
+    }
+    service.handle(&request("/weight 80")).expect("weight");
+    service
+        .handle(&request("/gym bench 2x5 50 @8"))
+        .expect("strength");
+    assert!(
+        service
+            .handle(&request("/weight"))
+            .expect("weight history")
+            .contains("80 kg")
+    );
+    assert!(
+        service
+            .handle(&request("/gym bench"))
+            .expect("strength history")
+            .contains("bench 5 reps")
+    );
+}
