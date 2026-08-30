@@ -6,8 +6,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use fleet::{
-    BotManifest, GatewayManifest, parse_secret_source, plan_repository, render_repository_units,
-    validate_repository,
+    BotManifest, GatewayManifest, parse_secret_source, plan_repository, render_repository_tmpfiles,
+    render_repository_units, validate_repository,
 };
 
 fn main() -> ExitCode {
@@ -26,7 +26,8 @@ fn main() -> ExitCode {
 fn run(args: impl Iterator<Item = String>) -> Result<String, String> {
     let args = args.collect::<Vec<_>>();
     let (command, rest) = args.split_first().ok_or_else(|| {
-        "usage: fleet <check|validate|render|render-all|render-gateway|plan> ...".to_owned()
+        "usage: fleet <check|validate|render|render-all|render-tmpfiles-all|render-gateway|plan> ..."
+            .to_owned()
     })?;
     match command.as_str() {
         "check" if rest.len() <= 1 => {
@@ -68,6 +69,17 @@ fn run(args: impl Iterator<Item = String>) -> Result<String, String> {
             }
             Ok(format!("{} unit(s) rendered\n", units.len()))
         }
+        "render-tmpfiles-all" if rest.len() == 2 => {
+            let output = Path::new(&rest[1]);
+            fs::create_dir_all(output).map_err(|error| error.to_string())?;
+            let entries = render_repository_tmpfiles(Path::new(&rest[0]))
+                .map_err(|error| error.to_string())?;
+            for (name, entry) in &entries {
+                fs::write(output.join(format!("nswarm-{name}.conf")), entry)
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(format!("{} tmpfiles contract(s) rendered\n", entries.len()))
+        }
         "render-gateway" if rest.len() == 1 => {
             let source = read(&rest[0])?;
             GatewayManifest::parse(&source)
@@ -80,9 +92,13 @@ fn run(args: impl Iterator<Item = String>) -> Result<String, String> {
             plan_repository(Path::new(&rest[1]), Path::new(&rest[2]), &secrets)
                 .map_err(|error| error.to_string())
         }
-        "check" | "validate" | "render" | "render-all" | "render-gateway" | "plan" => {
-            Err(format!("unexpected arguments for {command}"))
-        }
+        "check"
+        | "validate"
+        | "render"
+        | "render-all"
+        | "render-tmpfiles-all"
+        | "render-gateway"
+        | "plan" => Err(format!("unexpected arguments for {command}")),
         _ => Err(format!("unknown command: {command}")),
     }
 }
@@ -168,6 +184,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             .expect("render succeeds");
         assert!(unit.contains("User=research-agent"));
         assert!(unit.contains("SupplementaryGroups=research-access"));
+        assert!(unit.contains("UMask=0077"));
         assert!(unit.contains("IPAddressDeny=any"));
         assert!(unit.contains("IPAddressAllow=localhost"));
         let installed_path = directory.path().join("research.service");
@@ -189,6 +206,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         .into_iter())
         .expect("gateway render succeeds");
         assert!(gateway.contains("IPAddressDeny=any"));
+        assert!(gateway.contains("UMask=0077"));
     }
 
     #[test]
@@ -220,6 +238,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
                 path.to_str().expect("UTF-8 path"),
             ],
             vec!["render-all", ".", ".", "extra"],
+            vec!["render-tmpfiles-all", ".", ".", "extra"],
             vec![
                 "plan",
                 "--wrong",
@@ -255,6 +274,21 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         assert_eq!(output, "2 unit(s) rendered\n");
         assert!(rendered.path().join("gym.service").is_file());
         assert!(rendered.path().join("research.service").is_file());
+
+        let tmpfiles = TempDir::new().expect("temporary tmpfiles directory");
+        let output = run([
+            "render-tmpfiles-all".to_owned(),
+            root.display().to_string(),
+            tmpfiles.path().display().to_string(),
+        ]
+        .into_iter())
+        .expect("all tmpfiles contracts render");
+        assert_eq!(output, "2 tmpfiles contract(s) rendered\n");
+        assert_eq!(
+            fs::read_to_string(tmpfiles.path().join("nswarm-gym.conf"))
+                .expect("read gym tmpfiles contract"),
+            "d /run/gym 2750 gym-agent gym-access - -\n"
+        );
     }
 
     #[test]

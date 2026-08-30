@@ -1,6 +1,6 @@
 [Unit]
 Description=nswarm gym bot
-After=network-online.target hermes-gateway.service
+After=network-online.target hermes-gateway.service systemd-tmpfiles-setup.service
 Wants=network-online.target
 
 [Service]
@@ -11,11 +11,11 @@ SupplementaryGroups=gym-access
 ExecStart=/opt/nswarm/gym/bin/gym-bot
 WorkingDirectory=/opt/nswarm/gym
 EnvironmentFile=/etc/nswarm/gym.env
-RuntimeDirectory=gym
-RuntimeDirectoryMode=0750
+Environment=NSWARM_MCP_SOCKET=/run/gym/mcp.sock
+Environment=NSWARM_MCP_SOCKET_GROUP=gym-access
 Restart=on-failure
 RestartSec=5s
-UMask=0007
+UMask=0077
 NoNewPrivileges=true
 CapabilityBoundingSet=
 AmbientCapabilities=

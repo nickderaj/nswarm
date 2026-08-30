@@ -11,4 +11,4 @@ ci-full:
 
 # Regenerate repository-owned artifacts into the checked-in destination.
 generate:
-    ./scripts/generate.sh generated/systemd
+    ./scripts/generate.sh generated
