@@ -28,3 +28,11 @@ connections and handshakes are not yet capped or timed out, and a stale socket
 is not unlinked automatically. A supervised deployment must provide a fresh
 private `RuntimeDirectory`; connection limiting, handshake timeouts, and
 transient-accept retry remain pre-deployment work.
+
+The `body_metrics` `limit` bounds response rows, not database work. Preserving
+v0 timestamp text while ordering by actual instants requires materializing the
+indexed candidate window before exact filtering, sorting, and truncation. The
+maximum `days = 365` request therefore reads roughly one year of candidate rows;
+that is acceptable for current body-metric volumes, but a normalized indexed
+instant or a separate scan bound is required before substantially larger data
+sets are supported.

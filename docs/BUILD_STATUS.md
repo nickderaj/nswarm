@@ -771,10 +771,25 @@ mutants with 63 caught, 63 unviable, and zero survivors or timeouts.
 
 The expanded dependency graph passes all four Cargo Deny categories. Cargo Vet
 reports 46 fully audited packages, 12 partially audited packages, and 156
-explicit exemptions using the configured imported audit registries. The
+fully exempted packages using the configured imported audit registries. The Vet
+configuration grew by 130 exemption records, from 38 to 168; the additional 12
+records are audit-chain bases that Vet reports as partially audited. This is
+explicit bootstrap trust debt, not 130 completed source audits. The
 repository-local Aquamarine shim displaces an abandoned docs-only macro chain;
 its graph-wide and non-propagating publication limitations and upstream removal
 trigger are documented beside the shim.
+
+Recorded non-blocking post-spike follow-ups:
+
+- choose and test an explicit policy for legacy or corrupt non-RFC-3339 stored
+  timestamps; the current fail-closed whole-call error must not be replaced by
+  silent row loss without a warning or partial-result contract;
+- revisit the mutation-driven `OpenFlags::union` and string `.eq()` spellings
+  only if they can be made clearer without broad function-level mutation skips
+  that would suppress meaningful mutants;
+- measure the resolved graph and evaluate consolidating direct Chrono call
+  sites onto Jiff in a separate timestamp-focused change; do not claim an
+  exemption reduction until transitive Chrono features are shown to disappear.
 
 This checkpoint does not prove live Telegram polling or delivery, Raspberry Pi
 execution, Fleet-assigned socket group ownership, systemd behavior, Hermes
