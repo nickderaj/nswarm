@@ -6,6 +6,52 @@ use thiserror::Error;
 
 use crate::command::CommandInput;
 
+/// One transport-neutral outbound Telegram reply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TelegramReply {
+    /// Destination chat identity.
+    pub conversation_id: String,
+    /// Plain response text.
+    pub text: String,
+}
+
+/// Deterministic adapter result for one recorded update.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DispatchResult {
+    /// Update was not a text message or produced no response.
+    Ignored,
+    /// Core produced an outbound reply.
+    Reply(TelegramReply),
+}
+
+/// Handles one recorded Telegram update through a transport-neutral callback.
+///
+/// # Errors
+///
+/// Returns [`TelegramAdapterError`] when decoding fails or the callback rejects
+/// the neutral input.
+pub fn dispatch_recorded<F>(
+    json: &str,
+    mut handle: F,
+) -> Result<DispatchResult, TelegramAdapterError>
+where
+    F: FnMut(&CommandInput) -> Result<Option<String>, String>,
+{
+    let Some(input) = decode_update_json(json)? else {
+        return Ok(DispatchResult::Ignored);
+    };
+    let destination = input.conversation_id.clone();
+    Ok(handle(&input).map_err(TelegramAdapterError::Core)?.map_or(
+        DispatchResult::Ignored,
+        |text| {
+            DispatchResult::Reply(TelegramReply {
+                conversation_id: destination,
+                text,
+            })
+        },
+    ))
+}
+
 /// Decodes Telegram JSON and converts command messages to neutral input.
 ///
 /// # Errors
@@ -63,4 +109,7 @@ pub enum TelegramAdapterError {
     /// The neutral update identity failed validation.
     #[error(transparent)]
     Identity(#[from] ValidationError),
+    /// The transport-neutral command service failed safely.
+    #[error("gym command failed: {0}")]
+    Core(String),
 }

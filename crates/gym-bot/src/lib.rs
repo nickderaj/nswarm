@@ -16,5 +16,6 @@ pub mod database;
 pub mod health;
 pub mod mcp;
 pub mod parity;
+pub mod receiver;
 pub mod service;
 pub mod telegram;

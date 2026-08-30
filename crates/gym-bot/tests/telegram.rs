@@ -1,6 +1,8 @@
 //! Type-only teloxide adapter tests with recorded JSON shapes.
 
-use gym_bot::telegram::{TelegramAdapterError, decode_update_json};
+use gym_bot::telegram::{
+    DispatchResult, TelegramAdapterError, TelegramReply, decode_update_json, dispatch_recorded,
+};
 
 const VALID: &str = r#"{
   "update_id": 52,
@@ -22,6 +24,23 @@ fn teloxide_shape_converts_only_at_adapter_edge() {
     assert_eq!(input.update.surface.as_str(), "telegram");
     assert_eq!(input.update.external_id, "52");
     assert_eq!(input.text, "/weight 82.5");
+    assert_eq!(input.conversation_id, "700");
+}
+
+#[test]
+fn recorded_update_dispatches_through_the_neutral_core() {
+    let result = dispatch_recorded(VALID, |input| {
+        assert_eq!(input.conversation_id, "700");
+        Ok(Some("recorded reply".to_owned()))
+    })
+    .expect("dispatch fixture");
+    assert_eq!(
+        result,
+        DispatchResult::Reply(TelegramReply {
+            conversation_id: "700".to_owned(),
+            text: "recorded reply".to_owned()
+        })
+    );
 }
 
 #[test]
