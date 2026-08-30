@@ -30,3 +30,11 @@ empty frozen-schema snapshot; it does not regenerate expected behavior from v1
 SQL or require the private sibling checkout.
 
 The fixed-time Step 2 corpus has an empty nondeterministic-field allow-list.
+
+`parity-corpus.json` extends the sanitized fixed-time corpus to strength,
+cardio, and stated-preference writes. Its SQL goldens encode the observable rows
+written by frozen v0 `StrengthRepository`, `ActivityRepository`, and
+`ReflectionService` contracts against a fresh schema-v5 database. They contain
+only synthetic training values. Preference default timestamps are normalized
+to the fixed instant by the corpus test; all other fields have an empty
+nondeterminism allow-list.
