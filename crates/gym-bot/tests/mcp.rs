@@ -760,6 +760,28 @@ fn production_bind_fails_closed_for_an_unknown_group() {
     assert!(error.to_string().contains("does not exist"));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn production_bind_requires_the_setgid_bit_exactly() {
+    for mode in [0o4750, 0o5750] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = common::copy_fixture(&directory, "gym.db");
+        let socket_directory = directory.path().join("runtime");
+        std::fs::create_dir(&socket_directory).expect("runtime directory");
+        std::fs::set_permissions(&socket_directory, std::fs::Permissions::from_mode(mode))
+            .expect("special mode");
+        let error = McpServer::bind_for_group(
+            socket_directory.join("mcp.sock"),
+            &directory_group(&socket_directory),
+            database,
+            Arc::new(FixedClock::new(FIXED_TIME)),
+        )
+        .err()
+        .expect("setuid and sticky bits are not setgid");
+        assert!(error.to_string().contains("setgid enabled"), "{mode:o}");
+    }
+}
+
 #[test]
 fn storage_failure_is_an_internal_protocol_error() {
     let directory = tempfile::tempdir().expect("tempdir");
