@@ -212,6 +212,39 @@ fn service_fails_closed_when_database_disappears() {
 }
 
 #[test]
+fn new_deterministic_writes_propagate_storage_failures() {
+    for (trigger, action) in [
+        (
+            "CREATE TRIGGER fail_batch BEFORE INSERT ON batch_state BEGIN SELECT RAISE(ABORT,'fixture'); END",
+            "/batch open",
+        ),
+        (
+            "CREATE TRIGGER fail_export BEFORE UPDATE ON preferences BEGIN SELECT RAISE(ABORT,'fixture'); END",
+            "callback",
+        ),
+    ] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = common::copy_fixture(&directory, "gym.db");
+        let connection = Connection::open(&database).expect("fixture");
+        connection.execute_batch(trigger).expect("failure trigger");
+        if action == "callback" {
+            connection.execute("INSERT INTO preferences (key,value,confidence,source,evidence,active) VALUES ('fixture','value',0.8,'inferred','fixture',0)", []).expect("proposal");
+        }
+        drop(connection);
+        let service = GymService::new(&database, Arc::new(FixedClock::new(NOW)));
+        let result = if action == "callback" {
+            service.review_preference(PreferenceReviewRequest {
+                preference_id: 1,
+                decision: PreferenceReviewDecision::Keep,
+            })
+        } else {
+            service.handle(&request(action))
+        };
+        assert!(matches!(result, Err(ServiceError::Sqlite(_))), "{action}");
+    }
+}
+
+#[test]
 fn every_deterministic_read_and_usage_path_is_exercised() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
