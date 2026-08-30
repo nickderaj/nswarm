@@ -17,8 +17,10 @@ cargo install cargo-semver-checks --version 0.46.0 --locked
 cargo install cargo-llvm-cov --version 0.9.0 --locked
 ```
 
-Then run `just ci`. Ordinary tests are hermetic: no Telegram, Hermes, model
-provider, public network, host state, or real credential is required.
+Then run `just ci`. Ordinary tests are hermetic: no live Telegram or Hermes
+service, model provider, public network, host state, private gym database, or
+real credential is required. The gym MCP integration uses only a temporary
+local Unix socket and a sanitized committed SQLite fixture.
 
 `just ci-full` additionally requires Linux, `nightly-2025-09-18` with Miri,
 `cargo-mutants` 27.1.0, and `cargo-fuzz`. Sanitizer and Miri commands are pinned

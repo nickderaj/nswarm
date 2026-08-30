@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "source": {
+    "commit": "2d7052011c17bd028fdae0fdfd521918c11de560",
+    "file": "apps/gym/src/gym/repositories/activity.py",
+    "sha256": "877b310be5f381a834e9ff88515a31b62596d523cbad119f8fa37e17e0d18180",
+    "generator": "ActivityRepository.log_metric"
+  },
+  "intent": {
+    "schema_version": 1,
+    "kind": "log_body_weight",
+    "at": "2026-08-29T08:15:30.123456Z",
+    "time_zone": "Europe/London",
+    "kilograms": 82.5
+  },
+  "table_rows": {
+    "body_metrics": [
+      [
+        {"storage": "integer", "value": 1},
+        {"storage": "text", "value": "2026-08-29T09:15:30.123456+01:00"},
+        {"storage": "text", "value": "weight_kg"},
+        {"storage": "real", "value": 4635505838331527168},
+        {"storage": "text", "value": "kg"},
+        {"storage": "text", "value": "manual"}
+      ]
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "aquamarine"
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+description = "Docs-only pass-through replacement for teloxide's aquamarine attribute"
+publish = false
+
+[lib]
+proc-macro = true
+
+[lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"

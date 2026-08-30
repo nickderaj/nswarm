@@ -31,9 +31,6 @@ cargo +nightly-2025-09-18 llvm-cov --branch --fail-under-lines 90 --json \
   --output-path target/coverage.json nextest --workspace --all-features
 python3 scripts/check_coverage.py target/coverage.json origin/main
 
-if git cat-file -e origin/main:Cargo.toml 2>/dev/null; then
-  require_command cargo-semver-checks
-  cargo semver-checks check-release --workspace --baseline-rev origin/main
-else
-  echo "semver: initial public API baseline will be established by this merge"
-fi
+require_command cargo-semver-checks
+python3 -m unittest scripts/test_check_semver.py
+python3 scripts/check_semver.py origin/main

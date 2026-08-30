@@ -82,7 +82,20 @@ def main() -> int:
     for name, entries in exemptions.items():
         for entry in entries:
             version = entry["version"]
-            index = by_identity[(name, version)]
+            identity = (name, version)
+            if identity not in by_identity:
+                records.append(
+                    {
+                        "name": name,
+                        "version": version,
+                        "criterion": entry["criteria"],
+                        "kind": "audit-chain-base",
+                        "path": "not resolved; anchors a delta audit to the locked version",
+                        "class": "P2 transitive bootstrap",
+                    }
+                )
+                continue
+            index = by_identity[identity]
             node = graph[index]
             path = paths[index]
             first_kind = path[0][1] if path else "runtime"
@@ -119,6 +132,8 @@ def main() -> int:
     counts: dict[str, int] = {}
     for record in records:
         counts[record["class"]] = counts.get(record["class"], 0) + 1
+    audit_chain_bases = sum(record["kind"] == "audit-chain-base" for record in records)
+    locked_exemptions = len(records) - audit_chain_bases
     generated = datetime.now(UTC).date().isoformat()
     print("# Supply-chain exemption inventory\n")
     print(
@@ -130,13 +145,15 @@ def main() -> int:
         "a crate can have additional consumers.\n"
     )
     print(
-        f"All {len(records)} entries remain exemptions, not audits: "
+        f"The configuration contains {len(records)} exemption records: "
+        f"{locked_exemptions} resolved packages and {audit_chain_bases} non-resolved "
+        "versions that anchor imported delta-audit chains. Across those records, "
         f"{counts.get('P1 direct/security-sensitive', 0)} direct/security-sensitive, "
         f"{counts.get('P2 transitive bootstrap', 0)} transitive bootstrap, and "
         f"{counts.get('P3 build/dev-only', 0)} build/dev-only. No exemption was "
-        "converted to an audit without source-review evidence.\n"
+        "converted to a local audit without source-review evidence.\n"
     )
-    print("## Locked inventory\n")
+    print("## Exemption inventory\n")
     print("| Crate | Version/source | Publisher | Kind | Use/path | Criterion | Review class |")
     print("|---|---|---|---|---|---|---|")
     for record, login in zip(records, publishers, strict=True):

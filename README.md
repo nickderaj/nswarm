@@ -11,9 +11,12 @@ belong in this repository.
 
 ## Current status
 
-Step 1 is in progress: repository policy, `botkit`, `fleet`, and the agent-job
-control plane. See [`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md) for verified
-checkpoints and remaining external gates.
+Step 1 merged as `ac4bfd5f35a1aa2fbbf76ed46f84e7644ca7b049` in PR #1.
+Step 2 is in progress on `codex/step2-gym-spike`: a transport-neutral gym
+command, bounded read-only MCP-over-Unix-socket surface, and sanitized
+SQLite-state parity harness. See
+[`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md) for verified checkpoints and
+remaining gates.
 
 ## Tenancy
 

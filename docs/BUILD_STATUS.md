@@ -1,6 +1,8 @@
 # nswarm v1 build status
 
-Updated: 2026-08-28 (Europe/London). Active branch: `overnight/bootstrap`.
+Updated: 2026-08-29 (Europe/London). Active branch:
+`codex/step2-gym-spike`, based directly on merged main
+`ac4bfd5f35a1aa2fbbf76ed46f84e7644ca7b049`.
 The frozen `ultron` v0 checkout has not been modified, staged, committed,
 deployed, restarted, or used as a source of private state.
 
@@ -717,13 +719,82 @@ material returned configuration is:
 }
 ```
 
-PR #1 remains blocked with `REVIEW_REQUIRED`: its author and last pusher is
-`nickderaj`, and there is no approval. Trusted collaborator `ultron-git` now
-has Write access and is the owner assigned by the branch's `CODEOWNERS` file.
-Because GitHub evaluates `CODEOWNERS` from the base branch, that assignment
-will govern future PRs after this file reaches `main`; for PR #1, an ordinary
-approval from `ultron-git` can satisfy the one-approval and last-pusher rules.
-The branch also contains merge commit `c119086`; protected `main` requires
-linear history while the bootstrap request forbids history rewriting. The
-recommended narrow resolution remains an explicitly authorized squash merge
-after the final head is approved. No merge has been performed.
+That was the final pre-merge state of the bootstrap branch. PR #1 was
+subsequently approved and squash-merged as
+`ac4bfd5f35a1aa2fbbf76ed46f84e7644ca7b049`; protected `main` is the direct
+base for Step 2. No Step 2 merge has been performed.
+
+## Checkpoint W — Step 2 gym vertical-slice candidate
+
+PR #2 begins the smallest genuine Step 2 slice. The new `gym-bot` crate keeps
+teloxide types at a recorded-update adapter edge and accepts neutral actor,
+`(surface, external_id)`, and text input in its command core. `/weight <kg>`
+uses an injected clock, checks the configured owner before idempotency, rejects
+blank, malformed, non-finite, zero, and negative values, writes the frozen v0
+`body_metrics` intent, and matches Python's six-significant-digit success
+format. A separate SQLite sidecar persists generic update identities across
+service restarts without changing the v0 gym schema.
+
+The production MCP handler exposes exactly one bounded, read-only
+`body_metrics` tool. An actual rmcp client and server negotiate and exchange
+requests over a temporary Unix socket; contract tests reject malformed frames,
+unknown tools, invalid bounds, and unavailable storage, verify the tools-only
+capability map, prove socket cleanup, refuse a public runtime directory, and
+enforce an owner-only `0700` parent plus socket mode `0600` on every supported
+Unix platform. No filesystem, shell, raw SQL,
+arbitrary network, resource, prompt, sampling, or Hermes surface is exposed.
+
+The parity corpus contains a schema-v1 fixed-time `log_body_weight` intent, an
+empty sanitized schema-v5 SQLite fixture reconstructed from frozen v0 commit
+`2d7052011c17bd028fdae0fdfd521918c11de560`, and a golden row captured by that
+commit's real `ActivityRepository.log_metric`. CI layers the committed golden
+row onto the empty schema; it does not regenerate expected state from v1 SQL.
+The candidate converts the fixed instant through the production configured-zone
+clock. Deterministic snapshots compare
+`user_version`, all 15 application tables, columns, exact DDL, eight indexes,
+all losslessly normalized row values, and foreign-key violations with an empty
+nondeterminism allow-list. Deliberate tests detect missing and extra rows,
+unexpected tables, column/index/schema-version/value drift, and foreign-key
+failures, including a deliberate UTC-text regression. The parity gate needs
+neither the sibling v0 checkout nor its Python environment.
+
+Fresh local evidence against code checkpoint `201261d`: all 38 gym tests and
+131 workspace tests pass, including real Unix-socket protocol tests on macOS,
+four property tests, recorded Telegram-shaped inputs, startup/schema checks,
+positive parity, and deliberate mismatch cases. The complete `just ci` gate
+passes both from the ordinary target and a brand-new isolated target, covering
+strict Clippy and rustdoc, generated and policy checks, feature powerset,
+deny/vet/machete, coverage, and semver checks. Coverage is 94.44% for `gym-bot`,
+97.02% repository-wide, 95.55% across changed executable lines, and 296/296
+configured critical branch outcomes. Focused mutation tests process all 126 gym
+mutants with 63 caught, 63 unviable, and zero survivors or timeouts.
+
+The expanded dependency graph passes all four Cargo Deny categories. Cargo Vet
+reports 46 fully audited packages, 12 partially audited packages, and 156
+fully exempted packages using the configured imported audit registries. The Vet
+configuration grew by 130 exemption records, from 38 to 168; the additional 12
+records are audit-chain bases that Vet reports as partially audited. This is
+explicit bootstrap trust debt, not 130 completed source audits. The
+repository-local Aquamarine shim displaces an abandoned docs-only macro chain;
+its graph-wide and non-propagating publication limitations and upstream removal
+trigger are documented beside the shim.
+
+Recorded non-blocking post-spike follow-ups:
+
+- choose and test an explicit policy for legacy or corrupt non-RFC-3339 stored
+  timestamps; the current fail-closed whole-call error must not be replaced by
+  silent row loss without a warning or partial-result contract;
+- revisit the mutation-driven `OpenFlags::union` and string `.eq()` spellings
+  only if they can be made clearer without broad function-level mutation skips
+  that would suppress meaningful mutants;
+- measure the resolved graph and evaluate consolidating direct Chrono call
+  sites onto Jiff in a separate timestamp-focused change; do not claim an
+  exemption reduction until transitive Chrono features are shown to disappear.
+
+This checkpoint does not prove live Telegram polling or delivery, Raspberry Pi
+execution, Fleet-assigned socket group ownership, systemd behavior, Hermes
+compatibility, private-database operation, or cutover readiness. The Step 2
+parser deliberately omits bare `/weight` history and rejects trailing tokens
+and Python underscore numerics. MCP accept retry, connection caps, handshake
+timeouts, and stale-socket recovery remain pre-deployment work. Exact-final-SHA
+GitHub jobs and independent re-review remain pending.
