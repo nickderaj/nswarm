@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "nickderaj/ultron",
+    "path": "apps/gym",
+    "frozen_schema_version": 5
+  },
+  "dispositions": {
+    "step2": "Already supplied by the merged Step 2 slice.",
+    "ported": "Required deterministic work in PR #5.",
+    "changed_d7": "Observable database state is preserved; exact Telegram UX may change.",
+    "blocked_d23": "Conversation behavior is unavailable until a merged decision revises D23.",
+    "deferred": "Outside PR #5 with an explicit safety or scope reason."
+  },
+  "behaviors": [
+    {
+      "id": "telegram.commands",
+      "category": "telegram",
+      "surface": ["gym", "cardio", "run", "weight", "batch", "plan", "plans", "rate", "adherence", "cost", "sync", "export", "import_zip", "preference", "help"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:46-62", "apps/gym/src/gym/__main__.py:400-421"],
+      "disposition": "ported",
+      "reason": "Port transport-neutral parsing and service calls; keep Telegram types at the adapter edge."
+    },
+    {
+      "id": "telegram.owner-dedup",
+      "category": "telegram",
+      "surface": ["owner guard", "processed update dedup", "recorded Telegram-shaped inputs"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:85-90", "apps/gym/src/gym/db/schema.py:21-23"],
+      "disposition": "step2",
+      "reason": "Step 2 already checks owner before durable generic (surface, external_id) dedup; Step 4 extends it to all routes and polling."
+    },
+    {
+      "id": "telegram.formatting",
+      "category": "telegram",
+      "surface": ["plain text replies", "escaped HTML plans", "collapsed equal sets"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:95-102", "apps/gym/src/gym/__main__.py:444-493"],
+      "disposition": "changed_d7",
+      "reason": "Preserve meaning, escaping, and scannability; D7 does not require transcript or exact wording parity."
+    },
+    {
+      "id": "telegram.free-text-batch",
+      "category": "telegram",
+      "surface": ["non-command text", "durable batch append", "20-message auto-flush trigger"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:179-202", "apps/gym/src/gym/services/batch_service.py:13-81"],
+      "disposition": "ported",
+      "reason": "Batch routing is deterministic and remains available without an agent."
+    },
+    {
+      "id": "telegram.free-text-agent",
+      "category": "agent",
+      "surface": ["free-text coaching", "plan generation", "batch extraction", "nightly reflection"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:203-219", "apps/gym/src/gym/services/hermes_service.py:18-74"],
+      "disposition": "blocked_d23",
+      "reason": "Pinned Hermes creates a fresh AIAgent for each HTTP request. PR #5 must fail closed and must not implement conversation code or choose a topology."
+    },
+    {
+      "id": "database.schema",
+      "category": "database",
+      "surface": ["15 tables", "8 indexes", "PRAGMA user_version=5", "foreign keys"],
+      "source_refs": ["apps/gym/src/gym/db/schema.py:1-36", "apps/gym/src/gym/db/migrations.py:8-12"],
+      "disposition": "step2",
+      "reason": "The frozen v0 schema and normalized full-state comparison are committed; Step 4 must not migrate or reshape it."
+    },
+    {
+      "id": "database.strength",
+      "category": "database",
+      "surface": ["strength logging", "recent strength history", "exercise aliases"],
+      "source_refs": ["apps/gym/src/gym/repositories/strength.py:12-66", "apps/gym/src/gym/controllers/gym_controller.py:16-55"],
+      "disposition": "ported",
+      "reason": "Port the sessions, movements, session_items, and efforts transaction and add SQLite-state parity."
+    },
+    {
+      "id": "database.cardio-metrics",
+      "category": "database",
+      "surface": ["cardio logging", "body metric logging", "history reads", "external activity identity"],
+      "source_refs": ["apps/gym/src/gym/repositories/activity.py:13-137"],
+      "disposition": "ported",
+      "reason": "Port deterministic writes and bounded reads; extend parity beyond Step 2 weight logging."
+    },
+    {
+      "id": "database.plans-preferences",
+      "category": "database",
+      "surface": ["plan persistence", "rating", "adherence", "stated preference", "inference approval"],
+      "source_refs": ["apps/gym/src/gym/services/coach_service.py:20-178", "apps/gym/src/gym/services/reflection_service.py:15-149"],
+      "disposition": "ported",
+      "reason": "Keep queryable evidence and the human Keep/Reject gate in SQLite; never replace them with Hermes memory."
+    },
+    {
+      "id": "scheduler.batch-retry",
+      "category": "scheduler",
+      "surface": ["persisted batch claims", "manual retry", "restart recovery", "snapshot discard", "12-hour due scan"],
+      "source_refs": ["apps/gym/src/gym/services/batch_service.py:13-81", "apps/gym/src/gym/__main__.py:505-603"],
+      "disposition": "ported",
+      "reason": "Failed extraction retains the buffer; successful snapshot discard does not delete messages appended concurrently."
+    },
+    {
+      "id": "scheduler.maintenance",
+      "category": "scheduler",
+      "surface": ["Health staleness notice", "nightly reflection claim", "morning approval prompt"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:604-651", "apps/gym/src/gym/services/reflection_service.py:64-94"],
+      "disposition": "ported",
+      "reason": "Port deterministic claims and restart behavior; agent-backed reflection remains unavailable under D23."
+    },
+    {
+      "id": "health.receiver",
+      "category": "health",
+      "surface": ["POST /import/health", "bearer auth", "1 MiB body limit", "30 requests/minute", "strict payload"],
+      "source_refs": ["apps/gym/src/gym/importers/receiver.py:15-54"],
+      "disposition": "ported",
+      "reason": "Port the optional lifecycle boundary and deterministic local tests; deployment remains tailnet-only and credential-free in git."
+    },
+    {
+      "id": "health.import",
+      "category": "health",
+      "surface": ["workouts", "metrics", "splits", "heart-rate samples", "duplicate replay", "manual-cardio reconciliation"],
+      "source_refs": ["apps/gym/src/gym/importers/health.py:53-137", "apps/gym/src/gym/importers/health.py:263-285"],
+      "disposition": "ported",
+      "reason": "Preserve transactionality and (source, external_id) idempotency; add duplicate, rollback, and reconciliation parity."
+    },
+    {
+      "id": "health.zip-backfill",
+      "category": "health",
+      "surface": ["owner-only export.zip import", "basename-only archive selection"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:347-365", "apps/gym/src/gym/importers/health.py:140-261"],
+      "disposition": "deferred",
+      "reason": "The HTTP receiver and deterministic JSON contract cover parallel operation; large private Apple export ingestion is not required to start the disposable trial."
+    },
+    {
+      "id": "mcp.tools",
+      "category": "mcp",
+      "surface": ["recent_sets", "exercise_catalogue", "volume_summary", "body_metrics", "recent_runs", "pace_trend", "interval_history", "heart_rate_series", "weekly_load", "preferences", "record_preference", "propose_plan", "plan_feedback"],
+      "source_refs": ["apps/gym/src/gym/agent/server.py:22-102", "apps/gym/src/gym/agent/mcp_server.py:13-209"],
+      "disposition": "ported",
+      "reason": "Expand Step 2's body_metrics-only server to the reviewed surface over the Fleet socket; expose no resources, prompts, sampling, raw SQL, filesystem, shell, or network tools."
+    },
+    {
+      "id": "exports.csv",
+      "category": "exports",
+      "surface": ["efforts.csv", "controlled data-root destination"],
+      "source_refs": ["apps/gym/src/gym/services/export_service.py:10-28", "apps/gym/src/gym/__main__.py:340-345"],
+      "disposition": "ported",
+      "reason": "Preserve exported row semantics while allowing D7 response wording changes."
+    },
+    {
+      "id": "config.startup",
+      "category": "runtime",
+      "surface": ["required Telegram token", "required owner ID", "timezone", "data root", "Health receiver", "learning hours", "migrations before polling"],
+      "source_refs": ["apps/gym/src/gym/config.py:14-95", "apps/gym/src/gym/__main__.py:67-90", "apps/gym/src/gym/__main__.py:535-564"],
+      "disposition": "ported",
+      "reason": "Validate secret presence without logging values, open only the explicit copied database, and stop services gracefully."
+    },
+    {
+      "id": "parallel.copy-boundary",
+      "category": "runtime",
+      "surface": ["explicit source", "explicit destination", "SQLite sidecars", "integrity", "foreign keys", "disposable state"],
+      "source_refs": ["docs/refactor/V1_REBUILD_PLAN.md:1280-1293"],
+      "disposition": "ported",
+      "reason": "PR #5 prepares but does not execute cutover; v0 remains untouched and authoritative."
+    },
+    {
+      "id": "fleet.socket-boundary",
+      "category": "fleet",
+      "surface": ["/run/gym/mcp.sock", "0660", "gym-access", "boss-agent", "approved gateway identity"],
+      "source_refs": ["docs/refactor/V1_REBUILD_PLAN.md:786-795"],
+      "disposition": "ported",
+      "reason": "Fleet owns creation and validation. D23/D24 prevent granting an unapproved Hermes topology; boss-agent remains the only unconditional peer."
+    },
+    {
+      "id": "profile.d25",
+      "category": "profile",
+      "surface": ["SOUL.md", "skills", "seeded memory", "write approvals", "skills ledger", "no background review", "no curator", "minimal toolsets"],
+      "source_refs": ["docs/refactor/V1_REBUILD_PLAN.md:655-690"],
+      "disposition": "ported",
+      "reason": "Land validated repository-owned artifacts read-only to Hermes; this does not authorize a live D23/D24 topology."
+    },
+    {
+      "id": "cutover.production",
+      "category": "runtime",
+      "surface": ["v0 shutdown", "database merge", "dual writes", "production cutover"],
+      "source_refs": ["docs/refactor/V1_REBUILD_PLAN.md:1280-1293"],
+      "disposition": "deferred",
+      "reason": "Step 4 only prepares a disposable parallel run. Cutover requires explicit later authorization and acceptance evidence."
+    }
+  ]
+}
