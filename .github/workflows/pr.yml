@@ -75,6 +75,7 @@ jobs:
       - name: Semver compatibility
         run: |
           python3 -m unittest scripts/test_check_semver.py
+          python3 -m unittest scripts/test_hermes_gateway_spike.py
           python3 scripts/check_semver.py origin/main
 
   coverage:
