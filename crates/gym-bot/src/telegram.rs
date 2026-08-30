@@ -44,6 +44,7 @@ pub fn adapt_update(update: &Update) -> Result<Option<CommandInput>, TelegramAda
         actor_id,
         update: key,
         text,
+        conversation_id: message.chat.id.to_string(),
     }))
 }
 

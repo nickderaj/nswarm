@@ -86,6 +86,7 @@ fn fixed_time_weight_intent_has_exact_v0_v1_database_parity() {
             )
             .expect("update key"),
             text: format!("/weight {}", intent.kilograms),
+            conversation_id: "1001".to_owned(),
         })
         .expect("apply v1 intent");
     assert_eq!(
@@ -130,6 +131,7 @@ fn utc_storage_regression_is_detected_against_the_v0_golden_snapshot() {
             update: UpdateKey::new(SurfaceId::new("parity").expect("surface"), "utc-regression")
                 .expect("update key"),
             text: format!("/weight {}", intent.kilograms),
+            conversation_id: "1001".to_owned(),
         })
         .expect("apply deliberately divergent v1 intent");
 
