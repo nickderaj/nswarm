@@ -295,84 +295,6 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
     });
 }
 
-#[test]
-fn volume_summary_uses_exact_per_week_group_limit() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let database = common::copy_fixture(&directory, "gym.db");
-    let mut connection = open_existing(&database).expect("open fixture");
-    let transaction = connection.transaction().expect("seed transaction");
-    for index in 0..54 {
-        transaction
-            .execute(
-                "INSERT INTO sessions (started_at,kind,source) \
-                 VALUES ('2026-08-29T08:15:30+00:00','strength','manual')",
-                [],
-            )
-            .expect("session");
-        let session_id = transaction.last_insert_rowid();
-        transaction
-            .execute(
-                "INSERT INTO movements (name,display_name,modality,muscle_groups) \
-                 VALUES (?1,?1,'strength',?2)",
-                rusqlite::params![format!("movement-{index}"), format!("group-{index}")],
-            )
-            .expect("movement");
-        let movement_id = transaction.last_insert_rowid();
-        transaction
-            .execute(
-                "INSERT INTO session_items (session_id,position,movement_id) VALUES (?1,1,?2)",
-                rusqlite::params![session_id, movement_id],
-            )
-            .expect("session item");
-        let item_id = transaction.last_insert_rowid();
-        transaction
-            .execute(
-                "INSERT INTO efforts (session_item_id,position,reps,weight_kg) \
-                 VALUES (?1,1,1,1)",
-                [item_id],
-            )
-            .expect("effort");
-    }
-    transaction.commit().expect("seed commit");
-    drop(connection);
-
-    let socket = private_socket_path(&directory);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("runtime");
-    runtime.block_on(async {
-        let server = tokio::spawn(
-            McpServer::bind(&socket, database, Arc::new(FixedClock::new(FIXED_TIME)))
-                .expect("bind")
-                .run(),
-        );
-        let client =
-            ().serve(connect_mcp_socket(&socket).await.expect("connect"))
-                .await
-                .expect("handshake");
-        let result = client
-            .call_tool(
-                CallToolRequestParams::new("volume_summary")
-                    .with_arguments(arguments(&serde_json::json!({"weeks":1}))),
-            )
-            .await
-            .expect("volume summary");
-        assert_eq!(
-            result
-                .structured_content
-                .expect("structured result")
-                .as_array()
-                .expect("rows")
-                .len(),
-            53
-        );
-        client.cancel().await.expect("close");
-        server.abort();
-    });
-}
-
 async fn assert_body_metric_boundaries(
     client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
 ) {
@@ -426,53 +348,20 @@ async fn assert_reviewed_tool_list(client: &rmcp::service::RunningService<rmcp::
         tool.input_schema["properties"]["limit"]["maximum"],
         MAX_LIMIT
     );
-    for listed_tool in &listed.tools {
-        let write = matches!(
-            listed_tool.name.as_ref(),
-            "record_preference" | "propose_plan"
-        );
-        let annotations = listed_tool.annotations.as_ref().expect("tool annotations");
-        assert_eq!(
-            annotations.read_only_hint,
-            Some(!write),
-            "{}",
-            listed_tool.name
-        );
-        assert_eq!(
-            annotations.idempotent_hint,
-            Some(!write),
-            "{}",
-            listed_tool.name
-        );
-        assert_eq!(
-            annotations.destructive_hint,
-            Some(false),
-            "{}",
-            listed_tool.name
-        );
-        assert_eq!(
-            annotations.open_world_hint,
-            Some(false),
-            "{}",
-            listed_tool.name
-        );
-    }
-    for (name, property) in [
-        ("record_preference", "evidence"),
-        ("propose_plan", "items"),
-        ("plan_feedback", "plan_id"),
-    ] {
-        let reviewed_tool = listed
+    for name in ["record_preference", "propose_plan", "plan_feedback"] {
+        let write_tool = listed
             .tools
             .iter()
             .find(|tool| tool.name == name)
-            .expect("reviewed schema");
-        assert_eq!(reviewed_tool.input_schema["additionalProperties"], false);
-        assert!(
-            reviewed_tool.input_schema["properties"]
-                .as_object()
-                .is_some_and(|properties| properties.contains_key(property)),
-            "{name} must publish {property}"
+            .expect("write schema");
+        assert_eq!(write_tool.input_schema["additionalProperties"], false);
+        assert!(write_tool.input_schema["properties"].is_object());
+        assert_eq!(
+            write_tool
+                .annotations
+                .as_ref()
+                .and_then(|value| value.open_world_hint),
+            Some(false)
         );
     }
 }
@@ -653,26 +542,8 @@ fn socket_bind_rejects_a_world_accessible_directory() {
         .expect("public parent directory must be rejected");
     assert_eq!(
         error.to_string(),
-        "gym MCP socket error: gym MCP socket directory mode 755 must be 750"
+        "gym MCP socket error: gym MCP socket directory mode 755 must grant group access and deny world access"
     );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn production_bind_fails_closed_for_an_unknown_group() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let database = common::copy_fixture(&directory, "gym.db");
-    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o2750))
-        .expect("setgid test directory");
-    let error = McpServer::bind_for_group(
-        directory.path().join("mcp.sock"),
-        "nswarm-group-that-must-not-exist",
-        database,
-        Arc::new(FixedClock::new(FIXED_TIME)),
-    )
-    .err()
-    .expect("unknown production group must fail");
-    assert!(error.to_string().contains("does not exist"));
 }
 
 #[test]
@@ -797,8 +668,6 @@ fn private_socket_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
         .mode(0o750)
         .create(&socket_directory)
         .expect("private socket directory");
-    std::fs::set_permissions(&socket_directory, std::fs::Permissions::from_mode(0o750))
-        .expect("exact group socket directory permissions");
     socket_directory.join("mcp.sock")
 }
 

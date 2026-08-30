@@ -4,10 +4,7 @@ use botkit::{SurfaceId, UpdateKey, ValidationError};
 use teloxide::types::{Update, UpdateKind};
 use thiserror::Error;
 
-use crate::{
-    command::CommandInput,
-    service::{PreferenceReviewDecision, PreferenceReviewRequest},
-};
+use crate::command::CommandInput;
 
 /// One transport-neutral outbound Telegram reply.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,17 +22,6 @@ pub enum DispatchResult {
     Ignored,
     /// Core produced an outbound reply.
     Reply(TelegramReply),
-}
-
-/// Transport-neutral input decoded from a gym preference callback.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PreferenceCallbackInput {
-    /// Generic identity of the callback actor.
-    pub actor_id: String,
-    /// Stable Telegram update identity for owner guard and deduplication.
-    pub update: UpdateKey,
-    /// Deterministic preference decision for the domain service.
-    pub review: PreferenceReviewRequest,
 }
 
 /// Handles one recorded Telegram update through a transport-neutral callback.
@@ -75,62 +61,6 @@ where
 pub fn decode_update_json(json: &str) -> Result<Option<CommandInput>, TelegramAdapterError> {
     let update: Update = serde_json::from_str(json)?;
     adapt_update(&update)
-}
-
-/// Decodes a recorded Telegram preference-review callback without polling.
-///
-/// Unrelated update kinds and unrelated callback namespaces return `Ok(None)`.
-///
-/// # Errors
-///
-/// Returns [`TelegramAdapterError`] for malformed Telegram JSON, malformed
-/// `gym-preference` callback data, or invalid neutral identity.
-pub fn decode_preference_callback_json(
-    json: &str,
-) -> Result<Option<PreferenceCallbackInput>, TelegramAdapterError> {
-    let update: Update = serde_json::from_str(json)?;
-    adapt_preference_callback(&update)
-}
-
-/// Converts a `teloxide` callback query to the neutral preference-review shape.
-///
-/// # Errors
-///
-/// Returns [`TelegramAdapterError`] for malformed `gym-preference` callback
-/// data or invalid neutral identity.
-pub fn adapt_preference_callback(
-    update: &Update,
-) -> Result<Option<PreferenceCallbackInput>, TelegramAdapterError> {
-    let UpdateKind::CallbackQuery(query) = &update.kind else {
-        return Ok(None);
-    };
-    let Some(data) = query.data.as_deref() else {
-        return Ok(None);
-    };
-    let Some(payload) = data.strip_prefix("gym-preference:") else {
-        return Ok(None);
-    };
-    let mut parts = payload.split(':');
-    let preference_id = parts
-        .next()
-        .and_then(|value| value.parse::<i64>().ok())
-        .ok_or(TelegramAdapterError::InvalidPreferenceCallback)?;
-    let decision = match parts.next() {
-        Some("accept") => PreferenceReviewDecision::Keep,
-        Some("reject") => PreferenceReviewDecision::Reject,
-        _ => return Err(TelegramAdapterError::InvalidPreferenceCallback),
-    };
-    if parts.next().is_some() {
-        return Err(TelegramAdapterError::InvalidPreferenceCallback);
-    }
-    Ok(Some(PreferenceCallbackInput {
-        actor_id: query.from.id.0.to_string(),
-        update: UpdateKey::new(SurfaceId::new("telegram")?, update.id.0.to_string())?,
-        review: PreferenceReviewRequest {
-            preference_id,
-            decision,
-        },
-    }))
 }
 
 /// Converts a `teloxide` update to the transport-neutral command shape.
@@ -186,9 +116,6 @@ pub enum TelegramAdapterError {
     /// A command message contains media or another non-text payload.
     #[error("Telegram message has no text")]
     MissingText,
-    /// A gym preference callback did not contain exactly id and Keep/Reject action.
-    #[error("Telegram gym preference callback is invalid")]
-    InvalidPreferenceCallback,
     /// The neutral update identity failed validation.
     #[error(transparent)]
     Identity(#[from] ValidationError),

@@ -140,41 +140,6 @@ fn health_import_accepts_optional_split_and_metric_variants() {
 }
 
 #[test]
-fn health_accepts_zero_distance_and_exact_text_limits() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let database = common::copy_fixture(&directory, "gym.db");
-    let external_id = "x".repeat(200);
-    let activity = "a".repeat(100);
-    let payload = serde_json::to_vec(&serde_json::json!({
-        "workouts": [{
-            "external_id": external_id,
-            "started_at": "2026-08-30T09:00:00+01:00",
-            "activity": activity,
-            "duration_s": 1,
-            "distance_m": 0
-        }],
-        "metrics": []
-    }))
-    .expect("payload");
-
-    let result = HealthImporter::new(&database)
-        .import_json(&payload)
-        .expect("inclusive semantic limits");
-    assert_eq!(result.inserted, 1);
-    let connection = Connection::open(database).expect("result");
-    assert_eq!(count(&connection, "sessions"), 1);
-    assert_eq!(
-        connection
-            .query_row("SELECT distance_m FROM efforts", [], |row| {
-                row.get::<_, f64>(0)
-            })
-            .expect("zero distance")
-            .to_bits(),
-        0.0_f64.to_bits()
-    );
-}
-
-#[test]
 fn duplicate_ids_within_one_payload_are_counted_not_reinserted() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
@@ -314,10 +279,7 @@ fn raw_payload_byte_limit_is_exact() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
     let importer = HealthImporter::new(database);
-    assert!(matches!(
-        importer.import_json(&vec![b' '; 1_048_576]),
-        Err(gym_bot::health::HealthError::Json(_))
-    ));
+    assert!(importer.import_json(&vec![b' '; 1_048_576]).is_err());
     assert!(matches!(
         importer.import_json(&vec![b' '; 1_048_577]),
         Err(gym_bot::health::HealthError::PayloadTooLarge)

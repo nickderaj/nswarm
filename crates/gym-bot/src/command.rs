@@ -48,36 +48,31 @@ pub enum CommandResult {
 
 /// Minimal deterministic gym command service.
 pub struct CommandService {
-    gate: UpdateGate,
+    owner_id: String,
     database_path: PathBuf,
     clock: Arc<dyn Clock>,
-}
-
-/// Owner-first durable idempotency gate shared by every gym adapter route.
-pub struct UpdateGate {
-    owner_id: String,
     processed: Mutex<Connection>,
 }
 
-impl UpdateGate {
-    /// Creates a gate against a v1-only processed-update sidecar.
+impl CommandService {
+    /// Creates a command service with a durable generic idempotency sidecar.
     ///
     /// # Errors
     ///
-    /// Returns [`CommandError`] if storage is invalid, aliases the gym
-    /// database, or cannot initialize the generic update-key table.
+    /// Returns [`CommandError`] when the sidecar cannot be opened or initialized.
     pub fn new(
         owner_id: impl Into<String>,
-        database_path: impl AsRef<Path>,
+        database_path: impl Into<PathBuf>,
         processed_updates_path: impl AsRef<Path>,
+        clock: Arc<dyn Clock>,
     ) -> Result<Self, CommandError> {
-        let database_path = database_path.as_ref();
+        let database_path = database_path.into();
         let processed_updates_path = processed_updates_path.as_ref();
         if processed_updates_path == database_path {
             return Err(CommandError::IdempotencyPathAliasesGymDatabase);
         }
-        validate_existing(database_path)?;
-        if paths_alias(database_path, processed_updates_path)
+        validate_existing(&database_path)?;
+        if paths_alias(&database_path, processed_updates_path)
             .map_err(CommandError::IdempotencyPath)?
         {
             return Err(CommandError::IdempotencyPathAliasesGymDatabase);
@@ -99,57 +94,9 @@ impl UpdateGate {
         )?;
         Ok(Self {
             owner_id: owner_id.into(),
-            processed: Mutex::new(processed),
-        })
-    }
-
-    /// Applies the owner guard before durably claiming the generic update key.
-    ///
-    /// `Ok(None)` means the caller owns the update and may execute its domain
-    /// behavior. Ignored updates are safe to acknowledge without a reply.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CommandError`] if the durable sidecar is unavailable.
-    pub fn claim(&self, input: &CommandInput) -> Result<Option<IgnoreReason>, CommandError> {
-        if input.actor_id != self.owner_id {
-            return Ok(Some(IgnoreReason::NotOwner));
-        }
-        let inserted = {
-            let processed = self
-                .processed
-                .lock()
-                .map_err(|_| CommandError::IdempotencyUnavailable)?;
-            processed.execute(
-                "INSERT OR IGNORE INTO processed_updates (surface, external_id) VALUES (?1, ?2)",
-                params![
-                    input.update.surface.as_str(),
-                    input.update.external_id.as_str()
-                ],
-            )?
-        };
-        Ok((inserted == 0).then_some(IgnoreReason::DuplicateUpdate))
-    }
-}
-
-impl CommandService {
-    /// Creates a command service with a durable generic idempotency sidecar.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CommandError`] when the sidecar cannot be opened or initialized.
-    pub fn new(
-        owner_id: impl Into<String>,
-        database_path: impl Into<PathBuf>,
-        processed_updates_path: impl AsRef<Path>,
-        clock: Arc<dyn Clock>,
-    ) -> Result<Self, CommandError> {
-        let database_path = database_path.into();
-        let gate = UpdateGate::new(owner_id, &database_path, processed_updates_path)?;
-        Ok(Self {
-            gate,
             database_path,
             clock,
+            processed: Mutex::new(processed),
         })
     }
 
@@ -169,9 +116,24 @@ impl CommandService {
     /// Returns [`CommandError`] when duplicate tracking is unavailable or the
     /// database cannot apply an otherwise valid command.
     pub fn handle(&self, input: &CommandInput) -> Result<CommandResult, CommandError> {
-        if let Some(reason) = self.gate.claim(input)? {
-            return Ok(CommandResult::Ignored(reason));
+        if input.actor_id != self.owner_id {
+            return Ok(CommandResult::Ignored(IgnoreReason::NotOwner));
         }
+        let processed = self
+            .processed
+            .lock()
+            .map_err(|_| CommandError::IdempotencyUnavailable)?;
+        let inserted = processed.execute(
+            "INSERT OR IGNORE INTO processed_updates (surface, external_id) VALUES (?1, ?2)",
+            params![
+                input.update.surface.as_str(),
+                input.update.external_id.as_str()
+            ],
+        )?;
+        if inserted == 0 {
+            return Ok(CommandResult::Ignored(IgnoreReason::DuplicateUpdate));
+        }
+        drop(processed);
 
         let parsed = match parse_weight_command(&input.text) {
             Ok(parsed) => parsed,

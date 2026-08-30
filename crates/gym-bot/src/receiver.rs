@@ -60,21 +60,18 @@ impl HealthReceiver {
     }
 }
 
-fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
-}
-
 fn response(status: u16, body: &str) -> HealthResponse {
     HealthResponse {
         status,
         body: body.to_owned(),
     }
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    let mut difference = left.len() ^ right.len();
+    let maximum = left.len().max(right.len());
+    for index in 0..maximum {
+        difference |= usize::from(*left.get(index).unwrap_or(&0) ^ *right.get(index).unwrap_or(&0));
+    }
+    difference == 0
 }
