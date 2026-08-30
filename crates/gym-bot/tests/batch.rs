@@ -96,6 +96,16 @@ fn inactive_invalid_empty_and_multi_chat_paths_are_explicit() {
     );
     batch.complete(1, &[]).expect("empty completion");
     assert_eq!(batch.cancel(1).expect("empty cancel"), 0);
+    batch
+        .append(2, 9, "only", at("2026-08-30T09:01:00+01:00"))
+        .expect("single entry");
+    let only = batch.snapshot(2).expect("single snapshot");
+    batch.complete(2, &only).expect("complete all");
+    assert!(
+        !batch
+            .append(2, 10, "inactive", at("2026-08-30T09:02:00+01:00"))
+            .expect("state removed")
+    );
 }
 
 #[test]

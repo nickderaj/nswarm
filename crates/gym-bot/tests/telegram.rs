@@ -45,6 +45,10 @@ fn recorded_update_dispatches_through_the_neutral_core() {
 
 #[test]
 fn dispatch_supports_ignored_and_core_error_results() {
+    assert!(matches!(
+        dispatch_recorded("not-json", |_| Ok(None)),
+        Err(DispatchError::Adapter(TelegramAdapterError::Json(_)))
+    ));
     assert_eq!(
         dispatch_recorded(r#"{"update_id":53,"future_update":{"safe":true}}"#, |_| Ok(
             Some("unused".to_owned())

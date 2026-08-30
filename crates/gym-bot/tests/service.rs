@@ -247,6 +247,9 @@ fn every_deterministic_read_and_usage_path_is_exercised() {
         .handle(&request("/gym dumbbells 1x1"))
         .expect("plural alias");
     service
+        .handle(&request("/gym barbell curls 1x2 10kg"))
+        .expect("weight assignment");
+    service
         .handle(&request("/cardio bike 20"))
         .expect("no distance");
     assert!(
