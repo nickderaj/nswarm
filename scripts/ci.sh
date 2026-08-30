@@ -32,4 +32,5 @@ cargo +nightly-2025-09-18 llvm-cov --branch --fail-under-lines 90 --json \
 python3 scripts/check_coverage.py target/coverage.json origin/main
 
 require_command cargo-semver-checks
+python3 -m unittest scripts/test_check_semver.py
 python3 scripts/check_semver.py origin/main
