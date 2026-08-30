@@ -1,0 +1,19 @@
+{
+  "package": "hermes-agent",
+  "package_version": "0.20.5",
+  "python_requires": ">=3.11,<3.14",
+  "repository": "https://github.com/NousResearch/hermes-agent.git",
+  "tag": "v2026.8.19",
+  "tag_object_sha": "b05e680e63d39d5a8e3ec0f5842a41d1c4209c03",
+  "commit_sha": "fcbd1076a93841fa88855acce810e342a5b78101",
+  "plan_source_commit_prefix": "68518c1",
+  "source_files": {
+    "agent/agent_init.py": "1a553208ece88af251a79f117aad0c555bc45568ff260c15b58d72dbd6279b75",
+    "agent/conversation_loop.py": "740349e7ff0aafda0585d84484824a01ac8ca78e86dafa11dc9014f0a621a326",
+    "gateway/platforms/api_server.py": "204fa3e857dc50c032e084f2e8ebd864ea3ebbac80891f65ad85760e92edfeda",
+    "gateway/run.py": "ce4ad5d6aae293acb29a308a93b8abd7606bdb7868e3b4f3ad4a0843402d51cf",
+    "pyproject.toml": "f2d8625df7b015c52a7940ac9f6dd51cc89e70ca13548511fb4f293c90926d99",
+    "tools/mcp_tool.py": "1ed7ba9edd353ff6c1351efd8d766bf814cb1e6505926c01d50ef029008e04f8",
+    "uv.lock": "64a66f8a0ce1d23ea10c16ca89b7104f1828a8f21cf1dd95d7cb74e4bd3efa10"
+  }
+}
