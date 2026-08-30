@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.check_semver import package_delta, workspace_package_names
+from scripts.check_semver import (
+    MSRV_RESOLVER_ENV,
+    package_delta,
+    semver_environment,
+    workspace_package_names,
+)
 
 
 class PackageDeltaTests(unittest.TestCase):
@@ -42,6 +47,13 @@ class PackageDeltaTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "must be unique"):
             workspace_package_names(metadata)
+
+    def test_semver_scratch_packages_respect_the_workspace_msrv(self) -> None:
+        environment = semver_environment(
+            {"PATH": "/toolchain/bin", MSRV_RESOLVER_ENV: "allow"}
+        )
+        self.assertEqual(environment[MSRV_RESOLVER_ENV], "fallback")
+        self.assertEqual(environment["PATH"], "/toolchain/bin")
 
 
 if __name__ == "__main__":
