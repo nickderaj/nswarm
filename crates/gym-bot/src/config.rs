@@ -9,16 +9,12 @@ use crate::database::validate_existing;
 /// Validated deployable gym configuration.
 #[derive(Debug)]
 pub struct GymConfig {
-    /// New v1 Telegram token, never rendered in diagnostics.
-    pub telegram_token: String,
-    /// Single authorized Telegram actor.
-    pub owner_id: String,
     /// Disposable copied frozen-schema database.
     pub database_path: PathBuf,
-    /// v1-only durable update sidecar.
-    pub processed_updates_path: PathBuf,
     /// Fleet-owned MCP socket.
     pub socket_path: PathBuf,
+    /// Fleet-owned group expected on the MCP socket directory and socket.
+    pub socket_group: String,
     /// Configured IANA time zone.
     pub timezone: String,
 }
@@ -43,23 +39,28 @@ impl GymConfig {
     }
 
     fn from_values(values: &HashMap<String, String>) -> Result<Self, ConfigError> {
-        let token = required(values, "GYM_BOT_TOKEN")?;
-        let owner_id = required(values, "OWNER_TELEGRAM_ID")?;
-        owner_id.parse::<i64>().map_err(|_| ConfigError::OwnerId)?;
         let data = PathBuf::from(required(values, "GYM_DATA_DIR")?);
         if !data.is_absolute() {
             return Err(ConfigError::DataRoot);
         }
         let database_path = data.join("gym.db");
         validate_existing(&database_path).map_err(ConfigError::Database)?;
+        let socket_path = PathBuf::from(required(values, "NSWARM_MCP_SOCKET")?);
+        if !socket_path.is_absolute() {
+            return Err(ConfigError::SocketPath);
+        }
+        let socket_group = required(values, "NSWARM_MCP_SOCKET_GROUP")?;
+        if socket_group.len() > 64
+            || !socket_group
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(ConfigError::SocketGroup);
+        }
         Ok(Self {
-            telegram_token: token,
-            owner_id,
             database_path,
-            processed_updates_path: data.join("processed-updates.db"),
-            socket_path: values
-                .get("GYM_MCP_SOCKET")
-                .map_or_else(|| PathBuf::from("/run/gym/mcp.sock"), PathBuf::from),
+            socket_path,
+            socket_group,
             timezone: values
                 .get("TIMEZONE")
                 .cloned()
@@ -83,12 +84,15 @@ pub enum ConfigError {
     /// A required environment variable was absent; its value is never printed.
     #[error("required gym setting {0} is missing")]
     Missing(&'static str),
-    /// Owner identity must be numeric.
-    #[error("OWNER_TELEGRAM_ID must be an integer")]
-    OwnerId,
     /// Data roots must be explicit absolute paths.
     #[error("GYM_DATA_DIR must be an absolute path")]
     DataRoot,
+    /// Fleet socket paths must be absolute.
+    #[error("NSWARM_MCP_SOCKET must be an absolute path")]
+    SocketPath,
+    /// Fleet socket groups use the portable service-identity alphabet.
+    #[error("NSWARM_MCP_SOCKET_GROUP must be a portable group name")]
+    SocketGroup,
     /// Copied database validation failed.
     #[error("configured gym database is unavailable: {0}")]
     Database(crate::database::DatabaseError),
@@ -97,6 +101,7 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     use super::{ConfigError, GymConfig};
 
@@ -105,15 +110,9 @@ mod tests {
         let mut values = HashMap::new();
         assert!(matches!(
             GymConfig::from_values(&values),
-            Err(ConfigError::Missing("GYM_BOT_TOKEN"))
+            Err(ConfigError::Missing("GYM_DATA_DIR"))
         ));
-        values.insert("GYM_BOT_TOKEN".to_owned(), "synthetic-secret".to_owned());
-        values.insert("OWNER_TELEGRAM_ID".to_owned(), "not-an-id".to_owned());
         values.insert("GYM_DATA_DIR".to_owned(), "relative".to_owned());
-        let error = GymConfig::from_values(&values).expect_err("invalid owner");
-        assert!(matches!(error, ConfigError::OwnerId));
-        assert!(!error.to_string().contains("synthetic-secret"));
-        values.insert("OWNER_TELEGRAM_ID".to_owned(), "1001".to_owned());
         assert!(matches!(
             GymConfig::from_values(&values),
             Err(ConfigError::DataRoot)
@@ -132,21 +131,24 @@ mod tests {
         )
         .expect("fixture");
         let values = HashMap::from([
-            ("GYM_BOT_TOKEN".to_owned(), "synthetic".to_owned()),
-            ("OWNER_TELEGRAM_ID".to_owned(), "1001".to_owned()),
             (
                 "GYM_DATA_DIR".to_owned(),
                 directory.path().display().to_string(),
             ),
+            (
+                "NSWARM_MCP_SOCKET".to_owned(),
+                "/run/gym/mcp.sock".to_owned(),
+            ),
+            (
+                "NSWARM_MCP_SOCKET_GROUP".to_owned(),
+                "gym-access".to_owned(),
+            ),
         ]);
         let config = GymConfig::from_values(&values).expect("valid config");
-        assert_eq!(config.owner_id, "1001");
         assert_eq!(config.timezone, "Europe/London");
         assert_eq!(config.database_path, directory.path().join("gym.db"));
-        assert_eq!(
-            config.processed_updates_path,
-            directory.path().join("processed-updates.db")
-        );
+        assert_eq!(config.socket_path, PathBuf::from("/run/gym/mcp.sock"));
+        assert_eq!(config.socket_group, "gym-access");
         let mut custom = values;
         custom.insert("TIMEZONE".to_owned(), "UTC".to_owned());
         assert_eq!(
@@ -159,7 +161,7 @@ mod tests {
 
     #[test]
     fn environment_loader_executes_without_exposing_values() {
-        let error = GymConfig::from_env().expect_err("test environment has no gym token");
+        let error = GymConfig::from_env().expect_err("test environment has no gym data root");
         assert!(!error.to_string().contains("synthetic-secret"));
     }
 }

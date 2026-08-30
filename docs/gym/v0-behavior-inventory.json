@@ -42,16 +42,16 @@
       "category": "telegram",
       "surface": ["gym", "cardio", "run", "weight", "batch", "plan", "plans", "rate", "adherence", "cost", "sync", "export", "preference", "help"],
       "source_refs": ["apps/gym/src/gym/__main__.py:46-62", "apps/gym/src/gym/__main__.py:400-421"],
-      "disposition": "ported",
-      "reason": "Port transport-neutral parsing and service calls; keep Telegram types at the adapter edge."
+      "disposition": "deferred",
+      "reason": "All deterministic command handlers are ported and recorded at the adapter edge; production Telegram polling is deferred until a new token is supplied and transport verification is authorized."
     },
     {
       "id": "telegram.approval-callback",
       "category": "telegram",
       "surface": ["gym-preference:<id>:accept", "gym-preference:<id>:reject", "owner guard", "processed update dedup", "single-review transition"],
       "source_refs": ["apps/gym/src/gym/__main__.py:418", "apps/gym/src/gym/__main__.py:236-259", "apps/gym/src/gym/__main__.py:630-638", "apps/gym/src/gym/services/reflection_service.py:109-129"],
-      "disposition": "ported",
-      "reason": "Decode Keep/Reject callback queries at the Telegram edge, preserve generic update identity for owner guard and deduplication, and apply an idempotent SQLite review transition."
+      "disposition": "deferred",
+      "reason": "Callback decoding and the idempotent SQLite Keep/Reject transition are ported; production Telegram callback delivery remains deferred with polling."
     },
     {
       "id": "telegram.owner-dedup",
@@ -59,7 +59,7 @@
       "surface": ["owner guard", "processed update dedup", "recorded Telegram-shaped inputs"],
       "source_refs": ["apps/gym/src/gym/__main__.py:85-90", "apps/gym/src/gym/db/schema.py:21-23"],
       "disposition": "step2",
-      "reason": "Step 2 already checks owner before durable generic (surface, external_id) dedup; Step 4 extends it to all routes and polling."
+      "reason": "Step 2 already checks owner before durable generic (surface, external_id) dedup; production polling remains deferred."
     },
     {
       "id": "telegram.formatting",
@@ -138,8 +138,8 @@
       "category": "health",
       "surface": ["POST /import/health", "bearer auth", "1 MiB body limit", "30 requests/minute", "strict payload"],
       "source_refs": ["apps/gym/src/gym/importers/receiver.py:15-54"],
-      "disposition": "ported",
-      "reason": "Port the optional lifecycle boundary and deterministic local tests; deployment remains tailnet-only and credential-free in git."
+      "disposition": "deferred",
+      "reason": "The bearer-authenticated receiver contract and deterministic importer are ported; no TCP listener or Health credentials are deployed in PR #5."
     },
     {
       "id": "health.import",
@@ -176,10 +176,10 @@
     {
       "id": "config.startup",
       "category": "runtime",
-      "surface": ["required Telegram token", "required owner ID", "timezone", "data root", "Health receiver", "frozen schema validation before polling"],
+      "surface": ["timezone", "data root", "MCP socket path and group", "frozen schema validation before serving"],
       "source_refs": ["apps/gym/src/gym/config.py:14-95", "apps/gym/src/gym/__main__.py:67-90", "apps/gym/src/gym/__main__.py:535-564"],
       "disposition": "ported",
-      "reason": "Validate secret presence without logging values, open only the explicit copied database, and stop services gracefully."
+      "reason": "Validate only the MCP runtime settings in use, open the explicit copied database, and reject undeclared transport configuration."
     },
     {
       "id": "parallel.copy-boundary",

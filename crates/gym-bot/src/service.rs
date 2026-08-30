@@ -1,8 +1,15 @@
 //! Transport-neutral deterministic gym domain service.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+    path::PathBuf,
+    sync::Arc,
+};
 
+use chrono::{DateTime, Duration, FixedOffset};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
@@ -15,8 +22,14 @@ const GYM_USAGE: &str = "Usage: /gym <exercise> <sets>x<reps> [weight] [@rpe]";
 const CARDIO_USAGE: &str = "Usage: /cardio <activity> <minutes> [distance_km]";
 const RATE_USAGE: &str = "Usage: /rate <1-5> [notes]";
 const PREFERENCE_USAGE: &str = "Usage: /preference <key> <value>";
+const BATCH_USAGE: &str = "Usage: /batch [open|status|flush|cancel|retry]";
+const ADHERENCE_USAGE: &str = "Usage: /adherence [number of plans]";
 const AGENT_UNAVAILABLE: &str =
     "Agent-dependent gym behavior is unavailable while architecture decision D23 is unresolved.";
+const BATCH_EXTRACTION_UNAVAILABLE: &str = "Batch extraction is agent-dependent and unavailable while architecture decision D23 is unresolved; the buffer was kept for /batch retry.";
+const IMPORT_UNAVAILABLE: &str =
+    "Apple Health archive import is unavailable through this deterministic service.";
+const UNKNOWN_COMMAND: &str = "Unknown command. Use /help to see supported gym commands.";
 
 /// Request accepted by the deterministic gym domain service.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,6 +38,24 @@ pub struct ServiceRequest {
     pub conversation_id: String,
     /// Plain user-authored text.
     pub text: String,
+}
+
+/// Owner decision for a previously proposed inferred preference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreferenceReviewDecision {
+    /// Activate the inferred preference.
+    Keep,
+    /// Leave the inferred preference inactive.
+    Reject,
+}
+
+/// Transport-neutral review of one inferred preference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreferenceReviewRequest {
+    /// Frozen-schema preference row identity.
+    pub preference_id: i64,
+    /// Explicit owner decision.
+    pub decision: PreferenceReviewDecision,
 }
 
 /// Deterministic gym command and query service.
@@ -55,14 +86,48 @@ impl GymService {
             "/weight" => self.weight(&connection, text)?,
             "/gym" => self.strength(&connection, text)?,
             "/cardio" | "/run" => self.cardio(&connection, text)?,
+            "/batch" => self.batch(&connection, request, text)?,
             "/plans" => plans(&connection, text)?,
             "/plan" => plan(&connection, text)?,
             "/rate" => rate(&connection, text)?,
+            "/adherence" => adherence(&connection, text)?,
             "/cost" => cost(&connection)?,
             "/sync" => sync_status(&connection)?,
+            "/export" => self.export(&connection)?,
+            "/import_zip" => IMPORT_UNAVAILABLE.to_owned(),
             "/preference" => preference(&connection, text)?,
             "/help" => help_text().to_owned(),
+            command if command.starts_with('/') => UNKNOWN_COMMAND.to_owned(),
             _ => AGENT_UNAVAILABLE.to_owned(),
+        })
+    }
+
+    /// Applies a deterministic Keep/Reject preference-review callback.
+    ///
+    /// The conditional update makes retries harmless: only an unreviewed,
+    /// inactive inferred preference can transition once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError`] when frozen storage is unavailable.
+    pub fn review_preference(
+        &self,
+        request: PreferenceReviewRequest,
+    ) -> Result<String, ServiceError> {
+        let connection = open_existing(&self.database_path)?;
+        let active = i64::from(request.decision == PreferenceReviewDecision::Keep);
+        let updated = connection.execute(
+            "UPDATE preferences SET active=?1, reviewed_at=?2 \
+             WHERE id=?3 AND source='inferred' AND active=0 AND reviewed_at IS NULL",
+            params![active, self.clock.now_iso8601(), request.preference_id],
+        )?;
+        Ok(if updated == 0 {
+            "This preference was already reviewed.".to_owned()
+        } else {
+            match request.decision {
+                PreferenceReviewDecision::Keep => "Preference accepted.".to_owned(),
+                PreferenceReviewDecision::Reject => "Preference rejected.".to_owned(),
+            }
         })
     }
 
@@ -239,6 +304,164 @@ impl GymService {
                 .unwrap_or_default()
         ))
     }
+
+    fn batch(
+        &self,
+        connection: &Connection,
+        request: &ServiceRequest,
+        text: &str,
+    ) -> Result<String, ServiceError> {
+        let Ok(chat_id) = request.conversation_id.parse::<i64>() else {
+            return Ok("Batch commands require a numeric conversation id.".to_owned());
+        };
+        let mut tokens = text.split_whitespace().skip(1);
+        let subcommand = tokens.next().unwrap_or("toggle").to_ascii_lowercase();
+        if tokens.next().is_some() {
+            return Ok(BATCH_USAGE.to_owned());
+        }
+        match subcommand.as_str() {
+            "status" => {
+                let (count, earliest): (i64, Option<String>) = connection.query_row(
+                    "SELECT count(*), min(sent_at) FROM batch_buffer WHERE chat_id=?1",
+                    [chat_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                Ok(format!(
+                    "Batch: {count} messages{}",
+                    earliest
+                        .map(|value| format!(" since {}", batch_display_time(&value)))
+                        .unwrap_or_default()
+                ))
+            }
+            "cancel" => {
+                let transaction = connection.unchecked_transaction()?;
+                let count: i64 = transaction.query_row(
+                    "SELECT count(*) FROM batch_buffer WHERE chat_id=?1",
+                    [chat_id],
+                    |row| row.get(0),
+                )?;
+                transaction.execute("DELETE FROM batch_buffer WHERE chat_id=?1", [chat_id])?;
+                transaction.execute("DELETE FROM batch_state WHERE chat_id=?1", [chat_id])?;
+                transaction.commit()?;
+                Ok(format!("Cancelled batch with {count} buffered messages."))
+            }
+            "flush" | "retry" => batch_flush_reply(connection, chat_id),
+            "toggle" => {
+                let active = connection
+                    .query_row(
+                        "SELECT 1 FROM batch_state WHERE chat_id=?1",
+                        [chat_id],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if active {
+                    batch_flush_reply(connection, chat_id)
+                } else {
+                    self.open_batch(connection, chat_id)
+                }
+            }
+            "open" => self.open_batch(connection, chat_id),
+            _ => Ok(BATCH_USAGE.to_owned()),
+        }
+    }
+
+    fn open_batch(&self, connection: &Connection, chat_id: i64) -> Result<String, ServiceError> {
+        let now = DateTime::<FixedOffset>::parse_from_rfc3339(&self.clock.now_iso8601())?;
+        connection.execute(
+            "INSERT INTO batch_state (chat_id,opened_at,auto_flush_at) VALUES (?1,?2,?3) \
+             ON CONFLICT(chat_id) DO UPDATE SET opened_at=excluded.opened_at,auto_flush_at=excluded.auto_flush_at",
+            params![
+                chat_id,
+                now.to_rfc3339(),
+                (now + Duration::hours(12)).to_rfc3339()
+            ],
+        )?;
+        Ok(
+            "Batch opened. Send entries as normal messages; use /batch again when ready."
+                .to_owned(),
+        )
+    }
+
+    fn export(&self, connection: &Connection) -> Result<String, ServiceError> {
+        let destination = self
+            .database_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("exports/efforts.csv");
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut output = BufWriter::new(File::create(&destination)?);
+        output.write_all(
+            b"started_at,movement,position,reps,weight_kg,duration_s,distance_m,rpe,notes\r\n",
+        )?;
+        let mut statement = connection.prepare(
+            "SELECT s.started_at, m.name, e.position, e.reps, e.weight_kg, e.duration_s, \
+             e.distance_m, e.rpe, e.notes FROM efforts e \
+             JOIN session_items i ON i.id=e.session_item_id JOIN sessions s ON s.id=i.session_id \
+             JOIN movements m ON m.id=i.movement_id ORDER BY s.started_at, e.position",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut count = 0_u64;
+        while let Some(row) = rows.next()? {
+            let values = [
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?.to_string(),
+                optional_csv::<i64>(row.get(3)?),
+                optional_csv_float(row.get(4)?),
+                optional_csv_float(row.get(5)?),
+                optional_csv_float(row.get(6)?),
+                optional_csv::<i64>(row.get(7)?),
+                row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            ];
+            write!(
+                output,
+                "{}\r\n",
+                values.map(|value| csv_field(&value)).join(",")
+            )?;
+            count += 1;
+        }
+        output.flush()?;
+        Ok(format!(
+            "Exported {count} efforts to {}",
+            destination.display()
+        ))
+    }
+}
+
+fn batch_flush_reply(connection: &Connection, chat_id: i64) -> Result<String, ServiceError> {
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM batch_buffer WHERE chat_id=?1",
+        [chat_id],
+        |row| row.get(0),
+    )?;
+    Ok(if count == 0 {
+        "No active batch.".to_owned()
+    } else {
+        BATCH_EXTRACTION_UNAVAILABLE.to_owned()
+    })
+}
+
+fn batch_display_time(value: &str) -> String {
+    value.get(..16).unwrap_or(value).replace('T', " ")
+}
+
+fn optional_csv<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn optional_csv_float(value: Option<f64>) -> String {
+    value.map(|value| format!("{value:?}")).unwrap_or_default()
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\r', '\n']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
 }
 
 fn recent_strength(connection: &Connection, requested: &str) -> Result<String, ServiceError> {
@@ -389,6 +612,74 @@ fn rate(connection: &Connection, text: &str) -> Result<String, ServiceError> {
     Ok("Thanks — plan feedback saved.".to_owned())
 }
 
+fn adherence(connection: &Connection, text: &str) -> Result<String, ServiceError> {
+    let mut tokens = text.split_whitespace().skip(1);
+    let limit = match tokens.next() {
+        Some(value) => match value.parse::<u16>() {
+            Ok(value) => value.clamp(1, 20),
+            Err(_) => return Ok(ADHERENCE_USAGE.to_owned()),
+        },
+        None => 5,
+    };
+    if tokens.next().is_some() {
+        return Ok(ADHERENCE_USAGE.to_owned());
+    }
+    let mut statement = connection.prepare(
+        "SELECT id, coalesce(for_date, substr(created_at,1,10)), plan_json \
+         FROM workout_plans ORDER BY id DESC LIMIT ?1",
+    )?;
+    let plans = statement
+        .query_map([limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if plans.is_empty() {
+        return Ok("No plans to compare yet.".to_owned());
+    }
+    let mut lines = Vec::with_capacity(plans.len());
+    for (plan_id, date, plan_json) in plans {
+        let value: Value = serde_json::from_str(&plan_json)?;
+        let items = value
+            .get("items")
+            .and_then(Value::as_array)
+            .filter(|items| (1..=20).contains(&items.len()))
+            .ok_or(ServiceError::InvalidPlanJson)?;
+        let exercises = items
+            .iter()
+            .map(|item| {
+                item.get("exercise")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|exercise| !exercise.is_empty())
+                    .map(str::to_lowercase)
+                    .ok_or(ServiceError::InvalidPlanJson)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut actual_statement = connection.prepare(
+            "SELECT DISTINCT m.name FROM sessions s \
+             JOIN session_items i ON i.session_id=s.id \
+             JOIN movements m ON m.id=i.movement_id \
+             WHERE substr(s.started_at,1,10)=?1 AND m.modality='strength'",
+        )?;
+        let actual = actual_statement
+            .query_map([&date], |row| row.get::<_, String>(0))?
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+        let completed = exercises
+            .iter()
+            .filter(|exercise| actual.contains(*exercise))
+            .count();
+        lines.push(format!(
+            "#{plan_id} · {date} · {completed}/{} exercises",
+            exercises.len()
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
 fn cost(connection: &Connection) -> Result<String, ServiceError> {
     let (calls, prompt, completion): (i64, i64, i64) = connection.query_row(
         "SELECT count(*), coalesce(sum(prompt_tokens),0), coalesce(sum(completion_tokens),0) \
@@ -462,7 +753,7 @@ fn canonical_name(value: &str) -> String {
 }
 
 const fn help_text() -> &'static str {
-    "/gym <exercise> <sets>x<reps> [weight]kg — log strength (no args: recent history)\n/cardio <activity> <minutes> [distance_km] — log cardio\n/run — alias for /cardio\n/weight [kg] — log body weight (no args: recent history)\n/plan <id> — show a stored plan; generation is unavailable under D23\n/plans [n] — list recent plans\n/rate <1-5> [notes] — rate the latest plan\n/cost — show stored model usage\n/sync — show Apple Health import status\n/preference <key> <value> — record a stated preference\n/help — show this message"
+    "/gym <exercise> <sets>x<reps> [weight]kg — log strength (no args: recent history)\n/cardio <activity> <minutes> [distance_km] — log cardio\n/run — alias for /cardio\n/weight [kg] — log body weight (no args: recent history)\n/batch [open|status|flush|cancel|retry] — manage buffered logging; extraction is unavailable under D23\n/plan <id> — show a stored plan; generation is unavailable under D23\n/plans [n] — list recent plans\n/rate <1-5> [notes] — rate the latest plan\n/adherence [n] — compare stored plans with logged strength\n/cost — show stored model usage\n/sync — show Apple Health import status\n/export — export logged efforts to CSV\n/import_zip — unavailable through this deterministic service\n/preference <key> <value> — record a stated preference\n/help — show this message"
 }
 
 struct General(f64);
@@ -482,4 +773,16 @@ pub enum ServiceError {
     /// A deterministic read or write failed.
     #[error("gym service storage failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// The injected clock did not return the documented RFC-3339 shape.
+    #[error("gym service clock returned an invalid timestamp: {0}")]
+    Time(#[from] chrono::ParseError),
+    /// A stored plan violated the frozen validated plan JSON contract.
+    #[error("stored workout plan JSON is invalid")]
+    InvalidPlanJson,
+    /// Stored workout plan JSON could not be decoded.
+    #[error("stored workout plan JSON could not be decoded: {0}")]
+    Json(#[from] serde_json::Error),
+    /// A deterministic export could not be written.
+    #[error("gym export failed: {0}")]
+    Io(#[from] std::io::Error),
 }

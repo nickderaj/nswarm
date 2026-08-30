@@ -8,6 +8,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(target_os = "linux")]
+use std::os::linux::fs::MetadataExt as LinuxMetadataExt;
+
 use chrono::{DateTime, Days};
 use rmcp::{
     RoleServer, ServerHandler, ServiceExt,
@@ -556,10 +559,11 @@ impl From<rusqlite::Error> for McpToolError {
 /// Returns [`McpSocketError`] when the socket cannot be bound or accepted.
 pub async fn run_mcp_server(
     socket_path: impl AsRef<Path>,
+    socket_group: &str,
     database_path: impl Into<PathBuf>,
     clock: Arc<dyn Clock>,
 ) -> Result<(), McpSocketError> {
-    McpServer::bind(socket_path, database_path, clock)?
+    McpServer::bind_for_group(socket_path, socket_group, database_path, clock)?
         .run()
         .await
 }
@@ -584,13 +588,47 @@ impl McpServer {
         database_path: impl Into<PathBuf>,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, McpSocketError> {
-        let socket_path = socket_path.as_ref().to_path_buf();
-        let database_path = database_path.into();
+        Self::bind_inner(socket_path.as_ref(), None, database_path.into(), clock)
+    }
+
+    /// Binds the production socket and verifies the Fleet-declared group on Linux.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`McpSocketError`] if the parent is not the expected setgid
+    /// directory or the created socket does not inherit the expected group.
+    pub fn bind_for_group(
+        socket_path: impl AsRef<Path>,
+        socket_group: &str,
+        database_path: impl Into<PathBuf>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, McpSocketError> {
+        Self::bind_inner(
+            socket_path.as_ref(),
+            Some(socket_group),
+            database_path.into(),
+            clock,
+        )
+    }
+
+    fn bind_inner(
+        socket_path: &Path,
+        socket_group: Option<&str>,
+        database_path: PathBuf,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, McpSocketError> {
+        let socket_path = socket_path.to_path_buf();
         validate_existing(&database_path)?;
-        ensure_group_socket_parent(&socket_path)?;
-        let listener = UnixListener::bind(&socket_path)?;
+        ensure_group_socket_parent(&socket_path, socket_group)?;
+        let listener = UnixListener::bind(&socket_path).map_err(|error| {
+            std::io::Error::new(error.kind(), format!("bind Unix socket: {error}"))
+        })?;
         let guard = SocketGuard(socket_path.clone());
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o660))?;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o660)).map_err(
+            |error| std::io::Error::new(error.kind(), format!("set socket mode: {error}")),
+        )?;
+        #[cfg(target_os = "linux")]
+        verify_expected_group(&socket_path, socket_group)?;
         Ok(Self {
             listener,
             _guard: guard,
@@ -622,19 +660,80 @@ impl McpServer {
     }
 }
 
-fn ensure_group_socket_parent(socket_path: &Path) -> Result<(), std::io::Error> {
+fn ensure_group_socket_parent(
+    socket_path: &Path,
+    expected_group: Option<&str>,
+) -> Result<(), std::io::Error> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = expected_group;
     let parent = socket_path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "gym MCP socket needs a parent directory",
         )
     })?;
-    let mode = std::fs::metadata(parent)?.permissions().mode() & 0o777;
-    if mode & 0o007 != 0 || mode & 0o050 != 0o050 {
+    let metadata = std::fs::metadata(parent)?;
+    let mode = metadata.permissions().mode();
+    if mode & 0o777 != 0o750 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
-                "gym MCP socket directory mode {mode:o} must grant group access and deny world access"
+                "gym MCP socket directory mode {:o} must be 750",
+                mode & 0o777
+            ),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(group) = expected_group {
+        if mode & 0o2000 == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "gym MCP socket directory must have setgid enabled",
+            ));
+        }
+        verify_linux_group(&metadata, group, "directory")?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_expected_group(path: &Path, expected_group: Option<&str>) -> Result<(), std::io::Error> {
+    if let Some(group) = expected_group {
+        verify_linux_group(&std::fs::metadata(path)?, group, "socket")?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_linux_group(
+    metadata: &std::fs::Metadata,
+    expected_group: &str,
+    kind: &str,
+) -> Result<(), std::io::Error> {
+    let group_file = std::fs::read_to_string("/etc/group")?;
+    let expected_gid = group_file
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split(':');
+            let name = fields.next()?;
+            let _password = fields.next()?;
+            let gid = fields.next()?;
+            (name == expected_group)
+                .then_some(gid)
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("configured gym MCP group {expected_group:?} does not exist"),
+            )
+        })?;
+    if metadata.st_gid() != expected_gid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "gym MCP {kind} group id {} does not match {expected_group} ({expected_gid})",
+                metadata.st_gid()
             ),
         ));
     }

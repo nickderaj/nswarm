@@ -189,8 +189,11 @@ def main() -> None:
         fail("Telegram command surface differs from its reviewed SHA-256 pin")
     if surface_pins["mcp_tools"] != surface_digest(tools):
         fail("MCP tool surface differs from its reviewed SHA-256 pin")
-    if require_behavior(by_id, "telegram.approval-callback")["disposition"] != "ported":
-        fail("the deterministic Keep/Reject approval callback must remain ported")
+    if require_behavior(by_id, "telegram.approval-callback")["disposition"] not in {
+        "ported",
+        "deferred",
+    }:
+        fail("the Keep/Reject approval callback must remain ported or transport-deferred")
     if require_behavior(by_id, "telegram.free-text-agent")["disposition"] != "blocked_d23":
         fail("agent-dependent free text must remain blocked by D23")
     if require_behavior(by_id, "cutover.production")["disposition"] != "deferred":

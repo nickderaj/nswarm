@@ -27,6 +27,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     runtime.block_on(run_mcp_server(
         config.socket_path,
+        &config.socket_group,
         config.database_path,
         Arc::new(SystemClock::new(&config.timezone)?),
     ))?;
