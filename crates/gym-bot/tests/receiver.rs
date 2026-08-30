@@ -47,3 +47,38 @@ fn receiver_requires_bearer_and_returns_bounded_results() {
         413
     );
 }
+
+#[test]
+fn receiver_authorization_matches_the_exact_bearer_value() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let receiver = HealthReceiver::new("fixture-secret", HealthImporter::new(database));
+    for authorization in [
+        None,
+        Some(""),
+        Some("fixture-secret"),
+        Some("bearer fixture-secret"),
+        Some("Bearer"),
+        Some("Bearer  fixture-secret"),
+        Some("Bearer fixture-secret "),
+        Some("Bearer fixture-secret-suffix"),
+        Some("prefix-Bearer fixture-secret"),
+    ] {
+        let response = receiver.handle(HealthRequest {
+            authorization,
+            body: b"not parsed when unauthorized",
+        });
+        assert_eq!(response.status, 401, "{authorization:?}");
+        assert_eq!(response.body, r#"{"error":"unauthorized"}"#);
+    }
+
+    assert_eq!(
+        receiver
+            .handle(HealthRequest {
+                authorization: Some("Bearer fixture-secret"),
+                body: br#"{"workouts":[],"metrics":[]}"#,
+            })
+            .status,
+        200
+    );
+}

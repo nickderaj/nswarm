@@ -37,6 +37,9 @@ fn binary_validates_disposable_database_before_binding_socket() {
         .env("OWNER_TELEGRAM_ID", "1001")
         .env("GYM_DATA_DIR", directory.path())
         .env("TIMEZONE", "Europe/London")
+        .env("NSWARM_MCP_SOCKET", "/definitely/missing/mcp.sock")
+        .env("NSWARM_MCP_SOCKET_GROUP", primary_group())
+        .env("HEALTH_IMPORT_TOKEN", "synthetic-health-secret")
         .output()
         .expect("run configured binary");
     assert!(!output.status.success());
@@ -67,7 +70,7 @@ fn explicit_config_map_rejects_missing_database_without_secret_leak() {
 #[test]
 fn configured_binary_reaches_bound_runtime_and_stays_alive() {
     let directory = tempfile::tempdir().expect("tempdir");
-    std::fs::set_permissions(directory.path(), Permissions::from_mode(0o750))
+    std::fs::set_permissions(directory.path(), Permissions::from_mode(0o2750))
         .expect("group-readable runtime directory");
     common::copy_fixture(&directory, "gym.db");
     let mut child = Command::new(env!("CARGO_BIN_EXE_gym-bot"))
@@ -76,11 +79,25 @@ fn configured_binary_reaches_bound_runtime_and_stays_alive() {
         .env("OWNER_TELEGRAM_ID", "1001")
         .env("GYM_DATA_DIR", directory.path())
         .env("TIMEZONE", "UTC")
-        .env("GYM_MCP_SOCKET", directory.path().join("mcp.sock"))
+        .env("NSWARM_MCP_SOCKET", directory.path().join("mcp.sock"))
+        .env("NSWARM_MCP_SOCKET_GROUP", primary_group())
+        .env("HEALTH_IMPORT_TOKEN", "synthetic-health-secret")
         .spawn()
         .expect("start configured service");
     std::thread::sleep(Duration::from_millis(100));
     assert!(child.try_wait().expect("status").is_none());
     child.kill().expect("stop service");
     child.wait().expect("reap service");
+}
+
+fn primary_group() -> String {
+    let output = Command::new("id")
+        .arg("-gn")
+        .output()
+        .expect("query primary group");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .expect("group name is UTF-8")
+        .trim()
+        .to_owned()
 }

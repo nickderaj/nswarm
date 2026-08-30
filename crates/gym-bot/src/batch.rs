@@ -35,6 +35,41 @@ impl BatchService {
         }
     }
 
+    /// Reports whether a conversation currently has an open batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BatchError`] when storage is unavailable.
+    pub fn active(&self, chat_id: i64) -> Result<bool, BatchError> {
+        let connection = open_existing(&self.database_path)?;
+        Ok(connection
+            .query_row(
+                "SELECT 1 FROM batch_state WHERE chat_id=?1",
+                [chat_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Returns the buffered message count and earliest source timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BatchError`] when storage is unavailable.
+    pub fn status(&self, chat_id: i64) -> Result<(usize, Option<String>), BatchError> {
+        let connection = open_existing(&self.database_path)?;
+        let (count, earliest): (i64, Option<String>) = connection.query_row(
+            "SELECT count(*), min(sent_at) FROM batch_buffer WHERE chat_id=?1",
+            [chat_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((
+            usize::try_from(count).map_err(|_| BatchError::CountOutOfRange)?,
+            earliest,
+        ))
+    }
+
     /// Opens or refreshes a batch with its persisted 12-hour deadline.
     ///
     /// # Errors
