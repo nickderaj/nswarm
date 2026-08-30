@@ -143,7 +143,9 @@ impl GymMcp {
     /// # Errors
     ///
     /// Returns [`McpQueryError`] when bounds, database validation, or the fixed
-    /// read query fails.
+    /// read query fails. Every row in the indexed candidate window must contain
+    /// an RFC-3339 timestamp with an explicit offset; one invalid timestamp
+    /// fails the whole call rather than returning silent partial results.
     pub fn body_metrics(&self, args: BodyMetricsArgs) -> Result<Vec<BodyMetric>, McpQueryError> {
         let args = args.validate()?;
         let connection = open_existing_read_only(&self.database_path)?;

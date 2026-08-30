@@ -11,7 +11,7 @@ use gym_bot::{
     clock::FixedClock,
     database::open_existing,
     mcp::{
-        BodyMetricsArgs, GymMcp, MAX_DAYS, MAX_LIMIT, MAX_METRIC_LENGTH, McpServer,
+        BodyMetricsArgs, GymMcp, MAX_DAYS, MAX_LIMIT, MAX_METRIC_LENGTH, McpQueryError, McpServer,
         capability_summary, connect_mcp_socket, decode_mcp_frame,
     },
 };
@@ -154,6 +154,50 @@ fn query_includes_a_whole_second_exactly_at_the_cutoff() {
         .expect("exact-cutoff query");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].value.to_bits(), 73.0_f64.to_bits());
+}
+
+#[test]
+fn selected_non_rfc3339_timestamp_fails_the_whole_query() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "offset-free.db");
+    open_existing(&database)
+        .expect("open fixture")
+        .execute_batch(
+            "INSERT INTO body_metrics (date, metric, value, unit, source) VALUES \
+             ('2026-08-29T08:15:30+00:00', 'weight_kg', 82, 'kg', 'manual'), \
+             ('2026-08-29T08:15:30', 'weight_kg', 83, 'kg', 'legacy');",
+        )
+        .expect("seed valid and offset-free rows");
+    let service = GymMcp::new(&database, Arc::new(FixedClock::new(FIXED_TIME)));
+
+    let error = service
+        .body_metrics(BodyMetricsArgs::default())
+        .expect_err("an offset-free candidate must fail instead of being omitted");
+    assert!(matches!(
+        error,
+        McpQueryError::StoredTimestamp(value) if value == "2026-08-29T08:15:30"
+    ));
+}
+
+#[test]
+fn malformed_timestamp_outside_the_candidate_window_is_not_a_table_audit() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "out-of-window.db");
+    open_existing(&database)
+        .expect("open fixture")
+        .execute_batch(
+            "INSERT INTO body_metrics (date, metric, value, unit, source) VALUES \
+             ('0000-not-a-time', 'weight_kg', 81, 'kg', 'legacy'), \
+             ('2026-08-29T08:15:30+00:00', 'weight_kg', 82, 'kg', 'manual');",
+        )
+        .expect("seed out-of-window malformed row");
+    let service = GymMcp::new(&database, Arc::new(FixedClock::new(FIXED_TIME)));
+
+    let rows = service
+        .body_metrics(BodyMetricsArgs::default())
+        .expect("only selected candidates are validated");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].date, FIXED_TIME);
 }
 
 #[test]

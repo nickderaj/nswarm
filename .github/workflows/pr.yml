@@ -35,6 +35,8 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca -color
       - run: python3 scripts/policy_check.py
       - run: python3 scripts/validate_profiles.py
+      - name: Hermes evidence integrity
+        run: python3 -m unittest scripts/test_hermes_gateway_spike.py
       - run: ./scripts/check_generated.sh
       - run: cargo fmt --all --check
       - run: cargo check --locked --workspace --all-targets --all-features

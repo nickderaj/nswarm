@@ -1,8 +1,8 @@
 # nswarm v1 build status
 
 Updated: 2026-08-30 (Europe/London). Active branch:
-`codex/step3-hermes-spike`, based directly on merged PR #2 main
-`5d3f7ef4cb449df3cd9a90d4742a651140c6f3d9`.
+`codex/post-step3-followups`, based directly on merged PR #3 main
+`c8c1b69390f607be7f0ae895441b2141c74a3d93`.
 The frozen `ultron` v0 checkout has not been modified, staged, committed,
 deployed, restarted, or used as a source of private state.
 
@@ -864,3 +864,81 @@ peeled commit and source bytes. Committed checks exercise tag-object drift and
 evidence derivation, but core CI deliberately does not fetch the external
 Hermes repository; exact source-byte/call-graph verification remains a required
 run against a checked-out source tree.
+
+## Checkpoint Y — post-Step 3 follow-ups
+
+PR #3 was verified merged into protected `origin/main` at
+`c8c1b69390f607be7f0ae895441b2141c74a3d93` before this branch was created.
+The missing protected-CI invocation identified in PR #3 review is repaired:
+`scripts/test_hermes_gateway_spike.py` now runs near the start of the required
+`quality` job, before the Rust build and test stages. This makes the eleven
+deterministic pin, capability-response, source-anchor, sample-summary, outcome,
+and sanitization checks fast required PR evidence rather than a local-only
+`just ci` gate. The full external source-byte verifier remains intentionally
+manual because ordinary CI does not fetch Hermes.
+
+The stored `body_metrics.date` policy is now explicit and tested. Every row in
+the bounded indexed candidate window must parse as RFC 3339 with an explicit
+offset. One invalid selected row fails the whole query and MCP returns a generic
+storage error; valid rows are not returned as silent partial results. An
+offset-free value that a legacy naive Python `datetime.isoformat()` could have
+written is therefore unsupported. Rows lexically outside the candidate window
+are not audited by that call. Focused tests cover both the fail-closed selected
+row and the bounded-query distinction.
+
+The frozen v0 source does not prove that production data satisfies this policy.
+Its batch and Apple Health paths accept `datetime` values without requiring an
+offset and persist `.isoformat()` unchanged; v0 tests include offset-free Apple
+Health timestamps. Before Step 4 uses a production database copy, run this
+read-only corpus check on the Pi:
+
+```sql
+SELECT COUNT(*) FROM body_metrics
+WHERE date NOT GLOB '*[+-][0-9][0-9]:[0-9][0-9]'
+  AND date NOT GLOB '*Z';
+```
+
+A non-zero result blocks cutover readiness: add representative sanitized rows
+to the fixture and define a reviewed migration before running v1 against the
+copy. No production-corpus compliance or migration is claimed by this PR.
+
+The mutation-driven database-flag spellings are retained without exclusions.
+Named database flag constants and adjacent comments explain that
+`OpenFlags::union` avoids redundant bitwise-operator mutants while preserving
+mutation coverage around database validation. The parity snapshot uses the same
+equivalent flag case. The inaccurate rationale beside exact path `.eq()` was
+removed: its `==` to `!=` mutant is meaningful and the exact-path test already
+kills it. No function-level mutation skip was added.
+
+The Step 3 semver repair remains the single implementation. The runner applies
+Cargo's MSRV-aware incompatible-Rust-version fallback only to its unlocked
+scratch packages, so Rust 1.90 comparisons select compatible transitives without
+changing the workspace lockfile, MSRV, or compatibility policy. This cleanup
+duplicates no resolver logic; the Hermes evidence tests remain an independent
+early step in the required `quality` job.
+
+Chrono-to-Jiff was measured and rejected for this cleanup. The locked normal
+`gym-bot` graph has 177 unique entries. It resolves one `chrono 0.4.45` and one
+`jiff 0.2.35`, with no duplicate time-library versions; reverse-dependency
+inspection shows Chrono is still required by `rmcp 3.1.4`, `schemars 1.2.2`, and
+`teloxide-core 0.13.0`. Removing the direct gym Chrono edge would therefore
+remove no crate, exemption, or duplicate and offers no demonstrated clean-build
+benefit. An incremental `cargo check --locked -p gym-bot` completed in 6.83
+seconds Cargo time (7.41 seconds wall, 134.25 MiB maximum RSS), while existing
+cached time-library artifacts totalled about 32 MiB across profiles/features;
+neither is clean attribution to a removable direct edge. Migrating also risks
+changing RFC-3339 acceptance, calendar-day subtraction across DST, formatting,
+and the public parse-error type. Both libraries are retained.
+
+The read-only `cargo owner --list nswarm` lookup failed exactly with `no token
+found`; no authentication, owner credential, reservation, or publication was
+attempted. The separate owner action remains: authenticate explicitly and
+publish a compliant first release to reserve `nswarm`.
+
+Branch cleanup removed nothing. `codex/step2-gym-spike`,
+`codex/step3-hermes-spike`, and `overnight/bootstrap` are squash-merged PR heads
+whose original commits are not ancestors of `origin/main`, so they fail the
+strict fully-merged ancestry rule. Local `codex/workflow-bootstrap` is an
+ancestor of `origin/main` but is checked out in a separate worktree and was
+preserved rather than altering that workspace. `main` and the open PR branch
+remain protected.

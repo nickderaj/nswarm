@@ -36,3 +36,11 @@ maximum `days = 365` request therefore reads roughly one year of candidate rows;
 that is acceptable for current body-metric volumes, but a normalized indexed
 instant or a separate scan bound is required before substantially larger data
 sets are supported.
+
+Stored `body_metrics.date` values inside that indexed candidate window must be
+RFC 3339 with an explicit offset. This includes current v1 writes and normal v0
+aware-datetime writes, but excludes offset-free text that a legacy naive Python
+`datetime` could have produced. One invalid selected timestamp fails the whole
+tool call as a generic storage error: rows are never silently dropped and no
+partial-result contract is implied. Values outside the candidate window are not
+audited by a query.

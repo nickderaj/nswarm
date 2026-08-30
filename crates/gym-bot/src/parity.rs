@@ -228,6 +228,8 @@ pub struct ForeignKeyViolation {
 ///
 /// Returns [`ParityError`] when `SQLite` cannot inspect the file.
 pub fn normalize_database(path: &Path) -> Result<DatabaseSnapshot, ParityError> {
+    // Method syntax avoids a redundant bitwise-operator mutant while retaining
+    // mutation coverage for the snapshot implementation.
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_NO_MUTEX),
