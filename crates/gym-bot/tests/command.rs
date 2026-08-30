@@ -314,6 +314,29 @@ fn existing_fixture_open_is_non_migrating_and_fail_closed() {
     );
 }
 
+#[test]
+fn idempotency_sidecar_rejects_filesystem_aliases_of_the_gym_database() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let symlink = directory.path().join("gym-symlink.db");
+    std::os::unix::fs::symlink(&database, &symlink).expect("create database symlink");
+    let hard_link = directory.path().join("gym-hard-link.db");
+    std::fs::hard_link(&database, &hard_link).expect("create database hard link");
+
+    for alias in [directory.path().join("./gym.db"), symlink, hard_link] {
+        assert!(matches!(
+            CommandService::new(
+                "owner",
+                &database,
+                alias,
+                Arc::new(FixedClock::new(FIXED_TIME)),
+            ),
+            Err(CommandError::IdempotencyPathAliasesGymDatabase)
+        ));
+    }
+    open_existing(&database).expect("alias rejection leaves frozen schema intact");
+}
+
 fn metric_count(database: &std::path::Path) -> i64 {
     open_existing(database)
         .expect("open fixture")

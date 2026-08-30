@@ -13,7 +13,9 @@ directory/socket access only after group ownership is correct.
 This is a spike, not a deployable Telegram bot. It performs no Telegram polling
 or delivery and does not include Hermes. Generic `(surface, external_id)` update
 keys are persisted in a separate SQLite sidecar so restarts cannot replay a
-command and the frozen v0 gym schema remains unchanged.
+command and the frozen v0 gym schema remains unchanged. The two databases do
+not share a transaction, so backups and restores must keep `gym.db` and the
+processed-update sidecar together.
 
 The Step 2 parser intentionally implements only `/weight <kg>`. Unlike v0, a
 bare `/weight` does not list history, trailing tokens are rejected, and Python's

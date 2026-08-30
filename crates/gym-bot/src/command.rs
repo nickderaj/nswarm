@@ -1,6 +1,7 @@
 //! Transport-neutral gym command handling.
 
 use std::{
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -71,6 +72,11 @@ impl CommandService {
             return Err(CommandError::IdempotencyPathAliasesGymDatabase);
         }
         validate_existing(&database_path)?;
+        if paths_alias(&database_path, processed_updates_path)
+            .map_err(CommandError::IdempotencyPath)?
+        {
+            return Err(CommandError::IdempotencyPathAliasesGymDatabase);
+        }
         let processed = Connection::open_with_flags(
             processed_updates_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -146,6 +152,22 @@ impl CommandService {
             format_v0_general(parsed.kilograms)
         )))
     }
+}
+
+fn paths_alias(database_path: &Path, sidecar_path: &Path) -> Result<bool, std::io::Error> {
+    let database = std::fs::canonicalize(database_path)?;
+    let sidecar = match std::fs::canonicalize(sidecar_path) {
+        Ok(sidecar) => sidecar,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if database == sidecar {
+        return Ok(true);
+    }
+    let database_metadata = std::fs::metadata(database)?;
+    let sidecar_metadata = std::fs::metadata(sidecar)?;
+    Ok(database_metadata.dev() == sidecar_metadata.dev()
+        && database_metadata.ino() == sidecar_metadata.ino())
 }
 
 fn format_v0_general(value: f64) -> String {
@@ -225,6 +247,9 @@ pub enum CommandError {
     /// The sidecar must never alias the frozen v0 gym database.
     #[error("processed-update sidecar must differ from the gym database")]
     IdempotencyPathAliasesGymDatabase,
+    /// The filesystem boundary between the sidecar and gym database could not be resolved.
+    #[error("could not resolve processed-update sidecar boundary: {0}")]
+    IdempotencyPath(#[source] std::io::Error),
     /// The gym database failed validation or access.
     #[error(transparent)]
     Database(#[from] DatabaseError),
