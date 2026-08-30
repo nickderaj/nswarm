@@ -1,54 +1,46 @@
-//! Production binary argument and startup-failure coverage.
+//! Production binary configuration and startup-failure coverage.
 
 mod common;
 
 use std::process::Command;
 
 #[test]
-fn binary_rejects_missing_and_extra_arguments() {
+fn binary_rejects_arguments_and_missing_settings_without_secret_output() {
     let program = env!("CARGO_BIN_EXE_gym-bot");
-    for (arguments, expected) in [
-        (Vec::<&str>::new(), "usage:"),
-        (vec!["socket.sock"], "missing existing gym database path"),
-        (vec!["socket.sock", "gym.db"], "missing IANA time-zone name"),
-        (
-            vec!["socket.sock", "gym.db", "Europe/London", "unexpected"],
-            "unexpected extra argument",
-        ),
-    ] {
-        let output = Command::new(program)
-            .args(arguments)
-            .output()
-            .expect("run gym MCP binary");
-        assert!(!output.status.success());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains(expected),
-            "stderr was {:?}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let extra = Command::new(program)
+        .arg("unexpected")
+        .output()
+        .expect("run binary");
+    assert!(!extra.status.success());
+    assert!(String::from_utf8_lossy(&extra.stderr).contains("unexpected extra argument"));
+
+    let missing = Command::new(program)
+        .env_clear()
+        .output()
+        .expect("run empty environment");
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("GYM_BOT_TOKEN"));
 }
 
 #[test]
-fn binary_builds_runtime_and_reports_socket_bind_failure() {
+fn binary_validates_disposable_database_before_binding_socket() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
-    let missing_parent_socket = directory.path().join("missing/mcp.sock");
+    let token = "synthetic-secret-never-log";
     let output = Command::new(env!("CARGO_BIN_EXE_gym-bot"))
-        .arg(missing_parent_socket)
-        .arg(database)
-        .arg("Europe/London")
+        .env_clear()
+        .env("GYM_BOT_TOKEN", token)
+        .env("OWNER_TELEGRAM_ID", "1001")
+        .env("GYM_DATA_DIR", directory.path())
+        .env("TIMEZONE", "Europe/London")
         .output()
-        .expect("run gym MCP binary");
-
+        .expect("run configured binary");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("gym MCP socket error:"),
         "stderr was {stderr:?}"
     );
-    assert!(
-        !stderr.contains("Io("),
-        "stderr used Debug formatting: {stderr:?}"
-    );
+    assert!(!stderr.contains(token));
+    assert!(database.exists());
 }

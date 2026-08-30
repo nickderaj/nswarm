@@ -3,11 +3,11 @@
     reason = "the exact teloxide 0.17 and rmcp 3.1 graphs contain documented incompatible transitive majors"
 )]
 
-//! Minimal production entrypoint for the gym MCP spike.
+//! Deployable gym service entrypoint.
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
-use gym_bot::{clock::SystemClock, mcp::run_mcp_server};
+use gym_bot::{clock::SystemClock, config::GymConfig, mcp::run_mcp_server};
 
 fn main() {
     if let Err(error) = run() {
@@ -17,34 +17,18 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut arguments = std::env::args_os();
-    let program = arguments.next().unwrap_or_default();
-    let Some(socket_path) = arguments.next().map(PathBuf::from) else {
-        return Err(format!(
-            "usage: {} <socket-path> <existing-gym-db> <iana-time-zone>",
-            PathBuf::from(program).display()
-        )
-        .into());
-    };
-    let Some(database_path) = arguments.next().map(PathBuf::from) else {
-        return Err("missing existing gym database path".into());
-    };
-    let Some(time_zone) = arguments.next() else {
-        return Err("missing IANA time-zone name".into());
-    };
-    if arguments.next().is_some() {
+    if std::env::args_os().nth(1).is_some() {
         return Err("unexpected extra argument".into());
     }
+    let config = GymConfig::from_env()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()?;
     runtime.block_on(run_mcp_server(
-        socket_path,
-        database_path,
-        Arc::new(SystemClock::new(
-            time_zone.to_str().ok_or("time zone must be UTF-8")?,
-        )?),
+        config.socket_path,
+        config.database_path,
+        Arc::new(SystemClock::new(&config.timezone)?),
     ))?;
     Ok(())
 }

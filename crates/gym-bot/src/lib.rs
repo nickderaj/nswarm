@@ -8,8 +8,10 @@
 //! Telegram types are confined to [`telegram`]. Command handling, `SQLite`
 //! persistence, MCP queries, and parity operate on transport-neutral data.
 
+pub mod batch;
 pub mod clock;
 pub mod command;
+pub mod config;
 pub mod database;
 pub mod health;
 pub mod mcp;
