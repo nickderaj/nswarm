@@ -30,26 +30,26 @@ pub enum DispatchResult {
 ///
 /// Returns [`TelegramAdapterError`] when decoding fails or the callback rejects
 /// the neutral input.
-pub fn dispatch_recorded<F>(
-    json: &str,
-    mut handle: F,
-) -> Result<DispatchResult, TelegramAdapterError>
+pub fn dispatch_recorded<F>(json: &str, mut handle: F) -> Result<DispatchResult, DispatchError>
 where
     F: FnMut(&CommandInput) -> Result<Option<String>, String>,
 {
-    let Some(input) = decode_update_json(json)? else {
+    let update: Update = serde_json::from_str(json).map_err(TelegramAdapterError::Json)?;
+    let destination = match &update.kind {
+        UpdateKind::Message(message) => message.chat.id.to_string(),
+        _ => return Ok(DispatchResult::Ignored),
+    };
+    let Some(input) = adapt_update(&update)? else {
         return Ok(DispatchResult::Ignored);
     };
-    let destination = input.conversation_id.clone();
-    Ok(handle(&input).map_err(TelegramAdapterError::Core)?.map_or(
-        DispatchResult::Ignored,
-        |text| {
+    Ok(handle(&input)
+        .map_err(DispatchError::Core)?
+        .map_or(DispatchResult::Ignored, |text| {
             DispatchResult::Reply(TelegramReply {
                 conversation_id: destination,
                 text,
             })
-        },
-    ))
+        }))
 }
 
 /// Decodes Telegram JSON and converts command messages to neutral input.
@@ -90,8 +90,18 @@ pub fn adapt_update(update: &Update) -> Result<Option<CommandInput>, TelegramAda
         actor_id,
         update: key,
         text,
-        conversation_id: message.chat.id.to_string(),
     }))
+}
+
+/// Recorded-dispatch failure kept separate from the stable Step 2 adapter API.
+#[derive(Debug, Error)]
+pub enum DispatchError {
+    /// Telegram decoding or adaptation failed.
+    #[error(transparent)]
+    Adapter(#[from] TelegramAdapterError),
+    /// The transport-neutral callback failed safely.
+    #[error("gym command failed: {0}")]
+    Core(String),
 }
 
 /// Telegram edge decoding and adaptation failures.
@@ -109,7 +119,4 @@ pub enum TelegramAdapterError {
     /// The neutral update identity failed validation.
     #[error(transparent)]
     Identity(#[from] ValidationError),
-    /// The transport-neutral command service failed safely.
-    #[error("gym command failed: {0}")]
-    Core(String),
 }

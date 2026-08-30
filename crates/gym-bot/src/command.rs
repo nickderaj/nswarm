@@ -26,8 +26,6 @@ pub struct CommandInput {
     pub update: UpdateKey,
     /// Transport-neutral command text.
     pub text: String,
-    /// Stable conversation destination supplied by the adapter.
-    pub conversation_id: String,
 }
 
 /// Reason a command intentionally produced no response.

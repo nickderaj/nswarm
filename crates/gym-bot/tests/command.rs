@@ -27,7 +27,6 @@ fn input(actor: &str, surface: &str, external_id: &str, text: &str) -> CommandIn
         )
         .expect("valid test update"),
         text: text.to_owned(),
-        conversation_id: "1001".to_owned(),
     }
 }
 

@@ -1,7 +1,8 @@
 //! Type-only teloxide adapter tests with recorded JSON shapes.
 
 use gym_bot::telegram::{
-    DispatchResult, TelegramAdapterError, TelegramReply, decode_update_json, dispatch_recorded,
+    DispatchError, DispatchResult, TelegramAdapterError, TelegramReply, decode_update_json,
+    dispatch_recorded,
 };
 
 const VALID: &str = r#"{
@@ -24,13 +25,12 @@ fn teloxide_shape_converts_only_at_adapter_edge() {
     assert_eq!(input.update.surface.as_str(), "telegram");
     assert_eq!(input.update.external_id, "52");
     assert_eq!(input.text, "/weight 82.5");
-    assert_eq!(input.conversation_id, "700");
 }
 
 #[test]
 fn recorded_update_dispatches_through_the_neutral_core() {
     let result = dispatch_recorded(VALID, |input| {
-        assert_eq!(input.conversation_id, "700");
+        assert_eq!(input.actor_id, "700");
         Ok(Some("recorded reply".to_owned()))
     })
     .expect("dispatch fixture");
@@ -53,7 +53,7 @@ fn dispatch_supports_ignored_and_core_error_results() {
         DispatchResult::Ignored
     );
     assert!(
-        matches!(dispatch_recorded(VALID, |_| Err("unavailable".to_owned())), Err(TelegramAdapterError::Core(value)) if value == "unavailable")
+        matches!(dispatch_recorded(VALID, |_| Err("unavailable".to_owned())), Err(DispatchError::Core(value)) if value == "unavailable")
     );
     assert_eq!(
         dispatch_recorded(VALID, |_| Ok(None)).expect("no reply"),
