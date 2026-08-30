@@ -718,6 +718,30 @@ fn socket_bind_rejects_a_world_accessible_directory() {
     );
 }
 
+#[test]
+fn socket_parent_mode_uses_only_permission_bits() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let socket_directory = directory.path().join("sticky");
+    std::fs::DirBuilder::new()
+        .mode(0o1750)
+        .create(&socket_directory)
+        .expect("sticky directory");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let server = McpServer::bind(
+            socket_directory.join("mcp.sock"),
+            database,
+            Arc::new(FixedClock::new(FIXED_TIME)),
+        )
+        .expect("sticky bit does not alter permission mask");
+        drop(server);
+    });
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn production_bind_fails_closed_for_an_unknown_group() {

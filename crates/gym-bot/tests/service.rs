@@ -353,6 +353,52 @@ fn canonical_aliases_and_cardio_token_positions_are_exact() {
 }
 
 #[test]
+fn cardio_and_alias_mutation_boundaries_are_exact() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let service = GymService::new(&database, Arc::new(FixedClock::new(NOW)));
+    assert_eq!(
+        service.handle(&request("/cardio run 10")).expect("minutes"),
+        "Logged run: 10 min"
+    );
+    assert_eq!(
+        service
+            .handle(&request("/cardio run 10 4.5"))
+            .expect("distance"),
+        "Logged run: 10 min, 4.5 km"
+    );
+    assert!(
+        service
+            .handle(&request("/cardio run 10 4.5 extra"))
+            .expect("extra token")
+            .starts_with("Usage:")
+    );
+    service
+        .handle(&request("/gym dumbbell rows 1x1"))
+        .expect("plural alias");
+    service
+        .handle(&request("/gym DB Rows 1x1"))
+        .expect("abbreviated alias");
+    let connection = Connection::open(database).expect("result");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM movements WHERE modality='strength'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("movement count"),
+        1
+    );
+    assert_eq!(
+        service
+            .handle(&request("/gym row"))
+            .expect("filtered history"),
+        "No row logged yet. Usage: /gym <exercise> <sets>x<reps> [weight] [@rpe]"
+    );
+}
+
+#[test]
 fn batch_commands_manage_durable_state_without_attempting_agent_extraction() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");

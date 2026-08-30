@@ -63,6 +63,7 @@ fn receiver_authorization_matches_the_exact_bearer_value() {
         Some("Bearer fixture-secret "),
         Some("Bearer fixture-secret-suffix"),
         Some("prefix-Bearer fixture-secret"),
+        Some("Bearer gixture-recret"),
     ] {
         let response = receiver.handle(HealthRequest {
             authorization,

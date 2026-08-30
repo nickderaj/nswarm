@@ -173,6 +173,8 @@ mod tests {
                 Err(ConfigError::SocketGroup)
             ));
         }
+        custom.insert("NSWARM_MCP_SOCKET_GROUP".to_owned(), "a".repeat(64));
+        assert!(GymConfig::from_values(&custom).is_ok());
     }
 
     #[test]
