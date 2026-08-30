@@ -67,6 +67,8 @@ fn explicit_config_map_rejects_missing_database_without_secret_leak() {
 #[test]
 fn configured_binary_reaches_bound_runtime_and_stays_alive() {
     let directory = tempfile::tempdir().expect("tempdir");
+    std::fs::set_permissions(directory.path(), Permissions::from_mode(0o750))
+        .expect("group-readable runtime directory");
     common::copy_fixture(&directory, "gym.db");
     let mut child = Command::new(env!("CARGO_BIN_EXE_gym-bot"))
         .env_clear()
