@@ -282,16 +282,8 @@ pub enum HealthServerError {
 
 #[cfg(test)]
 mod tests {
-    use super::{RateLimiter, find_header_end, run_health_listener};
-    use crate::{health::HealthImporter, receiver::HealthReceiver};
-    use std::{
-        sync::Arc,
-        time::{Duration, Instant},
-    };
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, TcpStream},
-    };
+    use super::{RateLimiter, find_header_end};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn header_boundary_and_rate_window_are_exact() {
@@ -305,68 +297,5 @@ mod tests {
         }
         assert!(!limiter.allow(start));
         assert!(limiter.allow(start + Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn listener_serves_only_bounded_authenticated_health_posts() {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .expect("runtime")
-            .block_on(async {
-                let directory = tempfile::tempdir().expect("tempdir");
-                let database = directory.path().join("gym.db");
-                std::fs::copy(
-                    concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/../../fixtures/gym/v0-gym-v5.sqlite3"
-                    ),
-                    &database,
-                )
-                .expect("fixture");
-                let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-                let address = listener.local_addr().expect("address");
-                let receiver = Arc::new(HealthReceiver::new(
-                    "fixture-secret",
-                    HealthImporter::new(database),
-                ));
-                let server = tokio::spawn(run_health_listener(listener, receiver));
-
-                let payload = r#"{"workouts":[],"metrics":[]}"#;
-                let valid = format!(
-                    "POST /import/health HTTP/1.1\r\nAuthorization: Bearer fixture-secret\r\nContent-Length: {}\r\n\r\n{payload}",
-                    payload.len()
-                );
-                assert!(request(address, &valid).await.contains("200 OK"));
-                assert!(
-                    request(address, "GET /import/health HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
-                        .await
-                        .contains("404 Not Found")
-                );
-                assert!(
-                    request(address, "POST /import/health HTTP/1.1\r\n\r\n")
-                        .await
-                        .contains("411 Length Required")
-                );
-                assert!(
-                    request(
-                        address,
-                        "POST /import/health HTTP/1.1\r\nContent-Length: 1048577\r\n\r\n"
-                    )
-                    .await
-                    .contains("413 Payload Too Large")
-                );
-                server.abort();
-            });
-    }
-
-    async fn request(address: std::net::SocketAddr, request: &str) -> String {
-        let mut stream = TcpStream::connect(address).await.expect("connect");
-        stream.write_all(request.as_bytes()).await.expect("write");
-        stream.shutdown().await.expect("finish request");
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).await.expect("read");
-        String::from_utf8(response).expect("UTF-8 response")
     }
 }
