@@ -13,6 +13,7 @@ use gym_bot::{
     mcp::{
         BodyMetricsArgs, GYM_TOOL_NAMES, GymMcp, MAX_DAYS, MAX_LIMIT, MAX_METRIC_LENGTH,
         McpQueryError, McpServer, capability_summary, connect_mcp_socket, decode_mcp_frame,
+        run_mcp_server, run_mcp_server_for_group,
     },
 };
 use proptest::prelude::*;
@@ -22,6 +23,68 @@ use rmcp::{
 };
 
 const FIXED_TIME: &str = "2026-08-29T08:15:30+00:00";
+
+#[test]
+fn public_server_wrappers_accept_real_mcp_connections() {
+    for group_aware in [false, true] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = common::copy_fixture(&directory, "gym.db");
+        let socket = private_socket_path(&directory);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let clock = Arc::new(FixedClock::new(FIXED_TIME));
+            let server = if group_aware {
+                tokio::spawn(run_mcp_server_for_group(
+                    socket.clone(),
+                    current_group(),
+                    database,
+                    clock,
+                ))
+            } else {
+                tokio::spawn(run_mcp_server(socket.clone(), database, clock))
+            };
+            for _ in 0..100 {
+                if socket.exists() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let client =
+                ().serve(connect_mcp_socket(&socket).await.expect("connect"))
+                    .await
+                    .expect("handshake");
+            client.cancel().await.expect("close");
+            server.abort();
+        });
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn current_group() -> &'static str {
+    use std::sync::OnceLock;
+    static GROUP: OnceLock<String> = OnceLock::new();
+    GROUP.get_or_init(|| {
+        String::from_utf8(
+            std::process::Command::new("id")
+                .arg("-gn")
+                .output()
+                .expect("query group")
+                .stdout,
+        )
+        .expect("UTF-8 group")
+        .trim()
+        .to_owned()
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn current_group() -> &'static str {
+    "fixture-group"
+}
 
 #[test]
 fn metric_length_boundary_is_exact() {
