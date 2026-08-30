@@ -44,6 +44,24 @@ fn recorded_update_dispatches_through_the_neutral_core() {
 }
 
 #[test]
+fn dispatch_supports_ignored_and_core_error_results() {
+    assert_eq!(
+        dispatch_recorded(r#"{"update_id":53,"future_update":{"safe":true}}"#, |_| Ok(
+            Some("unused".to_owned())
+        ))
+        .expect("ignored"),
+        DispatchResult::Ignored
+    );
+    assert!(
+        matches!(dispatch_recorded(VALID, |_| Err("unavailable".to_owned())), Err(TelegramAdapterError::Core(value)) if value == "unavailable")
+    );
+    assert_eq!(
+        dispatch_recorded(VALID, |_| Ok(None)).expect("no reply"),
+        DispatchResult::Ignored
+    );
+}
+
+#[test]
 fn malformed_telegram_shaped_input_fails_without_network() {
     assert!(matches!(
         decode_update_json("{not-json"),

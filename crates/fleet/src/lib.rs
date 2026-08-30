@@ -1056,6 +1056,20 @@ deny_paths = ["/srv/nswarm/tutor"]
     }
 
     #[test]
+    fn empty_internal_socket_group_retains_private_umask_rendering() {
+        let mut manifest = BotManifest::parse(MANIFEST).expect("manifest");
+        manifest.surface.socket_group.clear();
+        assert_eq!(
+            if manifest.surface.socket_group.is_empty() {
+                "UMask=0077"
+            } else {
+                "UMask=0007"
+            },
+            "UMask=0077"
+        );
+    }
+
+    #[test]
     fn worker_cannot_gain_a_sibling_peer() {
         let source = MANIFEST.replace(
             "peers = [\"boss-agent\"]",

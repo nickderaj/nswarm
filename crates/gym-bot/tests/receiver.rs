@@ -37,4 +37,13 @@ fn receiver_requires_bearer_and_returns_bounded_results() {
             .status,
         400
     );
+    assert_eq!(
+        receiver
+            .handle(HealthRequest {
+                authorization: Some("Bearer fixture-secret"),
+                body: &vec![b' '; 1_048_577]
+            })
+            .status,
+        413
+    );
 }

@@ -273,6 +273,7 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
             ),
             ErrorCode::INVALID_PARAMS
         );
+        assert_body_metric_boundaries(&client).await;
         assert_eq!(
             protocol_error_code(
                 client
@@ -292,6 +293,29 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
             "socket guard removes cancelled server path"
         );
     });
+}
+
+async fn assert_body_metric_boundaries(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+) {
+    for arguments_value in [
+        serde_json::json!({"metric":"BAD"}),
+        serde_json::json!({"days":366}),
+        serde_json::json!({"limit":201}),
+    ] {
+        assert_eq!(
+            protocol_error_code(
+                client
+                    .call_tool(
+                        CallToolRequestParams::new("body_metrics")
+                            .with_arguments(arguments(&arguments_value)),
+                    )
+                    .await
+                    .expect_err("bounded body metrics")
+            ),
+            ErrorCode::INVALID_PARAMS
+        );
+    }
 }
 
 async fn assert_reviewed_tool_list(client: &rmcp::service::RunningService<rmcp::RoleClient, ()>) {
@@ -343,10 +367,18 @@ async fn assert_reviewed_write(client: &rmcp::service::RunningService<rmcp::Role
         preference.structured_content.expect("write result")["id"],
         1
     );
+    let preferences = client
+        .call_tool(CallToolRequestParams::new("preferences"))
+        .await
+        .expect("read preference");
+    assert_eq!(
+        preferences.structured_content.expect("preferences")[0]["key"],
+        "warmup"
+    );
     let plan = client
         .call_tool(
             CallToolRequestParams::new("propose_plan").with_arguments(arguments(
-                &serde_json::json!({"focus":"legs","rationale":"fixture","items":[{"exercise":"squat","sets":[{"reps":5}]}]}),
+                &serde_json::json!({"focus":"legs","rationale":"fixture","for_date":"2026-08-31","items":[{"exercise":"squat","sets":[{"reps":5}]}]}),
             )),
         )
         .await
@@ -410,6 +442,31 @@ fn every_reviewed_read_tool_executes_fixed_sql() {
                 serde_json::json!({"focus":"x","rationale":"x","items":[]}),
             ),
             ("plan_feedback", serde_json::json!({"plan_id":999})),
+            ("exercise_catalogue", serde_json::json!({"unexpected":true})),
+            (
+                "record_preference",
+                serde_json::json!({"key":"x","value":"x","evidence":"x","unexpected":true}),
+            ),
+            (
+                "propose_plan",
+                serde_json::json!({"focus":"x","rationale":"x","items":[{}],"unexpected":true}),
+            ),
+            (
+                "plan_feedback",
+                serde_json::json!({"plan_id":1,"unexpected":true}),
+            ),
+            ("recent_sets", serde_json::json!({"limit":"bad"})),
+            ("body_metrics", serde_json::json!({"unknown":true})),
+            (
+                "record_preference",
+                serde_json::json!({"key":"x","value":"x"}),
+            ),
+            (
+                "propose_plan",
+                serde_json::json!({"focus":"","rationale":"x","items":[{}]}),
+            ),
+            ("interval_history", serde_json::json!({"limit":201})),
+            ("heart_rate_series", serde_json::json!({"samples":0})),
         ] {
             assert_eq!(
                 protocol_error_code(
@@ -422,6 +479,23 @@ fn every_reviewed_read_tool_executes_fixed_sql() {
                         .expect_err("invalid args")
                 ),
                 ErrorCode::INVALID_PARAMS
+            );
+        }
+        for (tool, arguments_value) in [
+            ("volume_summary", serde_json::json!({"weeks":52})),
+            ("interval_history", serde_json::json!({"limit":200})),
+            ("heart_rate_series", serde_json::json!({"samples":5000})),
+        ] {
+            assert!(
+                client
+                    .call_tool(
+                        CallToolRequestParams::new(tool)
+                            .with_arguments(arguments(&arguments_value))
+                    )
+                    .await
+                    .expect("bounded read")
+                    .structured_content
+                    .is_some()
             );
         }
         client.cancel().await.expect("close");
@@ -491,11 +565,69 @@ fn storage_failure_is_an_internal_protocol_error() {
             ),
             ErrorCode::INTERNAL_ERROR
         );
+        assert_eq!(
+            protocol_error_code(
+                client
+                    .call_tool(
+                        CallToolRequestParams::new("record_preference").with_arguments(arguments(
+                            &serde_json::json!({"key":"x","value":"x","evidence":"x"}),
+                        )),
+                    )
+                    .await
+                    .expect_err("write storage failure")
+            ),
+            ErrorCode::INTERNAL_ERROR
+        );
 
         client.cancel().await.expect("close MCP client");
         server.abort();
         assert!(server.await.expect_err("cancel server").is_cancelled());
     });
+}
+
+#[test]
+fn invalid_clock_is_an_internal_protocol_error() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let socket = private_socket_path(&directory);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let server = tokio::spawn(
+            McpServer::bind(&socket, database, Arc::new(FixedClock::new("invalid")))
+                .expect("bind")
+                .run(),
+        );
+        let client =
+            ().serve(connect_mcp_socket(&socket).await.expect("connect"))
+                .await
+                .expect("handshake");
+        assert_eq!(
+            protocol_error_code(
+                client
+                    .call_tool(CallToolRequestParams::new("body_metrics"))
+                    .await
+                    .expect_err("invalid clock")
+            ),
+            ErrorCode::INTERNAL_ERROR
+        );
+        client.cancel().await.expect("close");
+        server.abort();
+    });
+}
+
+#[test]
+fn clock_range_overflow_fails_closed() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let service = GymMcp::new(
+        database,
+        Arc::new(FixedClock::new("-262143-01-01T00:00:00+00:00")),
+    );
+    assert!(service.body_metrics(BodyMetricsArgs::default()).is_err());
 }
 
 #[test]

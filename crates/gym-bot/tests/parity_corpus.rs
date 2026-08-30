@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::process::Command;
 use std::{path::PathBuf, sync::Arc};
 
 use gym_bot::{
@@ -91,6 +92,41 @@ fn deliberate_corpus_mismatch_is_detected() {
             .iter()
             .any(|difference| difference.path == "/schema_version")
     );
+}
+
+#[test]
+fn normalized_comparison_cli_reports_equal_different_and_usage() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let expected = common::copy_fixture(&directory, "expected.db");
+    let actual = common::copy_fixture(&directory, "actual.db");
+    let program = env!("CARGO_BIN_EXE_gym-db-compare");
+    let equal = Command::new(program)
+        .arg(&expected)
+        .arg(&actual)
+        .output()
+        .expect("compare equal");
+    assert!(equal.status.success());
+    assert_eq!(String::from_utf8_lossy(&equal.stdout), "equal\n");
+    Connection::open(&actual)
+        .expect("actual")
+        .execute("PRAGMA user_version=4", [])
+        .expect("drift");
+    let different = Command::new(program)
+        .arg(&expected)
+        .arg(&actual)
+        .output()
+        .expect("compare drift");
+    assert_eq!(different.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&different.stdout).contains("schema_version"));
+    let usage = Command::new(program).output().expect("compare usage");
+    assert_eq!(usage.status.code(), Some(2));
+    let missing = Command::new(program)
+        .arg(directory.path().join("missing.db"))
+        .arg(&actual)
+        .output()
+        .expect("compare missing");
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("comparison failed"));
 }
 
 fn load_corpus() -> Corpus {

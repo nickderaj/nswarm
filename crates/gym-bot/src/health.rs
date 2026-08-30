@@ -123,7 +123,10 @@ impl HealthImporter {
 }
 
 fn validate_payload(payload: &HealthPayload) -> Result<(), HealthError> {
-    if payload.workouts.len() > 100 || payload.metrics.len() > 500 {
+    if payload.workouts.len() > 100 {
+        return Err(HealthError::Invalid("payload item limit exceeded"));
+    }
+    if payload.metrics.len() > 500 {
         return Err(HealthError::Invalid("payload item limit exceeded"));
     }
     for workout in &payload.workouts {
