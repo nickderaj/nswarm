@@ -1,0 +1,154 @@
+{
+  "capabilities": {
+    "auth": {"required": true, "type": "bearer"},
+    "endpoints": {
+      "chat_completions": {"method": "POST", "path": "/v1/chat/completions"},
+      "health": {"method": "GET", "path": "/health"},
+      "health_detailed": {"method": "GET", "path": "/health/detailed"},
+      "model_options": {"method": "GET", "path": "/api/model/options"},
+      "models": {"method": "GET", "path": "/v1/models"},
+      "responses": {"method": "POST", "path": "/v1/responses"},
+      "run_approval": {"method": "POST", "path": "/v1/runs/{run_id}/approval"},
+      "run_events": {"method": "GET", "path": "/v1/runs/{run_id}/events"},
+      "run_status": {"method": "GET", "path": "/v1/runs/{run_id}"},
+      "run_steer": {"method": "POST", "path": "/v1/runs/{run_id}/steer"},
+      "run_stop": {"method": "POST", "path": "/v1/runs/{run_id}/stop"},
+      "runs": {"method": "POST", "path": "/v1/runs"},
+      "session": {"method": "GET", "path": "/api/sessions/{session_id}"},
+      "session_chat": {"method": "POST", "path": "/api/sessions/{session_id}/chat"},
+      "session_chat_stream": {"method": "POST", "path": "/api/sessions/{session_id}/chat/stream"},
+      "session_create": {"method": "POST", "path": "/api/sessions"},
+      "session_delete": {"method": "DELETE", "path": "/api/sessions/{session_id}"},
+      "session_fork": {"method": "POST", "path": "/api/sessions/{session_id}/fork"},
+      "session_messages": {"method": "GET", "path": "/api/sessions/{session_id}/messages"},
+      "session_model_lock": {"method": "POST", "path": "/api/sessions/{session_id}/model"},
+      "session_update": {"method": "PATCH", "path": "/api/sessions/{session_id}"},
+      "sessions": {"method": "GET", "path": "/api/sessions"},
+      "skills": {"method": "GET", "path": "/v1/skills"},
+      "toolsets": {"method": "GET", "path": "/v1/toolsets"}
+    },
+    "features": {
+      "admin_config_rw": false,
+      "approval_events": true,
+      "audio_api": false,
+      "chat_completions": true,
+      "chat_completions_streaming": true,
+      "cors": false,
+      "jobs_admin": false,
+      "memory_write_api": false,
+      "model_options": true,
+      "realtime_voice": false,
+      "responses_api": true,
+      "responses_streaming": true,
+      "run_approval_response": true,
+      "run_events_sse": true,
+      "run_status": true,
+      "run_steer": true,
+      "run_stop": true,
+      "run_submission": true,
+      "session_chat": true,
+      "session_chat_streaming": true,
+      "session_continuity_header": "X-Hermes-Session-Id",
+      "session_fork": true,
+      "session_key_header": "X-Hermes-Session-Key",
+      "session_model_lock": true,
+      "session_resources": true,
+      "skills_api": true,
+      "tool_progress_events": true
+    },
+    "model": "hermes-agent",
+    "object": "hermes.api_server.capabilities",
+    "platform": "hermes-agent",
+    "runtime": {
+      "description": "The API server creates a server-side Hermes AIAgent; tools execute on the API-server host unless a future explicit split-runtime mode is enabled.",
+      "mode": "server_agent",
+      "split_runtime": false,
+      "tool_execution": "server"
+    }
+  },
+  "claims_excluded": [
+    "live provider latency",
+    "provider-side prompt-cache latency",
+    "Raspberry Pi latency"
+  ],
+  "construction_observations": {
+    "agent_factory_calls": 62,
+    "chat_requests": 62,
+    "conversation_history_lengths": [
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+      2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2
+    ],
+    "distinct_agent_instances_for_warm_session": 31,
+    "warm_agent_reused": false,
+    "warm_session_chat_requests": 31
+  },
+  "decision": {
+    "d23_http_warm_agent_gate": "failed",
+    "next_action": "revisit D23 and section 6.3 before botkit conversation code",
+    "reason": "every HTTP session-chat request constructs a fresh AIAgent"
+  },
+  "environment": {
+    "machine": "arm64",
+    "python": "3.12.12",
+    "release": "25.5.0",
+    "system": "Darwin",
+    "timer": "time.perf_counter_ns (monotonic)"
+  },
+  "measurement": "instrumented_http_session_route",
+  "pin": {
+    "commit_sha": "fcbd1076a93841fa88855acce810e342a5b78101",
+    "package": "hermes-agent",
+    "package_version": "0.20.5",
+    "python_requires": ">=3.11,<3.14",
+    "repository": "https://github.com/NousResearch/hermes-agent.git",
+    "tag": "v2026.8.19"
+  },
+  "provider_boundary": "deterministic_local_fake",
+  "schema_version": 1,
+  "source_contract": {
+    "agent_memory_load_per_construction_when_enabled": true,
+    "agent_todo_state_per_construction": true,
+    "agent_tool_snapshot_per_construction": true,
+    "api_agent_cache_present": false,
+    "gateway_startup_mcp_discovery": {"count": 1, "executor_line": 30698},
+    "native_gateway_agent_cache_present": true,
+    "prompt_full_build_first_turn": true,
+    "prompt_restored_from_session_db_later_turns": true,
+    "run_agent_calls_create_agent": {"count": 1, "line": 6388},
+    "session_chat_calls_run_agent": {"count": 1, "line": 3803},
+    "warm_agent_reuse_on_http_session_route": false
+  },
+  "trial": {
+    "cold_definition": "first chat request for a newly created explicit session",
+    "cold_raw_ms": [
+      0.542, 0.429, 0.465, 0.431, 0.414, 0.414, 0.423, 0.417, 0.401, 0.402,
+      0.375, 0.474, 0.409, 0.41, 0.38, 0.4, 0.35, 0.398, 0.404, 0.392,
+      0.375, 0.369, 0.45, 0.427, 0.367, 0.356, 0.348, 0.358, 0.368, 0.405
+    ],
+    "cold_summary": {
+      "maximum_ms": 0.542,
+      "mean_ms": 0.405,
+      "median_ms": 0.403,
+      "minimum_ms": 0.348,
+      "p95_ms": 0.474
+    },
+    "route_prime_ms": 84.47,
+    "samples_per_class": 30,
+    "warm_definition": "repeat chat request for one explicit session after one unrecorded prime",
+    "warm_prime_ms": 0.352,
+    "warm_raw_ms": [
+      0.47, 0.412, 0.407, 0.401, 0.401, 0.385, 0.397, 0.38, 0.369, 0.37,
+      0.358, 0.366, 0.373, 0.431, 0.369, 0.383, 0.381, 0.366, 0.37, 0.396,
+      0.391, 0.371, 0.376, 0.354, 0.34, 0.35, 0.341, 0.347, 0.344, 0.352
+    ],
+    "warm_summary": {
+      "maximum_ms": 0.47,
+      "mean_ms": 0.378,
+      "median_ms": 0.372,
+      "minimum_ms": 0.34,
+      "p95_ms": 0.431
+    }
+  }
+}

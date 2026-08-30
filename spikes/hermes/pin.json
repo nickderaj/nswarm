@@ -7,6 +7,7 @@
   "tag_object_sha": "b05e680e63d39d5a8e3ec0f5842a41d1c4209c03",
   "commit_sha": "fcbd1076a93841fa88855acce810e342a5b78101",
   "plan_source_commit_prefix": "68518c1",
+  "capabilities_contract_sha256": "9b45159602276d39fb0ac73e5a1cbc816a78d06111cda7aaf0c134808bf5920c",
   "source_files": {
     "agent/agent_init.py": "1a553208ece88af251a79f117aad0c555bc45568ff260c15b58d72dbd6279b75",
     "agent/conversation_loop.py": "740349e7ff0aafda0585d84484824a01ac8ca78e86dafa11dc9014f0a621a326",
