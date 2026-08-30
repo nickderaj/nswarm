@@ -157,6 +157,22 @@ mod tests {
                 .timezone,
             "UTC"
         );
+        custom.insert("NSWARM_MCP_SOCKET".to_owned(), "relative.sock".to_owned());
+        assert!(matches!(
+            GymConfig::from_values(&custom),
+            Err(ConfigError::SocketPath)
+        ));
+        custom.insert(
+            "NSWARM_MCP_SOCKET".to_owned(),
+            "/run/gym/mcp.sock".to_owned(),
+        );
+        for group in ["Gym Access", &"a".repeat(65)] {
+            custom.insert("NSWARM_MCP_SOCKET_GROUP".to_owned(), group.to_owned());
+            assert!(matches!(
+                GymConfig::from_values(&custom),
+                Err(ConfigError::SocketGroup)
+            ));
+        }
     }
 
     #[test]
