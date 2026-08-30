@@ -87,4 +87,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Gym evidence integrity
+        run: |
+          python3 scripts/check_gym_inventory.py
+          python3 -m unittest scripts/test_gym_sqlite_copy.py
+          python3 -m unittest scripts/test_gym_socket_contract.py
+          ./scripts/run_gym_parity.sh
       - run: cargo test --workspace --all-features --locked

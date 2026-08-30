@@ -37,6 +37,12 @@ jobs:
       - run: python3 scripts/validate_profiles.py
       - name: Hermes evidence integrity
         run: python3 -m unittest scripts/test_hermes_gateway_spike.py
+      - name: Gym evidence integrity
+        run: |
+          python3 scripts/check_gym_inventory.py
+          python3 -m unittest scripts/test_gym_sqlite_copy.py
+          python3 -m unittest scripts/test_gym_socket_contract.py
+          ./scripts/run_gym_parity.sh
       - run: ./scripts/check_generated.sh
       - run: cargo fmt --all --check
       - run: cargo check --locked --workspace --all-targets --all-features
@@ -179,8 +185,8 @@ jobs:
         run: |
           cargo clean
           cargo build --workspace --release --locked
-          sha256sum target/release/fleet target/release/research-bot > /tmp/first-build.sha256
+          sha256sum target/release/fleet target/release/gym-bot target/release/research-bot > /tmp/first-build.sha256
           cargo clean
           cargo build --workspace --release --locked
-          sha256sum target/release/fleet target/release/research-bot > /tmp/second-build.sha256
+          sha256sum target/release/fleet target/release/gym-bot target/release/research-bot > /tmp/second-build.sha256
           diff -u /tmp/first-build.sha256 /tmp/second-build.sha256
