@@ -15,7 +15,6 @@ EXPECTED = {
         "skills": {
             "training-coach",
         },
-        "capabilities": {"evidence-write"},
     },
     "research": {
         "skills": {
@@ -139,7 +138,7 @@ def validate_profile(
         fail(f"{name}: unsupported profile or policy version")
     if profile["role"] != name:
         fail(f"{name}: role mismatch")
-    granted = expected.get("capabilities", role_capabilities.get(name))
+    granted = role_capabilities.get(name)
     if granted is None:
         fail(f"{name}: role missing from authority map")
     if set(profile["capabilities"]) != granted:

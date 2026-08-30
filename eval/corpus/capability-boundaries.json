@@ -5,6 +5,9 @@
   "test": "policy::tests::eval_capability_corpus_enforces_role_boundaries",
   "input": {
     "assertions": [
+      {"role": "gym", "capability": "evidence-write", "allowed": true},
+      {"role": "gym", "capability": "repository-read", "allowed": false},
+      {"role": "gym", "capability": "network-read", "allowed": false},
       {"role": "research", "capability": "repository-read", "allowed": true},
       {"role": "research", "capability": "repository-write", "allowed": false},
       {"role": "coder", "capability": "repository-write", "allowed": true},
@@ -18,5 +21,5 @@
       {"role": "shipper", "capability": "repository-write", "allowed": false}
     ]
   },
-  "expected": {"assertion_count": 11}
+  "expected": {"assertion_count": 14}
 }

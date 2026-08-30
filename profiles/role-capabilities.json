@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "roles": {
+    "gym": ["evidence-write"],
     "research": ["repository-read", "network-read", "evidence-write"],
     "coordinator": ["coordinate", "evidence-write"],
     "coder": ["repository-read", "repository-write", "evidence-write", "branch-push"],
