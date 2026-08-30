@@ -27,7 +27,7 @@ fn binary_rejects_arguments_and_missing_settings_without_secret_output() {
 #[test]
 fn binary_validates_disposable_database_before_binding_socket() {
     let directory = tempfile::tempdir().expect("tempdir");
-    std::fs::set_permissions(directory.path(), Permissions::from_mode(0o2750))
+    std::fs::set_permissions(directory.path(), Permissions::from_mode(0o750))
         .expect("group-readable runtime directory");
     let database = common::copy_fixture(&directory, "gym.db");
     let output = Command::new(env!("CARGO_BIN_EXE_gym-bot"))
@@ -60,15 +60,20 @@ fn explicit_config_map_rejects_missing_database_without_secret_leak() {
 #[test]
 fn configured_binary_reaches_bound_runtime_and_stays_alive() {
     let directory = tempfile::tempdir().expect("tempdir");
-    std::fs::set_permissions(directory.path(), Permissions::from_mode(0o750))
+    let socket_directory = directory.path().join("runtime");
+    std::fs::create_dir(&socket_directory).expect("runtime directory");
+    std::fs::set_permissions(&socket_directory, Permissions::from_mode(0o2750))
         .expect("group-readable runtime directory");
     common::copy_fixture(&directory, "gym.db");
     let mut child = Command::new(env!("CARGO_BIN_EXE_gym-bot"))
         .env_clear()
         .env("GYM_DATA_DIR", directory.path())
         .env("TIMEZONE", "UTC")
-        .env("NSWARM_MCP_SOCKET", directory.path().join("mcp.sock"))
-        .env("NSWARM_MCP_SOCKET_GROUP", directory_group(directory.path()))
+        .env("NSWARM_MCP_SOCKET", socket_directory.join("mcp.sock"))
+        .env(
+            "NSWARM_MCP_SOCKET_GROUP",
+            directory_group(&socket_directory),
+        )
         .spawn()
         .expect("start configured service");
     std::thread::sleep(Duration::from_millis(100));
