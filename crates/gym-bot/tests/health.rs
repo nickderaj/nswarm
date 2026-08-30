@@ -94,6 +94,38 @@ fn health_nonmatching_manual_activity_creates_a_separate_session() {
 }
 
 #[test]
+fn reconciliation_distance_tolerance_and_missing_values_are_independent() {
+    for (existing, imported, expected_sessions) in [
+        ("NULL", "5000", 1),
+        ("5000", "null", 1),
+        ("4500", "5000", 1),
+        ("4499", "5000", 2),
+    ] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = common::copy_fixture(&directory, "gym.db");
+        Connection::open(&database)
+            .expect("fixture")
+            .execute_batch(&format!(
+                "INSERT INTO sessions (started_at,kind,source) VALUES ('2026-08-30T09:00:00+01:00','cardio','manual');
+                 INSERT INTO movements (name,display_name,modality) VALUES ('run','Run','cardio');
+                 INSERT INTO session_items (session_id,position,movement_id) VALUES (1,1,1);
+                 INSERT INTO efforts (session_item_id,position,duration_s,distance_m) VALUES (1,1,1800,{existing});"
+            ))
+            .expect("manual row");
+        let payload = format!(
+            r#"{{"workouts":[{{"external_id":"watch","started_at":"2026-08-30T09:00:00+01:00","activity":"Run","duration_s":1800,"distance_m":{imported}}}],"metrics":[]}}"#
+        );
+        HealthImporter::new(&database)
+            .import_json(payload.as_bytes())
+            .expect("import");
+        assert_eq!(
+            count(&Connection::open(database).expect("result"), "sessions"),
+            expected_sessions
+        );
+    }
+}
+
+#[test]
 fn health_import_accepts_optional_split_and_metric_variants() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
@@ -240,4 +272,16 @@ fn count(connection: &Connection, table: &str) -> i64 {
             row.get(0)
         })
         .expect("count fixture table")
+}
+
+#[test]
+fn raw_payload_byte_limit_is_exact() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let importer = HealthImporter::new(database);
+    assert!(importer.import_json(&vec![b' '; 1_048_576]).is_err());
+    assert!(matches!(
+        importer.import_json(&vec![b' '; 1_048_577]),
+        Err(gym_bot::health::HealthError::PayloadTooLarge)
+    ));
 }

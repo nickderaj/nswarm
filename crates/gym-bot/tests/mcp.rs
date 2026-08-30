@@ -348,6 +348,22 @@ async fn assert_reviewed_tool_list(client: &rmcp::service::RunningService<rmcp::
         tool.input_schema["properties"]["limit"]["maximum"],
         MAX_LIMIT
     );
+    for name in ["record_preference", "propose_plan", "plan_feedback"] {
+        let write_tool = listed
+            .tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("write schema");
+        assert_eq!(write_tool.input_schema["additionalProperties"], false);
+        assert!(write_tool.input_schema["properties"].is_object());
+        assert_eq!(
+            write_tool
+                .annotations
+                .as_ref()
+                .and_then(|value| value.open_world_hint),
+            Some(false)
+        );
+    }
 }
 
 async fn assert_reviewed_write(client: &rmcp::service::RunningService<rmcp::RoleClient, ()>) {

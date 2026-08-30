@@ -265,3 +265,39 @@ fn every_deterministic_read_and_usage_path_is_exercised() {
             .contains("bench 5 reps")
     );
 }
+
+#[test]
+fn canonical_aliases_and_cardio_token_positions_are_exact() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let service = GymService::new(&database, Arc::new(FixedClock::new(NOW)));
+    for (input, stored) in [
+        ("BB curl", "barbell curl"),
+        ("KB swings", "kettlebell swing"),
+        ("OHP", "overhead press"),
+        ("RDL", "romanian deadlift"),
+        ("deads", "deadlift"),
+        ("flyes", "fly"),
+        ("calves", "calf"),
+        ("carries", "carry"),
+    ] {
+        service
+            .handle(&request(&format!("/gym {input} 1x1")))
+            .expect("alias command");
+        let count: i64 = Connection::open(&database)
+            .expect("alias database")
+            .query_row(
+                "SELECT count(*) FROM movements WHERE name=?1",
+                [stored],
+                |row| row.get(0),
+            )
+            .expect("alias count");
+        assert_eq!(count, 1, "{input} must normalize to {stored}");
+    }
+    assert_eq!(
+        service
+            .handle(&request("/cardio bike ride 12 3"))
+            .expect("distance parse"),
+        "Logged bike ride: 12 min, 3 km"
+    );
+}
