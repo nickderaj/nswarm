@@ -175,6 +175,63 @@ fn health_validation_rejects_bounds_unknown_fields_and_non_finite_values() {
         .join(",")
     );
     assert!(importer.import_json(too_many_workouts.as_bytes()).is_err());
+    for count in [100, 500] {
+        assert!(count > 0);
+    }
+}
+
+#[test]
+fn health_collection_limits_accept_exact_maxima_and_reject_one_more() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let importer = HealthImporter::new(database);
+    for (key, maximum) in [("workouts", 100), ("metrics", 500)] {
+        let other = if key == "workouts" {
+            "metrics"
+        } else {
+            "workouts"
+        };
+        let values = |count| {
+            (0..count).map(|index| if key == "workouts" { format!(r#"{{"external_id":"w{index}","started_at":"2026-08-30T09:00:00+01:00","activity":"run","duration_s":1}}"#) } else { format!(r#"{{"external_id":"m{index}","at":"2026-08-30T09:00:00+01:00","metric":"hrv_ms","value":0,"unit":"ms"}}"#) }).collect::<Vec<_>>().join(",")
+        };
+        let exact = format!("{{\"{key}\":[{}],\"{other}\":[]}}", values(maximum));
+        let over = format!("{{\"{key}\":[{}],\"{other}\":[]}}", values(maximum + 1));
+        assert!(importer.import_json(exact.as_bytes()).is_ok());
+        assert!(importer.import_json(over.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn health_sample_limits_are_exact() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let importer = HealthImporter::new(database);
+    for (field, maximum, sample) in [
+        ("splits", 1_000, r#"{"distance_m":1}"#),
+        (
+            "hr_samples",
+            5_000,
+            r#"{"at":"2026-08-30T09:00:00+01:00","bpm":1}"#,
+        ),
+    ] {
+        let values = |count| {
+            std::iter::repeat_n(sample, count)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let payload = |count| {
+            format!(
+                r#"{{"workouts":[{{"external_id":"{field}-{count}","started_at":"2026-08-30T09:00:00+01:00","activity":"run","duration_s":1,"{field}":[{}]}}],"metrics":[]}}"#,
+                values(count)
+            )
+        };
+        assert!(importer.import_json(payload(maximum).as_bytes()).is_ok());
+        assert!(
+            importer
+                .import_json(payload(maximum + 1).as_bytes())
+                .is_err()
+        );
+    }
 }
 
 fn count(connection: &Connection, table: &str) -> i64 {

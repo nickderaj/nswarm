@@ -88,6 +88,16 @@ fn inactive_invalid_empty_and_multi_chat_paths_are_explicit() {
             .append(1, 1, " ", at("2026-08-30T09:00:00+01:00"))
             .is_err()
     );
+    assert!(
+        batch
+            .append(1, 2, &"x".repeat(10_000), at("2026-08-30T09:00:00+01:00"))
+            .expect("maximum text")
+    );
+    assert!(
+        batch
+            .append(1, 3, &"x".repeat(10_001), at("2026-08-30T09:00:00+01:00"))
+            .is_err()
+    );
     assert_eq!(
         batch
             .due(at("2026-08-30T21:00:00+01:00"))
@@ -95,7 +105,7 @@ fn inactive_invalid_empty_and_multi_chat_paths_are_explicit() {
         [1, 2]
     );
     batch.complete(1, &[]).expect("empty completion");
-    assert_eq!(batch.cancel(1).expect("empty cancel"), 0);
+    assert_eq!(batch.cancel(1).expect("bounded cancel"), 1);
     batch
         .append(2, 9, "only", at("2026-08-30T09:01:00+01:00"))
         .expect("single entry");
