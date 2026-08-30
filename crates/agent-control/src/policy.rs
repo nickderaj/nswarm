@@ -28,8 +28,6 @@ pub enum Capability {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Role {
-    /// Capability-minimal gym profile used by the deterministic gym runtime.
-    Gym,
     /// Read-only evidence gathering.
     Research,
     /// Brief decomposition and lease administration.
@@ -46,8 +44,7 @@ pub enum Role {
 
 impl Role {
     /// Complete role vocabulary used by generated policy validation.
-    pub const ALL: [Self; 7] = [
-        Self::Gym,
+    pub const ALL: [Self; 6] = [
         Self::Research,
         Self::Coordinator,
         Self::Coder,
@@ -60,7 +57,6 @@ impl Role {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Gym => "gym",
             Self::Research => "research",
             Self::Coordinator => "coordinator",
             Self::Coder => "coder",
@@ -74,7 +70,6 @@ impl Role {
     #[must_use]
     pub fn from_name(value: &str) -> Option<Self> {
         match value {
-            "gym" => Some(Self::Gym),
             "research" => Some(Self::Research),
             "coordinator" => Some(Self::Coordinator),
             "coder" => Some(Self::Coder),
@@ -89,7 +84,6 @@ impl Role {
     #[must_use]
     pub const fn capabilities(self) -> &'static [Capability] {
         match self {
-            Self::Gym => &[Capability::EvidenceWrite],
             Self::Research => &[
                 Capability::RepositoryRead,
                 Capability::NetworkRead,
@@ -125,8 +119,11 @@ impl Role {
 }
 
 #[cfg(test)]
+const GYM_PROFILE_CAPABILITIES: &[Capability] = &[Capability::EvidenceWrite];
+
+#[cfg(test)]
 mod tests {
-    use super::{Capability, Role};
+    use super::{Capability, GYM_PROFILE_CAPABILITIES, Role};
 
     #[test]
     fn eval_capability_corpus_enforces_role_boundaries() {
@@ -168,7 +165,7 @@ mod tests {
         let roles = document["roles"]
             .as_object()
             .expect("role capability map contains roles");
-        assert_eq!(roles.len(), Role::ALL.len());
+        assert_eq!(roles.len(), Role::ALL.len() + 1);
         for role in Role::ALL {
             let recorded: Vec<Capability> = serde_json::from_value(
                 roles
@@ -183,6 +180,9 @@ mod tests {
                 "capability drift for {role:?}"
             );
         }
+        let gym: Vec<Capability> = serde_json::from_value(roles["gym"].clone())
+            .expect("gym capability map uses production encodings");
+        assert_eq!(gym, GYM_PROFILE_CAPABILITIES);
     }
 
     #[test]
@@ -190,15 +190,6 @@ mod tests {
         assert!(Role::Research.can(Capability::RepositoryRead));
         assert!(!Role::Research.can(Capability::RepositoryWrite));
         assert!(!Role::Research.can(Capability::BranchPush));
-    }
-
-    #[test]
-    fn gym_has_only_append_only_evidence_authority() {
-        assert_eq!(Role::Gym.as_str(), "gym");
-        assert!(Role::Gym.can(Capability::EvidenceWrite));
-        assert!(!Role::Gym.can(Capability::RepositoryRead));
-        assert!(!Role::Gym.can(Capability::RepositoryWrite));
-        assert!(!Role::Gym.can(Capability::NetworkRead));
     }
 
     #[test]

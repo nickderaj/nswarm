@@ -171,7 +171,7 @@ fn preference_callback_ignores_other_updates_and_rejects_malformed_own_namespace
             decode_preference_callback_json(
                 &PREFERENCE_CALLBACK.replace("gym-preference:41:accept", data)
             ),
-            Err(TelegramAdapterError::InvalidPreferenceCallback)
+            Err(TelegramAdapterError::MissingText)
         ));
     }
 

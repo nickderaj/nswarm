@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use gym_bot::{clock::SystemClock, config::GymConfig, mcp::run_mcp_server};
+use gym_bot::{clock::SystemClock, config::GymConfig, mcp::run_mcp_server_for_group};
 
 fn main() {
     if let Err(error) = run() {
@@ -25,7 +25,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .enable_io()
         .enable_time()
         .build()?;
-    runtime.block_on(run_mcp_server(
+    runtime.block_on(run_mcp_server_for_group(
         config.socket_path,
         &config.socket_group,
         config.database_path,

@@ -559,6 +559,21 @@ impl From<rusqlite::Error> for McpToolError {
 /// Returns [`McpSocketError`] when the socket cannot be bound or accepted.
 pub async fn run_mcp_server(
     socket_path: impl AsRef<Path>,
+    database_path: impl Into<PathBuf>,
+    clock: Arc<dyn Clock>,
+) -> Result<(), McpSocketError> {
+    McpServer::bind(socket_path, database_path, clock)?
+        .run()
+        .await
+}
+
+/// Runs the production MCP server with the Fleet-owned group contract.
+///
+/// # Errors
+///
+/// Returns [`McpSocketError`] when group validation, bind, or accept fails.
+pub async fn run_mcp_server_for_group(
+    socket_path: impl AsRef<Path>,
     socket_group: &str,
     database_path: impl Into<PathBuf>,
     clock: Arc<dyn Clock>,

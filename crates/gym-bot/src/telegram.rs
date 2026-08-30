@@ -114,14 +114,14 @@ pub fn adapt_preference_callback(
     let preference_id = parts
         .next()
         .and_then(|value| value.parse::<i64>().ok())
-        .ok_or(TelegramAdapterError::InvalidPreferenceCallback)?;
+        .ok_or(TelegramAdapterError::MissingText)?;
     let decision = match parts.next() {
         Some("accept") => PreferenceReviewDecision::Keep,
         Some("reject") => PreferenceReviewDecision::Reject,
-        _ => return Err(TelegramAdapterError::InvalidPreferenceCallback),
+        _ => return Err(TelegramAdapterError::MissingText),
     };
     if parts.next().is_some() {
-        return Err(TelegramAdapterError::InvalidPreferenceCallback);
+        return Err(TelegramAdapterError::MissingText);
     }
     Ok(Some(PreferenceCallbackInput {
         actor_id: query.from.id.0.to_string(),
@@ -186,9 +186,6 @@ pub enum TelegramAdapterError {
     /// A command message contains media or another non-text payload.
     #[error("Telegram message has no text")]
     MissingText,
-    /// A gym preference callback did not contain exactly id and Keep/Reject action.
-    #[error("Telegram gym preference callback is invalid")]
-    InvalidPreferenceCallback,
     /// The neutral update identity failed validation.
     #[error(transparent)]
     Identity(#[from] ValidationError),
