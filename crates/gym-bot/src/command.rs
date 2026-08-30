@@ -165,7 +165,11 @@ fn format_v0_general(value: f64) -> String {
         usize::try_from(i32::try_from(SIGNIFICANT_DIGITS - 1).expect("small precision") - exponent)
             .expect("fixed notation has a non-negative decimal count");
     let fixed = format!("{value:.decimal_places$}");
-    fixed.trim_end_matches('0').trim_end_matches('.').to_owned()
+    if fixed.contains('.') {
+        fixed.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        fixed
+    }
 }
 
 /// A validated body-weight command.
