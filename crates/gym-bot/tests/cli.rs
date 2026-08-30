@@ -42,5 +42,13 @@ fn binary_builds_runtime_and_reports_socket_bind_failure() {
         .expect("run gym MCP binary");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Io("));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("gym MCP socket error:"),
+        "stderr was {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("Io("),
+        "stderr used Debug formatting: {stderr:?}"
+    );
 }

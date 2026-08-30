@@ -9,7 +9,14 @@ use std::{path::PathBuf, sync::Arc};
 
 use gym_bot::{clock::SystemClock, mcp::run_mcp_server};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args_os();
     let program = arguments.next().unwrap_or_default();
     let Some(socket_path) = arguments.next().map(PathBuf::from) else {
