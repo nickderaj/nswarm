@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import hashlib
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +29,18 @@ class PinTests(unittest.TestCase):
         self.assertEqual(pin["tag"], "v2026.8.19")
         self.assertEqual(pin["package_version"], "0.20.5")
         self.assertEqual(pin["python_requires"], ">=3.11,<3.14")
-        self.assertEqual(len(pin["source_files"]), 7)
+        self.assertEqual(
+            set(pin["source_files"]),
+            {
+                "agent/agent_init.py",
+                "agent/conversation_loop.py",
+                "gateway/platforms/api_server.py",
+                "gateway/run.py",
+                "pyproject.toml",
+                "tools/mcp_tool.py",
+                "uv.lock",
+            },
+        )
         self.assertEqual(len(pin["capabilities_contract_sha256"]), 64)
         self.assertTrue(all(len(digest) == 64 for digest in pin["source_files"].values()))
 
@@ -37,6 +51,15 @@ class PinTests(unittest.TestCase):
             path = Path(directory) / "pin.json"
             path.write_text(json.dumps(document), encoding="utf-8")
             with self.assertRaisesRegex(SPIKE.SpikeError, "schema differs"):
+                SPIKE.load_pin(path)
+
+    def test_pin_parser_rejects_invalid_plan_source_prefix(self) -> None:
+        document = json.loads(SPIKE.PIN_PATH.read_text(encoding="utf-8"))
+        document["plan_source_commit_prefix"] = "not-a-sha"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pin.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(SPIKE.SpikeError, "lowercase hexadecimal"):
                 SPIKE.load_pin(path)
 
 
@@ -54,6 +77,31 @@ class AstContractTests(unittest.TestCase):
         tree = SPIKE.ast.parse("class Adapter:\n    pass\n")
         with self.assertRaisesRegex(SPIKE.SpikeError, "missing Adapter.chat"):
             SPIKE.class_method(tree, "Adapter", "chat")
+
+    def test_annotated_tag_object_drift_fails_closed(self) -> None:
+        pin = SPIKE.load_pin()
+        with patch.object(
+            SPIKE,
+            "git_output",
+            side_effect=[pin["commit_sha"], pin["tag"], "0" * 40],
+        ):
+            with self.assertRaisesRegex(SPIKE.SpikeError, "tag object differs"):
+                SPIKE.verify_git_identity(Path("/source"), pin)
+
+    def test_measurement_restores_sys_path_after_failure(self) -> None:
+        original = sys.path.copy()
+        with (
+            patch.object(SPIKE, "load_pin", return_value={}),
+            patch.object(SPIKE, "verify_source", return_value={}),
+            patch.object(
+                SPIKE,
+                "_measure_http_reuse",
+                new=AsyncMock(side_effect=RuntimeError("probe failure")),
+            ),
+            self.assertRaisesRegex(RuntimeError, "probe failure"),
+        ):
+            asyncio.run(SPIKE.measure_http_reuse(Path("/source"), 3))
+        self.assertEqual(sys.path, original)
 
 
 class EvidenceContractTests(unittest.TestCase):
@@ -95,7 +143,9 @@ class EvidenceContractTests(unittest.TestCase):
         observations = self.evidence["construction_observations"]
         self.assertEqual(observations["agent_factory_calls"], 62)
         self.assertEqual(observations["chat_requests"], 62)
-        self.assertEqual(observations["distinct_agent_instances_for_warm_session"], 31)
+        self.assertEqual(
+            observations["distinct_agent_instances_for_repeated_session"], 31
+        )
         self.assertFalse(observations["warm_agent_reused"])
         self.assertEqual(
             self.evidence["decision"]["d23_http_warm_agent_gate"], "failed"
@@ -103,13 +153,19 @@ class EvidenceContractTests(unittest.TestCase):
 
     def test_raw_latency_samples_reproduce_summaries(self) -> None:
         trial = self.evidence["trial"]
-        self.assertEqual(len(trial["cold_raw_ms"]), trial["samples_per_class"])
-        self.assertEqual(len(trial["warm_raw_ms"]), trial["samples_per_class"])
         self.assertEqual(
-            SPIKE.latency_summary(trial["cold_raw_ms"]), trial["cold_summary"]
+            len(trial["new_session_raw_ms"]), trial["samples_per_class"]
         )
         self.assertEqual(
-            SPIKE.latency_summary(trial["warm_raw_ms"]), trial["warm_summary"]
+            len(trial["repeated_session_raw_ms"]), trial["samples_per_class"]
+        )
+        self.assertEqual(
+            SPIKE.latency_summary(trial["new_session_raw_ms"]),
+            trial["new_session_summary"],
+        )
+        self.assertEqual(
+            SPIKE.latency_summary(trial["repeated_session_raw_ms"]),
+            trial["repeated_session_summary"],
         )
 
     def test_evidence_is_sanitized_and_scoped(self) -> None:

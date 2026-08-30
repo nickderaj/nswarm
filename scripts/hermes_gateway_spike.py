@@ -52,6 +52,13 @@ def load_pin(path: Path = PIN_PATH) -> dict[str, Any]:
         value = document[name]
         if not isinstance(value, str) or len(value) != 40:
             raise SpikeError(f"{name} must be a full Git SHA")
+    plan_prefix = document["plan_source_commit_prefix"]
+    if (
+        not isinstance(plan_prefix, str)
+        or len(plan_prefix) < 7
+        or any(character not in "0123456789abcdef" for character in plan_prefix)
+    ):
+        raise SpikeError("plan source commit prefix must be lowercase hexadecimal")
     if len(document["capabilities_contract_sha256"]) != 64:
         raise SpikeError("capabilities contract must be a SHA-256 digest")
     return document
@@ -110,16 +117,25 @@ def references_name(node: ast.AST, name: str) -> list[int]:
     )
 
 
-def verify_source(source: Path, pin: dict[str, Any]) -> dict[str, Any]:
-    source = source.resolve()
-    if not source.is_dir():
-        raise SpikeError("source is not a directory")
+def verify_git_identity(source: Path, pin: dict[str, Any]) -> tuple[str, str, str]:
+    """Verify the pinned commit, tag name, and annotated tag object."""
     head = git_output(source, "rev-parse", "HEAD")
     if head != pin["commit_sha"]:
         raise SpikeError(f"source commit {head} differs from pin {pin['commit_sha']}")
     tag = git_output(source, "describe", "--tags", "--exact-match")
     if tag != pin["tag"]:
         raise SpikeError(f"source tag {tag!r} differs from pin {pin['tag']!r}")
+    tag_object = git_output(source, "rev-parse", pin["tag"])
+    if tag_object != pin["tag_object_sha"]:
+        raise SpikeError("annotated tag object differs from pin")
+    return head, tag, tag_object
+
+
+def verify_source(source: Path, pin: dict[str, Any]) -> dict[str, Any]:
+    source = source.resolve()
+    if not source.is_dir():
+        raise SpikeError("source is not a directory")
+    head, tag, tag_object = verify_git_identity(source, pin)
 
     mismatches = []
     for relative, expected in sorted(pin["source_files"].items()):
@@ -189,7 +205,9 @@ def verify_source(source: Path, pin: dict[str, Any]) -> dict[str, Any]:
         "pin": {
             "repository": pin["repository"],
             "tag": tag,
+            "tag_object_sha": tag_object,
             "commit_sha": head,
+            "plan_source_commit_prefix": pin["plan_source_commit_prefix"],
             "package": project["name"],
             "package_version": project["version"],
             "python_requires": project["requires-python"],
@@ -231,7 +249,17 @@ async def measure_http_reuse(source: Path, samples: int) -> dict[str, Any]:
     if samples < 3:
         raise SpikeError("at least three samples are required")
     source_contract = verify_source(source, load_pin())
+    original_sys_path = sys.path.copy()
     sys.path.insert(0, str(source.resolve()))
+    try:
+        return await _measure_http_reuse(samples, source_contract)
+    finally:
+        sys.path[:] = original_sys_path
+
+
+async def _measure_http_reuse(
+    samples: int, source_contract: dict[str, Any]
+) -> dict[str, Any]:
 
     try:
         from aiohttp import web
@@ -360,25 +388,25 @@ async def measure_http_reuse(source: Path, samples: int) -> dict[str, Any]:
                 await create_session(client, route_prime_session)
                 route_prime_ms = await chat(client, route_prime_session)
 
-                cold_samples: list[float] = []
+                new_session_samples: list[float] = []
                 for index in range(samples):
-                    session_id = f"cold-session-{index:03d}"
+                    session_id = f"new-session-{index:03d}"
                     await create_session(client, session_id)
-                    cold_samples.append(await chat(client, session_id))
+                    new_session_samples.append(await chat(client, session_id))
 
-                warm_session = "explicit-warm-session"
-                await create_session(client, warm_session)
-                warm_prime_ms = await chat(client, warm_session)
+                repeated_session = "explicit-repeated-session"
+                await create_session(client, repeated_session)
+                repeated_prime_ms = await chat(client, repeated_session)
                 await asyncio.to_thread(
                     database.replace_messages,
-                    warm_session,
+                    repeated_session,
                     [
                         {"role": "user", "content": "persisted probe"},
                         {"role": "assistant", "content": "persisted response"},
                     ],
                 )
-                warm_samples = [
-                    await chat(client, warm_session) for _ in range(samples)
+                repeated_session_samples = [
+                    await chat(client, repeated_session) for _ in range(samples)
                 ]
         finally:
             close = getattr(database, "close", None)
@@ -396,22 +424,26 @@ async def measure_http_reuse(source: Path, samples: int) -> dict[str, Any]:
         raise SpikeError(
             f"expected {expected_constructions} agent constructions, got {len(created)}"
         )
-    warm_instances = [
+    repeated_session_instances = [
         item["instance_number"]
         for item in created
-        if item["session_id"] == "explicit-warm-session"
+        if item["session_id"] == "explicit-repeated-session"
     ]
-    if len(warm_instances) != samples + 1 or len(set(warm_instances)) != samples + 1:
-        raise SpikeError("warm-session requests did not construct distinct agents")
+    if len(repeated_session_instances) != samples + 1 or len(
+        set(repeated_session_instances)
+    ) != samples + 1:
+        raise SpikeError("repeated-session requests did not construct distinct agents")
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "measurement": "instrumented_http_session_route",
         "provider_boundary": "deterministic_local_fake",
         "claims_excluded": [
             "live provider latency",
+            "actual AIAgent construction latency",
             "provider-side prompt-cache latency",
             "Raspberry Pi latency",
+            "growing-transcript reload latency",
         ],
         "environment": {
             "system": platform.system(),
@@ -424,21 +456,23 @@ async def measure_http_reuse(source: Path, samples: int) -> dict[str, Any]:
         "source_contract": source_contract["architecture_contract"],
         "capabilities": capabilities,
         "trial": {
-            "cold_definition": "first chat request for a newly created explicit session",
-            "warm_definition": "repeat chat request for one explicit session after one unrecorded prime",
+            "new_session_definition": "first chat request for a newly created explicit session",
+            "repeated_session_definition": "repeat chat request for one explicit session after one unrecorded prime",
             "samples_per_class": samples,
-            "warm_prime_ms": round(warm_prime_ms, 3),
+            "repeated_session_prime_ms": round(repeated_prime_ms, 3),
             "route_prime_ms": round(route_prime_ms, 3),
-            "cold_raw_ms": cold_samples,
-            "warm_raw_ms": warm_samples,
-            "cold_summary": latency_summary(cold_samples),
-            "warm_summary": latency_summary(warm_samples),
+            "new_session_raw_ms": new_session_samples,
+            "repeated_session_raw_ms": repeated_session_samples,
+            "new_session_summary": latency_summary(new_session_samples),
+            "repeated_session_summary": latency_summary(repeated_session_samples),
         },
         "construction_observations": {
-            "chat_requests": expected_constructions,
+            "chat_requests": len(histories),
             "agent_factory_calls": len(created),
-            "distinct_agent_instances_for_warm_session": len(set(warm_instances)),
-            "warm_session_chat_requests": samples + 1,
+            "distinct_agent_instances_for_repeated_session": len(
+                set(repeated_session_instances)
+            ),
+            "repeated_session_chat_requests": len(repeated_session_instances),
             "conversation_history_lengths": histories,
             "warm_agent_reused": False,
         },
