@@ -55,3 +55,16 @@ isolation, sandbox and prompt-size sequence recorded in `docs/HERMES_SPIKE.md`.
 
 No production credential, owner database, message history, transcript or
 private path was read or committed while producing this implementation.
+
+## Local validation
+
+The final clean `just ci` run on macOS passed 164 tests with none skipped,
+strict formatting/Clippy/rustdoc, generated/profile/Fleet/policy checks, five
+production-backed evals, feature powersets, deny/vet/machete, and semver. Cargo
+Vet retained 156 explicit exemptions. Coverage was 94.94% for `gym-bot`, 96.82%
+repository-wide, 95.08% across changed executable lines, and 296/296 critical
+branch outcomes. The separate SQLite-copy suite passed five cases and the
+socket contract suite passed its static cross-platform check.
+
+`cargo owner --list nswarm` was attempted and refused because no registry token
+is configured. No login, reservation, publication or credential use occurred.
