@@ -95,6 +95,18 @@ fn deterministic_reads_preferences_and_rating_work_without_an_agent() {
             .contains("#1")
     );
     assert_eq!(
+        service
+            .handle(&request("/cardio bike ride 12 3"))
+            .expect("multiword activity"),
+        "Logged bike ride: 12 min, 3 km"
+    );
+    assert!(
+        service
+            .handle(&request("/cardio run 0"))
+            .expect("zero duration")
+            .starts_with("Usage:")
+    );
+    assert_eq!(
         service.handle(&request("/rate 4 useful")).expect("rate"),
         "Thanks — plan feedback saved."
     );
@@ -379,6 +391,10 @@ fn cardio_and_alias_mutation_boundaries_are_exact() {
     service
         .handle(&request("/gym DB Rows 1x1"))
         .expect("abbreviated alias");
+    service
+        .handle(&request("/gym ties 1x1"))
+        .expect("ies boundary");
+    service.handle(&request("/gym as 1x1")).expect("s boundary");
     let connection = Connection::open(database).expect("result");
     assert_eq!(
         connection
@@ -388,8 +404,16 @@ fn cardio_and_alias_mutation_boundaries_are_exact() {
                 |row| row.get::<_, i64>(0),
             )
             .expect("movement count"),
-        1
+        3
     );
+    let names = connection
+        .prepare("SELECT name FROM movements WHERE modality='strength' ORDER BY name")
+        .expect("names statement")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("names")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect names");
+    assert_eq!(names, ["as", "dumbbell row", "tie"]);
     assert_eq!(
         service
             .handle(&request("/gym row"))
