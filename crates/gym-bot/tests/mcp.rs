@@ -84,10 +84,10 @@ fn production_query_filters_and_caps_rows() {
         .expect("open fixture for query plan")
         .query_row(
             "EXPLAIN QUERY PLAN \
-             SELECT date, metric, value, unit, source FROM body_metrics \
+             SELECT id, date, metric, value, unit, source FROM body_metrics \
              WHERE metric = ?1 AND date >= ?2 \
-             ORDER BY date DESC, id DESC LIMIT ?3",
-            ("weight_kg", "2026-08-22T08:15:30.000000+00:00", 200),
+             ORDER BY date DESC, id DESC",
+            ("weight_kg", "2026-08-20"),
             |row| row.get::<_, String>(3),
         )
         .expect("metric query plan");
@@ -95,6 +95,65 @@ fn production_query_filters_and_caps_rows() {
         query_plan.contains("body_metrics_metric_date"),
         "bounded metric query must use the existing composite index: {query_plan}"
     );
+}
+
+#[test]
+fn query_filters_and_orders_by_instant_across_offsets() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "dst.db");
+    open_existing(&database)
+        .expect("open fixture")
+        .execute_batch(
+            "INSERT INTO body_metrics (date, metric, value, unit, source) VALUES \
+             ('2026-10-25T01:29:59+01:00', 'weight_kg', 70, 'kg', 'manual'), \
+             ('2026-10-25T01:30:00+01:00', 'weight_kg', 71, 'kg', 'manual'), \
+             ('2026-10-25T01:30:00+00:00', 'weight_kg', 72, 'kg', 'manual');",
+        )
+        .expect("seed transition rows");
+    let service = GymMcp::new(
+        &database,
+        Arc::new(FixedClock::new("2026-10-26T00:30:00+00:00")),
+    );
+
+    let rows = service
+        .body_metrics(BodyMetricsArgs {
+            metric: Some("weight_kg".to_owned()),
+            days: Some(1),
+            limit: Some(10),
+        })
+        .expect("instant-correct query");
+    assert_eq!(
+        rows.iter().map(|row| row.value).collect::<Vec<_>>(),
+        vec![72.0, 71.0]
+    );
+}
+
+#[test]
+fn query_includes_a_whole_second_exactly_at_the_cutoff() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "cutoff.db");
+    open_existing(&database)
+        .expect("open fixture")
+        .execute(
+            "INSERT INTO body_metrics (date, metric, value, unit, source) \
+             VALUES ('2026-07-04T09:15:30+01:00', 'weight_kg', 73, 'kg', 'manual')",
+            [],
+        )
+        .expect("seed exact-cutoff row");
+    let service = GymMcp::new(
+        &database,
+        Arc::new(FixedClock::new("2026-07-05T08:15:30+00:00")),
+    );
+
+    let rows = service
+        .body_metrics(BodyMetricsArgs {
+            metric: Some("weight_kg".to_owned()),
+            days: Some(1),
+            limit: Some(10),
+        })
+        .expect("exact-cutoff query");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].value.to_bits(), 73.0_f64.to_bits());
 }
 
 #[test]
