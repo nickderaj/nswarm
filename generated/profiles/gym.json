@@ -1,0 +1,30 @@
+{
+  "capabilities": [
+    "evidence-write"
+  ],
+  "forbidden_capabilities": [
+    "repository-read",
+    "network-read",
+    "repository-write",
+    "branch-push",
+    "coordinate",
+    "verify",
+    "integrate",
+    "merge"
+  ],
+  "governance": {
+    "background_review": false,
+    "curator": false,
+    "write_approval": true
+  },
+  "memory": "profiles/gym/memory",
+  "network": {
+    "brief_allow_list_required": true,
+    "default": "deny"
+  },
+  "policy_version": "v1",
+  "profile_version": 1,
+  "role": "gym",
+  "skills": "profiles/gym/skills",
+  "soul": "profiles/gym/SOUL.md"
+}

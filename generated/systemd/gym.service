@@ -1,17 +1,17 @@
 [Unit]
-Description=nswarm research bot
+Description=nswarm gym bot
 After=network-online.target hermes-gateway.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=research-agent
-Group=research-agent
-SupplementaryGroups=research-access
-ExecStart=/opt/nswarm/research/bin/research-bot
-WorkingDirectory=/opt/nswarm/research
-EnvironmentFile=/etc/nswarm/research.env
-RuntimeDirectory=research
+User=gym-agent
+Group=gym-agent
+SupplementaryGroups=gym-access
+ExecStart=/opt/nswarm/gym/bin/gym-bot
+WorkingDirectory=/opt/nswarm/gym
+EnvironmentFile=/etc/nswarm/gym.env
+RuntimeDirectory=gym
 RuntimeDirectoryMode=0750
 Restart=on-failure
 RestartSec=5s
@@ -34,12 +34,10 @@ RestrictRealtime=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-IPAddressDeny=any
-IPAddressAllow=localhost
 MemoryMax=1G
 CPUQuota=100%
-ReadWritePaths=/var/lib/research-agent /var/lib/nswarm/research
-InaccessiblePaths=/var/lib/nswarm/gym /var/lib/nswarm/tutor /var/lib/nswarm/trading
+ReadWritePaths=/var/lib/gym-agent /var/lib/nswarm/gym
+InaccessiblePaths=/var/lib/nswarm/personal /var/lib/nswarm/tutor /var/lib/nswarm/trading /var/lib/nswarm/backups
 
 [Install]
 WantedBy=multi-user.target

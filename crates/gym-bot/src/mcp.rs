@@ -335,10 +335,10 @@ impl McpServer {
         let socket_path = socket_path.as_ref().to_path_buf();
         let database_path = database_path.into();
         validate_existing(&database_path)?;
-        ensure_private_socket_parent(&socket_path)?;
+        ensure_group_socket_parent(&socket_path)?;
         let listener = UnixListener::bind(&socket_path)?;
         let guard = SocketGuard(socket_path.clone());
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o660))?;
         Ok(Self {
             listener,
             _guard: guard,
@@ -370,7 +370,7 @@ impl McpServer {
     }
 }
 
-fn ensure_private_socket_parent(socket_path: &Path) -> Result<(), std::io::Error> {
+fn ensure_group_socket_parent(socket_path: &Path) -> Result<(), std::io::Error> {
     let parent = socket_path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -378,10 +378,12 @@ fn ensure_private_socket_parent(socket_path: &Path) -> Result<(), std::io::Error
         )
     })?;
     let mode = std::fs::metadata(parent)?.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
+    if mode & 0o007 != 0 || mode & 0o050 != 0o050 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            format!("gym MCP socket directory mode {mode:o} permits group or other access"),
+            format!(
+                "gym MCP socket directory mode {mode:o} must grant group access and deny world access"
+            ),
         ));
     }
     Ok(())

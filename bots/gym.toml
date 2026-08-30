@@ -1,0 +1,32 @@
+[bot]
+name = "gym"
+crate = "gym-bot"
+runtime = "rust"
+user = "gym-agent"
+prefix = "/opt/nswarm/gym"
+state = "/var/lib/gym-agent"
+data = "/var/lib/nswarm/gym"
+
+[surface]
+telegram = true
+socket = "/run/gym/mcp.sock"
+socket_group = "gym-access"
+ask = false
+peers = ["boss-agent"]
+
+[secrets]
+allow = ["GYM_BOT_TOKEN", "OWNER_TELEGRAM_ID", "TIMEZONE", "GYM_DATA_DIR", "HEALTH_IMPORT_TOKEN", "HEALTH_BIND_HOST", "HEALTH_BIND_PORT"]
+
+[agent]
+profile = "gym"
+soul = "profiles/gym/SOUL.md"
+skills = "profiles/gym/skills"
+memory = "profiles/gym/memory"
+toolsets = ["mcp-gym", "clarify", "memory", "session_search", "skills"]
+write_approval = true
+background_review = false
+
+[sandbox]
+memory_max = "1G"
+cpu_quota = "100%"
+deny_paths = ["/var/lib/nswarm/personal", "/var/lib/nswarm/tutor", "/var/lib/nswarm/trading", "/var/lib/nswarm/backups"]

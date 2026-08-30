@@ -242,7 +242,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             .expect("workspace root");
         let output = run(["check".to_owned(), root.display().to_string()].into_iter())
             .expect("fleet check succeeds");
-        assert_eq!(output, "1 manifest(s): research\n");
+        assert_eq!(output, "2 manifest(s): gym, research\n");
 
         let rendered = TempDir::new().expect("temporary rendered directory");
         let output = run([
@@ -252,7 +252,8 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         ]
         .into_iter())
         .expect("all units render");
-        assert_eq!(output, "1 unit(s) rendered\n");
+        assert_eq!(output, "2 unit(s) rendered\n");
+        assert!(rendered.path().join("gym.service").is_file());
         assert!(rendered.path().join("research.service").is_file());
     }
 
@@ -268,7 +269,16 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         let synthetic_secret = "synthetic-provider-value";
         fs::write(
             &secret_path,
-            format!("OPENROUTER_API_KEY={synthetic_secret}\n"),
+            format!(
+                "OPENROUTER_API_KEY={synthetic_secret}\n\
+                 GYM_BOT_TOKEN=synthetic-gym-token\n\
+                 OWNER_TELEGRAM_ID=1001\n\
+                 TIMEZONE=Europe/London\n\
+                 GYM_DATA_DIR=/var/lib/nswarm/gym\n\
+                 HEALTH_IMPORT_TOKEN=synthetic-health-token\n\
+                 HEALTH_BIND_HOST=127.0.0.1\n\
+                 HEALTH_BIND_PORT=8090\n"
+            ),
         )
         .expect("write synthetic source");
 
@@ -281,6 +291,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         ]
         .into_iter())
         .expect("plan succeeds");
+        assert!(plan.contains("bot: gym"));
         assert!(plan.contains("bot: research"));
         assert!(plan.contains("environment: replace (contents redacted)"));
         assert!(!plan.contains(synthetic_secret));

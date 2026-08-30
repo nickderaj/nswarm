@@ -227,7 +227,11 @@ impl BotManifest {
             "RuntimeDirectoryMode=0750".to_owned(),
             "Restart=on-failure".to_owned(),
             "RestartSec=5s".to_owned(),
-            "UMask=0077".to_owned(),
+            if self.surface.socket_group.is_empty() {
+                "UMask=0077".to_owned()
+            } else {
+                "UMask=0007".to_owned()
+            },
             "NoNewPrivileges=true".to_owned(),
             "CapabilityBoundingSet=".to_owned(),
             "AmbientCapabilities=".to_owned(),
@@ -840,7 +844,7 @@ deny_paths = ["/srv/nswarm/tutor"]
             "NoNewPrivileges=true",
             "CapabilityBoundingSet=",
             "ProtectSystem=strict",
-            "UMask=0077",
+            "UMask=0007",
             "SystemCallFilter=@system-service",
             "SupplementaryGroups=gym-access",
             "ReadWritePaths=/var/lib/gym-agent /srv/nswarm/gym",
@@ -1199,7 +1203,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             .and_then(std::path::Path::parent)
             .expect("workspace root");
         let names = validate_repository(root).expect("repository validates");
-        assert_eq!(names, ["research"]);
+        assert_eq!(names, ["gym", "research"]);
     }
 
     #[test]
@@ -1318,8 +1322,19 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             .expect("workspace root");
         let host = TempDir::new().expect("temporary host root");
         let synthetic_secret = "synthetic-provider-value";
-        let secrets =
-            BTreeMap::from([("OPENROUTER_API_KEY".to_owned(), synthetic_secret.to_owned())]);
+        let secrets = BTreeMap::from([
+            ("OPENROUTER_API_KEY".to_owned(), synthetic_secret.to_owned()),
+            ("GYM_BOT_TOKEN".to_owned(), "synthetic-gym-token".to_owned()),
+            ("OWNER_TELEGRAM_ID".to_owned(), "1001".to_owned()),
+            ("TIMEZONE".to_owned(), "Europe/London".to_owned()),
+            ("GYM_DATA_DIR".to_owned(), "/var/lib/nswarm/gym".to_owned()),
+            (
+                "HEALTH_IMPORT_TOKEN".to_owned(),
+                "synthetic-health-token".to_owned(),
+            ),
+            ("HEALTH_BIND_HOST".to_owned(), "127.0.0.1".to_owned()),
+            ("HEALTH_BIND_PORT".to_owned(), "8090".to_owned()),
+        ]);
         let first = plan_repository(repository, host.path(), &secrets).expect("plan renders");
         assert!(first.contains("environment: replace (contents redacted)"));
         assert!(!first.contains(synthetic_secret));

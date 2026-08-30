@@ -311,7 +311,7 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
 }
 
 #[test]
-fn socket_bind_rejects_a_directory_accessible_to_other_identities() {
+fn socket_bind_rejects_a_world_accessible_directory() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755))
@@ -333,7 +333,7 @@ fn socket_bind_rejects_a_directory_accessible_to_other_identities() {
         .expect("public parent directory must be rejected");
     assert_eq!(
         error.to_string(),
-        "gym MCP socket error: gym MCP socket directory mode 755 permits group or other access"
+        "gym MCP socket error: gym MCP socket directory mode 755 must grant group access and deny world access"
     );
 }
 
@@ -398,7 +398,7 @@ fn arguments(value: &serde_json::Value) -> serde_json::Map<String, serde_json::V
 fn private_socket_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
     let socket_directory = directory.path().join("socket");
     std::fs::DirBuilder::new()
-        .mode(0o700)
+        .mode(0o750)
         .create(&socket_directory)
         .expect("private socket directory");
     socket_directory.join("mcp.sock")
@@ -411,8 +411,8 @@ fn assert_private_socket_boundary(socket: &std::path::Path) {
             .permissions()
             .mode()
             & 0o777,
-        0o700,
-        "the portable access boundary is private to its service identity"
+        0o750,
+        "the runtime directory admits only the service and socket group"
     );
     assert_eq!(
         std::fs::metadata(socket)
@@ -420,8 +420,8 @@ fn assert_private_socket_boundary(socket: &std::path::Path) {
             .permissions()
             .mode()
             & 0o777,
-        0o600,
-        "the Step 2 socket is private to its service identity"
+        0o660,
+        "the Step 4 socket is shared only with its authorized group"
     );
 }
 
