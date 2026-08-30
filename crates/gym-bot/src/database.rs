@@ -8,6 +8,13 @@ use thiserror::Error;
 /// The v0 gym schema version represented by the sanitized fixture.
 pub const V0_GYM_SCHEMA_VERSION: i64 = 5;
 
+// Method syntax avoids redundant bitwise-operator mutants without excluding
+// the surrounding database validation from mutation testing.
+const READ_WRITE_FLAGS: OpenFlags =
+    OpenFlags::SQLITE_OPEN_READ_WRITE.union(OpenFlags::SQLITE_OPEN_NO_MUTEX);
+const READ_ONLY_FLAGS: OpenFlags =
+    OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_NO_MUTEX);
+
 /// Opens an existing gym database for command writes.
 ///
 /// # Errors
@@ -15,10 +22,7 @@ pub const V0_GYM_SCHEMA_VERSION: i64 = 5;
 /// Returns [`DatabaseError`] when the database is absent, unreadable, has a
 /// different schema version.
 pub fn open_existing(path: &Path) -> Result<Connection, DatabaseError> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE.union(OpenFlags::SQLITE_OPEN_NO_MUTEX),
-    )?;
+    let connection = Connection::open_with_flags(path, READ_WRITE_FLAGS)?;
     configure_and_validate(&connection)?;
     Ok(connection)
 }
@@ -30,10 +34,7 @@ pub fn open_existing(path: &Path) -> Result<Connection, DatabaseError> {
 /// Returns [`DatabaseError`] when the database is absent, unreadable, has a
 /// different schema version.
 pub fn open_existing_read_only(path: &Path) -> Result<Connection, DatabaseError> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_NO_MUTEX),
-    )?;
+    let connection = Connection::open_with_flags(path, READ_ONLY_FLAGS)?;
     configure_and_validate(&connection)?;
     Ok(connection)
 }
