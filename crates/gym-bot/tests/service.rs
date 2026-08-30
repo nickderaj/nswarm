@@ -209,6 +209,14 @@ fn service_fails_closed_when_database_disappears() {
     let service = GymService::new(&database, Arc::new(FixedClock::new(NOW)));
     std::fs::remove_file(database).expect("remove database");
     assert!(service.handle(&request("/weight")).is_err());
+    assert!(
+        service
+            .review_preference(PreferenceReviewRequest {
+                preference_id: 1,
+                decision: PreferenceReviewDecision::Keep,
+            })
+            .is_err()
+    );
 }
 
 #[test]
