@@ -72,6 +72,32 @@ fn health_import_conservatively_reconciles_matching_manual_cardio() {
 }
 
 #[test]
+fn reconciliation_update_failure_rolls_back() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    Connection::open(&database)
+        .expect("fixture")
+        .execute_batch(
+            "INSERT INTO sessions (started_at,kind,source) VALUES ('2026-08-30T09:05:00+01:00','cardio','manual');
+             INSERT INTO movements (name,display_name,modality) VALUES ('run','Run','cardio');
+             INSERT INTO session_items (session_id,position,movement_id) VALUES (1,1,1);
+             INSERT INTO efforts (session_item_id,position,duration_s,distance_m) VALUES (1,1,1900,4900);
+             CREATE TRIGGER fail_reconcile BEFORE UPDATE ON sessions BEGIN SELECT RAISE(ABORT,'fixture'); END;",
+        )
+        .expect("failure fixture");
+    let payload = br#"{"workouts":[{"external_id":"watch-run","started_at":"2026-08-30T09:00:00+01:00","activity":"Run","duration_s":1800,"distance_m":5000}],"metrics":[]}"#;
+    assert!(HealthImporter::new(&database).import_json(payload).is_err());
+    assert_eq!(
+        Connection::open(database)
+            .expect("result")
+            .query_row("SELECT source FROM sessions", [], |row| row
+                .get::<_, String>(0))
+            .expect("source"),
+        "manual"
+    );
+}
+
+#[test]
 fn health_nonmatching_manual_activity_creates_a_separate_session() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
