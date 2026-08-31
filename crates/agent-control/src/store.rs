@@ -6,8 +6,8 @@ use thiserror::Error;
 
 use crate::types::{BriefError, report_matches_schema};
 use crate::{
-    ArtifactKind, Capability, CoderReport, CoderReportError, JobBrief, JobId, JobState, LeaseKind,
-    ProfileId, ResearchReport, ResearchReportError, RiskClass, Role, SessionId, Sha, UnitId,
+    ArtifactKind, Capability, CoderReport, JobBrief, JobId, JobState, LeaseKind, ProfileId,
+    ResearchReport, RiskClass, Role, SessionId, Sha, UnitId,
 };
 
 const SCHEMA_VERSION: i64 = 9;
@@ -1288,9 +1288,9 @@ impl ControlStore {
             &value,
             (Role::Research, idempotency_key, now),
             |brief| {
-                report
-                    .validate_for_brief(brief)
-                    .map_err(StoreError::ResearchReport)
+                report.validate_for_brief(brief).map_err(|error| {
+                    StoreError::Brief(BriefError::InvalidIdentifier(error.to_string()))
+                })
             },
         )
     }
@@ -1325,7 +1325,9 @@ impl ControlStore {
             |brief| {
                 report
                     .validate_with_writable_roots(brief, &writable_roots)
-                    .map_err(StoreError::CoderReport)
+                    .map_err(|error| {
+                        StoreError::Brief(BriefError::InvalidIdentifier(error.to_string()))
+                    })
             },
         )?;
         transaction.commit()?;
@@ -1371,7 +1373,9 @@ impl ControlStore {
             {
                 return Ok(());
             }
-            return Err(StoreError::ConflictingProfile(profile_id.to_string()));
+            return Err(StoreError::Brief(BriefError::InvalidIdentifier(
+                profile_id.to_string(),
+            )));
         }
         let (actual_job, _) = unit_identity_tx(&transaction, unit_id)?;
         if actual_job != *job_id {
@@ -2411,7 +2415,9 @@ fn unit_brief_replays_tx(
         .optional()?;
     match existing {
         Some(existing) if existing == brief_json => Ok(true),
-        Some(_) => Err(StoreError::ConflictingUnitBrief(unit_id.to_string())),
+        Some(_) => Err(StoreError::Brief(BriefError::InvalidIdentifier(
+            unit_id.to_string(),
+        ))),
         None => Ok(false),
     }
 }
@@ -2513,12 +2519,6 @@ pub enum StoreError {
     /// Brief or persisted typed value failed validation.
     #[error("brief validation error: {0}")]
     Brief(#[from] BriefError),
-    /// A research report failed its typed evidence contract.
-    #[error("research report validation error: {0}")]
-    ResearchReport(#[source] ResearchReportError),
-    /// A coder report failed its typed evidence contract.
-    #[error("coder report validation error: {0}")]
-    CoderReport(#[source] CoderReportError),
     /// JSON evidence failed serialization.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
@@ -2588,18 +2588,12 @@ pub enum StoreError {
     /// Profile home must be an explicit isolated absolute path.
     #[error("profile home must be absolute: {path}", path = .0.display())]
     InvalidProfileHome(std::path::PathBuf),
-    /// An existing profile id cannot be rebound to different immutable attributes.
-    #[error("profile already has a different immutable registration: {0}")]
-    ConflictingProfile(String),
     /// Profile registration cannot cross job ownership.
     #[error("job and unit ownership do not match")]
     JobUnitMismatch,
     /// Existing job identity cannot be reused for a different repository or policy pin.
     #[error("job scope differs from its immutable definition: {0}")]
     JobScopeMismatch(String),
-    /// An existing unit id cannot be rebound to a different immutable brief.
-    #[error("unit already has a different immutable brief: {0}")]
-    ConflictingUnitBrief(String),
     /// Protected integration recovery requires an explicitly supported edge.
     #[error("cannot recover unit from {current:?} to {next:?}")]
     InvalidRecovery {
@@ -3043,8 +3037,8 @@ mod tests {
         redact_evidence,
     };
     use crate::{
-        ArtifactKind, BriefError, CoderReport, CoderReportError, CredentialGrant, JobBrief, JobId,
-        JobState, LeaseKind, NetworkMode, NetworkPolicy, PathPolicy, ProfileId, ResearchReport,
+        ArtifactKind, BriefError, CoderReport, CredentialGrant, JobBrief, JobId, JobState,
+        LeaseKind, NetworkMode, NetworkPolicy, PathPolicy, ProfileId, ResearchReport,
         ResearchReportError, ResourceLimits, RiskClass, Role, SessionId, Sha, UnitId,
         VerificationCommand,
     };
@@ -4571,7 +4565,7 @@ mod tests {
         changed_unit.goal = "A different immutable goal".to_owned();
         assert!(matches!(
             store.create_job(&changed_unit, 2),
-            Err(StoreError::ConflictingUnitBrief(unit))
+            Err(StoreError::Brief(BriefError::InvalidIdentifier(unit)))
                 if unit == first.unit_id.as_str()
         ));
 
@@ -5119,9 +5113,8 @@ mod tests {
                 "wrong-question-report",
                 3,
             ),
-            Err(StoreError::ResearchReport(
-                ResearchReportError::QuestionMismatch
-            ))
+            Err(StoreError::Brief(BriefError::InvalidIdentifier(message)))
+                if message == ResearchReportError::QuestionMismatch.to_string()
         ));
     }
 
@@ -5203,8 +5196,8 @@ mod tests {
                 "out-of-scope-coder-report",
                 6,
             ),
-            Err(StoreError::CoderReport(CoderReportError::ChangedPathOutOfScope(path)))
-                if path == PathBuf::from("crates/sibling/src/lib.rs")
+            Err(StoreError::Brief(BriefError::InvalidIdentifier(message)))
+                if message.contains("changed path is outside scope")
         ));
 
         let mut unleased = out_of_scope;
@@ -5217,8 +5210,8 @@ mod tests {
                 "unleased-coder-report",
                 6,
             ),
-            Err(StoreError::CoderReport(CoderReportError::ChangedPathOutOfScope(path)))
-                if path == PathBuf::from("crates/assigned/README.md")
+            Err(StoreError::Brief(BriefError::InvalidIdentifier(message)))
+                if message.contains("changed path is outside scope")
         ));
     }
 
@@ -6222,7 +6215,7 @@ mod tests {
                 home,
                 3,
             ),
-            Err(StoreError::ConflictingProfile(id)) if id == profile.as_str()
+            Err(StoreError::Brief(BriefError::InvalidIdentifier(id))) if id == profile.as_str()
         ));
     }
 
