@@ -315,10 +315,10 @@ impl ControlStore {
 
     pub(crate) fn live_coder_profiles(&self) -> Result<Vec<ProfileId>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT profile_id FROM profiles WHERE role = 'coder' AND destroyed_at IS NULL ORDER BY profile_id",
+            "SELECT profile_id FROM profiles WHERE role = ?1 AND destroyed_at IS NULL ORDER BY profile_id",
         )?;
         statement
-            .query_map([], |row| row.get::<_, String>(0))?
+            .query_map([Role::Coder.as_str()], |row| row.get::<_, String>(0))?
             .map(|profile| Ok(ProfileId::new(profile?)?))
             .collect()
     }

@@ -312,6 +312,33 @@ mod tests {
     }
 
     #[test]
+    fn live_coder_gate_uses_the_canonical_role_encoding() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let first = brief("first-job", "first-unit");
+        SerialCoderPilot::prepare(
+            &mut store,
+            &first,
+            Path::new("/tmp/nswarm-pilot-profiles"),
+            100,
+            1,
+        )
+        .expect("first pilot prepared");
+
+        assert_eq!(
+            SerialCoderPilot::prepare(
+                &mut store,
+                &brief("second-job", "second-unit"),
+                Path::new("/tmp/nswarm-pilot-profiles"),
+                100,
+                2,
+            )
+            .expect_err("canonical coder role must block a second pilot")
+            .to_string(),
+            "another serial coder pilot is active: coder-first-job-first-unit"
+        );
+    }
+
+    #[test]
     fn eval_serial_pilot_corpus_enforces_single_writer() {
         let case: serde_json::Value =
             serde_json::from_str(include_str!("../../../eval/corpus/serial-pilot.json"))
