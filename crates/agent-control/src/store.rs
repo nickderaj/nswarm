@@ -211,6 +211,9 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if unit_brief_replays_tx(&transaction, &brief.unit_id, &brief_json)? {
+            return Ok(());
+        }
         let existing_scope: Option<(String, String)> = transaction
             .query_row(
                 "SELECT repository, standing_policy_version FROM jobs WHERE job_id = ?1",
@@ -1402,6 +1405,28 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String, String, String, Option<i64>)> = transaction
+            .query_row(
+                "SELECT job_id, unit_id, role, home, destroyed_at FROM profiles WHERE profile_id = ?1",
+                [profile_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()?;
+        if let Some((existing_job, existing_unit, existing_role, existing_home, destroyed_at)) =
+            existing
+        {
+            if existing_job == job_id.as_str()
+                && existing_unit == unit_id.as_str()
+                && existing_role == role.as_str()
+                && existing_home == home.to_string_lossy()
+                && destroyed_at.is_none()
+            {
+                return Ok(());
+            }
+            return Err(StoreError::ProfileRegistrationConflict(
+                profile_id.to_string(),
+            ));
+        }
         let (actual_job, _) = unit_identity_tx(&transaction, unit_id)?;
         if actual_job != *job_id {
             return Err(StoreError::JobUnitMismatch);
@@ -2311,6 +2336,25 @@ fn path_resources_overlap(left: &str, right: &str) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
+fn unit_brief_replays_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    unit_id: &UnitId,
+    brief_json: &str,
+) -> Result<bool, StoreError> {
+    let existing: Option<String> = transaction
+        .query_row(
+            "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
+            [unit_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match existing {
+        Some(existing) if existing == brief_json => Ok(true),
+        Some(_) => Err(StoreError::UnitBriefConflict(unit_id.to_string())),
+        None => Ok(false),
+    }
+}
+
 // coverage-critical
 fn is_safe_relative_path(path: &Path) -> bool {
     !path.as_os_str().is_empty()
@@ -2483,12 +2527,18 @@ pub enum StoreError {
     /// Profile home must be an explicit isolated absolute path.
     #[error("profile home must be absolute: {path}", path = .0.display())]
     InvalidProfileHome(std::path::PathBuf),
+    /// A profile id cannot be reused with another scope, role, home, or lifecycle.
+    #[error("profile registration differs from its immutable definition: {0}")]
+    ProfileRegistrationConflict(String),
     /// Profile registration cannot cross job ownership.
     #[error("job and unit ownership do not match")]
     JobUnitMismatch,
     /// Existing job identity cannot be reused for a different repository or policy pin.
     #[error("job scope differs from its immutable definition: {0}")]
     JobScopeMismatch(String),
+    /// A unit id cannot be replayed with different immutable brief bytes.
+    #[error("unit brief differs from its immutable definition: {0}")]
+    UnitBriefConflict(String),
     /// Protected integration recovery requires an explicitly supported edge.
     #[error("cannot recover unit from {current:?} to {next:?}")]
     InvalidRecovery {
@@ -4415,6 +4465,16 @@ mod tests {
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let first = brief();
         store.create_job(&first, 1).expect("first unit created");
+        store
+            .create_job(&first, 99)
+            .expect("exact unit provisioning replayed");
+
+        let mut changed_unit = first.clone();
+        changed_unit.goal = "A different immutable goal".to_owned();
+        assert!(matches!(
+            store.create_job(&changed_unit, 2),
+            Err(StoreError::UnitBriefConflict(unit)) if unit == first.unit_id.as_str()
+        ));
 
         let mut changed_scope = first.clone();
         changed_scope.unit_id = UnitId::new("unit-scope").expect("unit id");
@@ -5968,6 +6028,46 @@ mod tests {
                 7,
             )
             .expect("leased coder records tracked candidate");
+    }
+
+    #[test]
+    fn exact_profile_registration_replays_but_scope_drift_fails() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let profile = ProfileId::new("replay-profile").expect("profile id");
+        let home = std::path::Path::new("/tmp/nswarm-replay-profile");
+        store
+            .register_profile(
+                &profile,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::Coder,
+                home,
+                2,
+            )
+            .expect("profile registered");
+        store
+            .register_profile(
+                &profile,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::Coder,
+                home,
+                99,
+            )
+            .expect("exact profile provisioning replayed");
+        assert!(matches!(
+            store.register_profile(
+                &profile,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::Research,
+                home,
+                3,
+            ),
+            Err(StoreError::ProfileRegistrationConflict(id)) if id == profile.as_str()
+        ));
     }
 
     #[test]
