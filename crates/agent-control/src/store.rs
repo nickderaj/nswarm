@@ -1,6 +1,6 @@
 use std::path::{Component, Path};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -1277,54 +1277,49 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let command_request = json!({
-            "actor": actor.as_str(),
-            "unit_id": unit_id.as_str(),
-            "report": report
-        });
-        if let Some(result) = command_replay_tx(
-            &transaction,
-            idempotency_key,
-            "record-report",
-            &command_request,
-        )? {
-            return result
-                .as_i64()
-                .ok_or_else(|| StoreError::InvalidStoredCommand(idempotency_key.to_owned()));
-        }
-        let (job_id, _) = unit_identity_tx(&transaction, unit_id)?;
-        require_unit_actor_tx(
+        let id = record_report_tx(
             &transaction,
             actor,
-            &job_id,
             unit_id,
-            Capability::EvidenceWrite,
-        )?;
-        require_actor_lease_tx(&transaction, actor, unit_id, LeaseKind::Profile, now)?;
-        let brief_json: String = transaction.query_row(
-            "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
-            [unit_id.as_str()],
-            |row| row.get(0),
-        )?;
-        let brief: JobBrief = serde_json::from_str(&brief_json)?;
-        if !report_matches_schema(&brief.report_schema, report) {
-            return Err(StoreError::ReportSchemaViolation);
-        }
-        let id = append_event_tx(
-            &transaction,
-            &job_id,
+            report,
             idempotency_key,
-            "worker-report",
-            &json!({"actor": actor.as_str(), "report": report}),
             now,
+            |_| Ok(()),
         )?;
-        record_command_tx(
+        transaction.commit()?;
+        Ok(id)
+    }
+
+    fn record_typed_report(
+        &mut self,
+        actor: &ProfileId,
+        unit_id: &UnitId,
+        report: &Value,
+        context: (Role, &str, i64),
+        validate: impl FnOnce(&JobBrief) -> Result<(), StoreError>,
+    ) -> Result<i64, StoreError> {
+        let (expected_role, idempotency_key, now) = context;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let role: Option<String> = transaction
+            .query_row(
+                "SELECT role FROM profiles WHERE profile_id = ?1 AND unit_id = ?2 AND destroyed_at IS NULL",
+                params![actor.as_str(), unit_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if role.as_deref() != Some(expected_role.as_str()) {
+            return Err(StoreError::UnauthorizedActor(actor.to_string()));
+        }
+        let id = record_report_tx(
             &transaction,
+            actor,
+            unit_id,
+            report,
             idempotency_key,
-            "record-report",
-            &command_request,
-            &json!(id),
-            id,
+            now,
+            validate,
         )?;
         transaction.commit()?;
         Ok(id)
@@ -1346,10 +1341,14 @@ impl ControlStore {
         idempotency_key: &str,
         now: i64,
     ) -> Result<i64, StoreError> {
-        let brief = self.typed_report_brief(actor, unit_id, Role::Research)?;
-        report.validate_for_brief(&brief)?;
         let value = serde_json::to_value(report)?;
-        self.record_report(actor, unit_id, &value, idempotency_key, now)
+        self.record_typed_report(
+            actor,
+            unit_id,
+            &value,
+            (Role::Research, idempotency_key, now),
+            |brief| Ok(report.validate_for_brief(brief)?),
+        )
     }
 
     /// Validates and records a coder candidate handoff against its immutable
@@ -1368,33 +1367,14 @@ impl ControlStore {
         idempotency_key: &str,
         now: i64,
     ) -> Result<i64, StoreError> {
-        let brief = self.typed_report_brief(actor, unit_id, Role::Coder)?;
-        report.validate(&brief)?;
         let value = serde_json::to_value(report)?;
-        self.record_report(actor, unit_id, &value, idempotency_key, now)
-    }
-
-    fn typed_report_brief(
-        &self,
-        actor: &ProfileId,
-        unit_id: &UnitId,
-        expected_role: Role,
-    ) -> Result<JobBrief, StoreError> {
-        let context: Option<(String, String)> = self
-            .connection
-            .query_row(
-                "SELECT profiles.role, unit_briefs.brief_json FROM profiles JOIN unit_briefs USING (unit_id) WHERE profiles.profile_id = ?1 AND profiles.unit_id = ?2 AND profiles.destroyed_at IS NULL",
-                params![actor.as_str(), unit_id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let Some((role, brief_json)) = context else {
-            return Err(StoreError::UnauthorizedActor(actor.to_string()));
-        };
-        if role != expected_role.as_str() {
-            return Err(StoreError::UnauthorizedActor(actor.to_string()));
-        }
-        Ok(serde_json::from_str(&brief_json)?)
+        self.record_typed_report(
+            actor,
+            unit_id,
+            &value,
+            (Role::Coder, idempotency_key, now),
+            |brief| Ok(report.validate(brief)?),
+        )
     }
 
     /// Registers one role-bound isolated profile home.
@@ -2303,6 +2283,68 @@ fn record_command_tx(
 }
 
 // coverage-critical
+fn record_report_tx(
+    transaction: &Transaction<'_>,
+    actor: &ProfileId,
+    unit_id: &UnitId,
+    report: &Value,
+    idempotency_key: &str,
+    now: i64,
+    validate: impl FnOnce(&JobBrief) -> Result<(), StoreError>,
+) -> Result<i64, StoreError> {
+    let command_request = json!({
+        "actor": actor.as_str(),
+        "unit_id": unit_id.as_str(),
+        "report": report
+    });
+    if let Some(result) = command_replay_tx(
+        transaction,
+        idempotency_key,
+        "record-report",
+        &command_request,
+    )? {
+        return result
+            .as_i64()
+            .ok_or_else(|| StoreError::InvalidStoredCommand(idempotency_key.to_owned()));
+    }
+    let (job_id, _) = unit_identity_tx(transaction, unit_id)?;
+    require_unit_actor_tx(
+        transaction,
+        actor,
+        &job_id,
+        unit_id,
+        Capability::EvidenceWrite,
+    )?;
+    require_actor_lease_tx(transaction, actor, unit_id, LeaseKind::Profile, now)?;
+    let brief_json: String = transaction.query_row(
+        "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
+        [unit_id.as_str()],
+        |row| row.get(0),
+    )?;
+    let brief: JobBrief = serde_json::from_str(&brief_json)?;
+    validate(&brief)?;
+    if !report_matches_schema(&brief.report_schema, report) {
+        return Err(StoreError::ReportSchemaViolation);
+    }
+    let id = append_event_tx(
+        transaction,
+        &job_id,
+        idempotency_key,
+        "worker-report",
+        &json!({"actor": actor.as_str(), "report": report}),
+        now,
+    )?;
+    record_command_tx(
+        transaction,
+        idempotency_key,
+        "record-report",
+        &command_request,
+        &json!(id),
+        id,
+    )?;
+    Ok(id)
+}
+
 fn append_event_tx(
     transaction: &rusqlite::Transaction<'_>,
     job_id: &JobId,
