@@ -23,7 +23,7 @@ cargo run --quiet -p fleet -- check .
 cargo fmt --all --check
 cargo check --locked --workspace --all-targets --all-features
 python3 scripts/run_evals.py
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo nextest run --workspace --all-features
 cargo test --workspace --doc --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
