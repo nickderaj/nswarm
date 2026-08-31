@@ -3086,8 +3086,8 @@ mod tests {
         redact_evidence,
     };
     use crate::{
-        ArtifactKind, BriefError, CoderReport, CredentialGrant, JobBrief, JobId,
-        JobState, LeaseKind, NetworkMode, NetworkPolicy, PathPolicy, ProfileId, ResearchReport,
+        ArtifactKind, BriefError, CoderReport, CredentialGrant, JobBrief, JobId, JobState,
+        LeaseKind, NetworkMode, NetworkPolicy, PathPolicy, ProfileId, ResearchReport,
         ResearchReportError, ResourceLimits, RiskClass, Role, SessionId, Sha, UnitId,
         VerificationCommand,
     };
