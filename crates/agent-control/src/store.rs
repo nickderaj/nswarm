@@ -5132,16 +5132,6 @@ mod tests {
                 4,
             )
             .expect("typed research report replayed");
-        assert!(matches!(
-            store.record_research_report(
-                &researcher,
-                &research_brief.unit_id,
-                &research,
-                "typed-research-report",
-                10_001,
-            ),
-            Err(StoreError::MissingActorLease { .. })
-        ));
 
         let coder = ensure_profile(
             &mut store,
@@ -5270,6 +5260,27 @@ mod tests {
             ),
             Err(StoreError::Brief(BriefError::InvalidIdentifier(message)))
                 if message.contains("changed path is outside scope")
+        ));
+    }
+
+    #[test]
+    fn typed_report_replay_requires_a_live_profile_lease() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let actor = ensure_profile(&mut store, &brief, "expiring-reporter", Role::Coder, 2);
+        ensure_profile_lease(&mut store, &brief, &actor, 2);
+        let report = json!({
+            "head_sha": sha('b'),
+            "evidence": {"checks": ["focused test passed"]}
+        });
+        store
+            .record_report(&actor, &brief.unit_id, &report, "expiring-report", 3)
+            .expect("report recorded");
+
+        assert!(matches!(
+            store.record_report(&actor, &brief.unit_id, &report, "expiring-report", 10_001),
+            Err(StoreError::MissingActorLease { .. })
         ));
     }
 

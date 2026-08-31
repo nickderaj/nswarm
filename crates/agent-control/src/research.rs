@@ -261,8 +261,8 @@ impl ResearchReport {
         {
             return Err(ResearchReportError::InvalidLimitations);
         }
-        if let Some(critic) = &self.critic {
-            if critic.critic_id.trim().is_empty()
+        if let Some(critic) = &self.critic
+            && (critic.critic_id.trim().is_empty()
                 || !critic.passed
                 || critic.claims_digest.len() != 64
                 || !critic
@@ -273,10 +273,9 @@ impl ResearchReport {
                 || critic
                     .findings
                     .iter()
-                    .any(|finding| finding.trim().is_empty())
-            {
-                return Err(ResearchReportError::InvalidCriticAttestation);
-            }
+                    .any(|finding| finding.trim().is_empty()))
+        {
+            return Err(ResearchReportError::InvalidCriticAttestation);
         }
         self.sources.validate()?;
         for claim in &self.claims {
@@ -599,16 +598,10 @@ mod tests {
             |report: &mut ResearchReport| report.critic.as_mut().unwrap().critic_id.clear(),
             |report: &mut ResearchReport| report.critic.as_mut().unwrap().passed = false,
             |report: &mut ResearchReport| {
-                report
-                    .critic
-                    .as_mut()
-                    .unwrap()
-                    .claims_digest
-                    .pop()
-                    .map_or((), drop)
+                report.critic.as_mut().unwrap().claims_digest.pop();
             },
             |report: &mut ResearchReport| {
-                report.critic.as_mut().unwrap().claims_digest = "g".repeat(64)
+                report.critic.as_mut().unwrap().claims_digest = "g".repeat(64);
             },
             |report: &mut ResearchReport| report.critic.as_mut().unwrap().findings.clear(),
             |report: &mut ResearchReport| report.critic.as_mut().unwrap().findings[0].clear(),
