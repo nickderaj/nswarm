@@ -1,5 +1,32 @@
 # nswarm v1 build status
 
+## Checkpoint AA - Step 5 research and serial-coder boundary
+
+Updated: 2026-08-31. Active branch:
+`codex/step5-research-coder-pilot`, based directly on `origin/main`
+`f4a40e07e226757f218c0aa45d992237c43a21e0`. The implemented and deferred
+boundary is recorded in [`STEP5_STATUS.md`](STEP5_STATUS.md).
+
+The branch implements schema-closed research evidence with independent critic
+attestation, exact-SHA coder handoffs bound to live path leases, transactional
+typed persistence, replay-safe provisioning, fixed independent control roles,
+and a scheduler that refuses a second live coder. Full `just ci` passes with
+251 files policy-scanned, 3 profiles validated, 8 production-backed eval cases,
+210 nextest tests, doctests, rustdoc, dependency checks, and 196 semver checks
+per crate. Strict coverage passes at 1,274/1,296 changed executable lines
+(98.30%), 316/316 critical branch outcomes (100.00%), and 10,237/10,546
+repository lines (97.07%).
+
+D23 remains unresolved because the pinned Hermes HTTP route creates a fresh
+`AIAgent` per request, and D24 remains unevaluated. Therefore no live Hermes
+research or coder pilot, ask surface, fallback topology, or concurrency above
+one is claimed. Deterministic startup and containment tests do not satisfy the
+live serial-pilot gate. This PR was produced through the ordinary maintainer
+workflow, and coder concurrency remains one.
+
+The frozen `ultron` checkout remained read-only. No credentials, private
+databases, transcripts, production state, or private paths were accessed.
+
 ## Checkpoint Z — Step 4 gym parallel-run candidate
 
 PR #5 is based directly on merged PR #4
