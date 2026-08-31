@@ -45,6 +45,12 @@ EXPECTED = {
 }
 
 SKILL_REQUIREMENTS = {
+    ("gym", "training-coach"): {
+        "gym mcp read tools",
+        "recorded evidence",
+        "deterministic tool results",
+        "evidence",
+    },
     ("coder", "coding-router"): {
         "exact base sha",
         "readable/writable/forbidden paths",
@@ -286,13 +292,18 @@ def validate_profile(
     actual_skills = {path.parent.name for path in skill_root.glob("*/SKILL.md")}
     if actual_skills != expected["skills"]:
         fail(f"{name}: skill inventory drift")
+    required_skills = {
+        skill for profile, skill in SKILL_REQUIREMENTS if profile == name
+    }
+    if required_skills != actual_skills:
+        fail(f"{name}: skill mechanism requirements differ from inventory")
     for skill in sorted(actual_skills):
         skill_path = skill_root / skill / "SKILL.md"
         metadata = parse_frontmatter(skill_path)
         if metadata["name"] != skill:
             fail(f"{name}/{skill}: name must match directory")
         body = " ".join(skill_path.read_text(encoding="utf-8").lower().split())
-        for mechanism in SKILL_REQUIREMENTS.get((name, skill), set()):
+        for mechanism in SKILL_REQUIREMENTS[(name, skill)]:
             if mechanism not in body:
                 fail(f"{name}/{skill}: missing required mechanism {mechanism!r}")
 
