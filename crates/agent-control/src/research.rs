@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::JobBrief;
+
 /// Evidence classification required for every research claim.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -205,6 +207,21 @@ impl ResearchReport {
         }
         Ok(())
     }
+
+    /// Validates the report and binds its question to one immutable brief.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResearchReportError::QuestionMismatch`] when the report was
+    /// produced for a different goal, in addition to the ordinary report
+    /// validation failures.
+    pub fn validate_for_brief(&self, brief: &JobBrief) -> Result<(), ResearchReportError> {
+        self.validate()?;
+        if self.question != brief.goal {
+            return Err(ResearchReportError::QuestionMismatch);
+        }
+        Ok(())
+    }
 }
 
 /// Invalid or internally inconsistent research output.
@@ -249,13 +266,68 @@ pub enum ResearchReportError {
     /// A direct claim must carry a real confidence assessment.
     #[error("direct claims cannot use confidence none")]
     DirectClaimHasNoConfidence,
+    /// Research output cannot be replayed under another immutable goal.
+    #[error("research report question differs from brief goal")]
+    QuestionMismatch,
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
     use super::{
         ClaimConfidence, ClaimKind, ResearchClaim, ResearchReport, ResearchReportError, SourceAudit,
     };
+    use crate::{
+        JobBrief, JobId, NetworkMode, NetworkPolicy, PathPolicy, ResourceLimits, RiskClass, Sha,
+        UnitId, VerificationCommand,
+    };
+
+    fn brief() -> JobBrief {
+        JobBrief {
+            job_id: JobId::new("research-job").expect("job id"),
+            unit_id: UnitId::new("research-unit").expect("unit id"),
+            goal: "What changed?".to_owned(),
+            repository: "https://example.invalid/nswarm.git".to_owned(),
+            base_sha: Sha::new("a".repeat(40)).expect("base SHA"),
+            paths: PathPolicy {
+                readable: vec![
+                    PathBuf::from("crates/assigned"),
+                    PathBuf::from("artifacts/research"),
+                ],
+                writable: vec![PathBuf::from("artifacts/research")],
+                forbidden: vec![PathBuf::from("secrets")],
+            },
+            dependencies: Vec::new(),
+            acceptance_criteria: vec!["Every source class is accounted for.".to_owned()],
+            verification_commands: vec![VerificationCommand {
+                program: "validate-report".to_owned(),
+                arguments: Vec::new(),
+            }],
+            risk_class: RiskClass::Low,
+            limits: ResourceLimits {
+                wall_seconds: 600,
+                memory_bytes: 1_000_000,
+                disk_bytes: 1_000_000,
+                process_count: 8,
+                cost_microunits: 0,
+            },
+            network: NetworkPolicy {
+                mode: NetworkMode::DenyAll,
+                destinations: Vec::new(),
+            },
+            credential_grants: Vec::new(),
+            report_schema: json!({
+                "type": "object",
+                "required": ["schema_version"],
+                "properties": {"schema_version": {"type": "integer"}},
+                "additionalProperties": true
+            }),
+            standing_policy_version: "v1".to_owned(),
+        }
+    }
 
     fn report() -> ResearchReport {
         ResearchReport {
@@ -285,6 +357,14 @@ mod tests {
     #[test]
     fn complete_research_report_is_accepted() {
         assert_eq!(report().validate(), Ok(()));
+        assert_eq!(report().validate_for_brief(&brief()), Ok(()));
+
+        let mut wrong = brief();
+        wrong.goal = "A different question".to_owned();
+        assert_eq!(
+            report().validate_for_brief(&wrong),
+            Err(ResearchReportError::QuestionMismatch)
+        );
     }
 
     #[test]
