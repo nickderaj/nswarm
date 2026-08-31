@@ -121,6 +121,9 @@ fn validate_changed_paths(
     }
     let mut unique = BTreeSet::new();
     for path in changed_paths {
+        if !is_safe_relative(path) {
+            return Err(CoderReportError::ChangedPathOutOfScope(path.clone()));
+        }
         if !unique.insert(path) {
             return Err(CoderReportError::DuplicateChangedPath(path.clone()));
         }
@@ -430,7 +433,12 @@ mod tests {
             Err(CoderReportError::DuplicateChangedPath(_))
         ));
 
-        for path in ["crates/assigned/README.md", "crates/assigned/secrets/token"] {
+        for path in [
+            "crates/assigned/README.md",
+            "crates/assigned/secrets/token",
+            "crates/assigned/src/../outside.rs",
+            "/tmp/outside.rs",
+        ] {
             let mut invalid = report();
             invalid.changed_paths = vec![PathBuf::from(path)];
             assert!(matches!(
