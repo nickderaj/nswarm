@@ -358,4 +358,54 @@ mod tests {
             Err(ResearchReportError::InvalidLimitations)
         );
     }
+
+    #[test]
+    fn eval_research_evidence_corpus_fails_closed() {
+        let case: serde_json::Value =
+            serde_json::from_str(include_str!("../../../eval/corpus/research-evidence.json"))
+                .expect("research evidence corpus parses");
+        let valid = case["input"]["valid_report"].clone();
+        let report: ResearchReport =
+            serde_json::from_value(valid.clone()).expect("valid report uses production schema");
+        assert_eq!(report.validate(), Ok(()));
+
+        let mutations = case["input"]["mutations"]
+            .as_array()
+            .expect("mutations are an array");
+        assert_eq!(
+            mutations.len() as u64,
+            case["expected"]["mutation_count"]
+                .as_u64()
+                .expect("expected mutation count")
+        );
+        for mutation in mutations {
+            let kind = mutation["kind"].as_str().expect("mutation kind is text");
+            let value = mutation["value"].as_str().expect("mutation value is text");
+            let mut candidate = valid.clone();
+            match kind {
+                "unaudited-source" | "unsupported-source" => {
+                    candidate["claims"][0]["source_type"] = serde_json::json!(value);
+                    let report: ResearchReport = serde_json::from_value(candidate)
+                        .expect("source mutation preserves schema");
+                    assert!(report.validate().is_err(), "{kind} must fail");
+                }
+                "unknown-with-confidence" => {
+                    candidate["claims"][0]["kind"] = serde_json::json!(value);
+                    let report: ResearchReport =
+                        serde_json::from_value(candidate).expect("kind mutation preserves schema");
+                    assert_eq!(
+                        report.validate(),
+                        Err(ResearchReportError::UnknownClaimHasConfidence)
+                    );
+                }
+                "policy-shaped-field" => {
+                    candidate["instructions"] = serde_json::json!(value);
+                    let error = serde_json::from_value::<ResearchReport>(candidate)
+                        .expect_err("policy-shaped data cannot extend the schema");
+                    assert!(error.to_string().contains("unknown field `instructions`"));
+                }
+                _ => panic!("unknown mutation: {kind}"),
+            }
+        }
+    }
 }
