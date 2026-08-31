@@ -1094,6 +1094,23 @@ impl ControlStore {
             "UPDATE leases SET released_at = ?1 WHERE released_at IS NULL AND expires_at <= ?1",
             [now],
         )?;
+        let replayed: Option<i64> = transaction
+            .query_row(
+                "SELECT lease_id FROM leases WHERE job_id = ?1 AND unit_id = ?2 AND kind = ?3 AND resource = ?4 AND expires_at = ?5 AND holder_profile = ?6 AND released_at IS NULL",
+                params![
+                    job_id.as_str(),
+                    unit_id.as_str(),
+                    kind.as_str(),
+                    resource,
+                    expires_at,
+                    holder.as_str()
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(lease_id) = replayed {
+            return Ok(lease_id);
+        }
         let mut statement = transaction.prepare(
             "SELECT job_id, resource FROM leases WHERE kind = ?1 AND released_at IS NULL AND expires_at > ?2",
         )?;
@@ -4207,6 +4224,42 @@ mod tests {
                 5,
             )
             .expect("independent jobs may own topology concurrently");
+    }
+
+    #[test]
+    fn exact_live_lease_provisioning_replays() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let coordinator = ensure_coordinator(&mut store, &brief, 2);
+        let coder = ensure_profile(&mut store, &brief, "replay-lease-coder", Role::Coder, 2);
+        let first = store
+            .acquire_lease(
+                &coordinator,
+                &coder,
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Path,
+                "crates/assigned",
+                100,
+                2,
+            )
+            .expect("path leased");
+        assert_eq!(
+            store
+                .acquire_lease(
+                    &coordinator,
+                    &coder,
+                    &brief.job_id,
+                    &brief.unit_id,
+                    LeaseKind::Path,
+                    "crates/assigned",
+                    100,
+                    3,
+                )
+                .expect("exact lease provisioning replayed"),
+            first
+        );
     }
 
     #[test]
