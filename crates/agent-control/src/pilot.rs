@@ -346,14 +346,12 @@ mod tests {
         let scenarios = case["input"]["scenarios"]
             .as_array()
             .expect("scenarios are an array");
-        assert_eq!(
-            scenarios.len() as u64,
-            case["expected"]["scenario_count"]
-                .as_u64()
-                .expect("expected scenario count")
-        );
+        assert_eq!(case["expected"]["single_writer_enforced"], true);
         for scenario in scenarios {
-            let scenario = scenario.as_str().expect("scenario is text");
+            let expected = scenario["expected_outcome"]
+                .as_str()
+                .expect("expected outcome is text");
+            let scenario = scenario["kind"].as_str().expect("scenario is text");
             let mut store = ControlStore::open_in_memory().expect("store opens");
             let first_brief = brief("eval-pilot-one", "eval-unit-one");
             match scenario {
@@ -376,8 +374,10 @@ mod tests {
                         )
                         .expect("pilot replayed");
                         assert_eq!(first, replayed);
+                        assert_eq!(expected, "identical-assignment");
                     } else {
                         assert_eq!(first.leases.paths.len(), 1);
+                        assert_eq!(expected, "one-path-lease");
                     }
                 }
                 "concurrent-coder-refused" => {
@@ -399,17 +399,21 @@ mod tests {
                         ),
                         Err(PilotError::AnotherCoderActive(_))
                     ));
+                    assert_eq!(expected, "another-coder-active");
                 }
-                "unsafe-profile-root-refused" => assert!(matches!(
-                    SerialCoderPilot::prepare(
-                        &mut store,
-                        &first_brief,
-                        Path::new("relative/eval-pilot"),
-                        100,
-                        1,
-                    ),
-                    Err(PilotError::InvalidProfileRoot(_))
-                )),
+                "unsafe-profile-root-refused" => {
+                    assert!(matches!(
+                        SerialCoderPilot::prepare(
+                            &mut store,
+                            &first_brief,
+                            Path::new("relative/eval-pilot"),
+                            100,
+                            1,
+                        ),
+                        Err(PilotError::InvalidProfileRoot(_))
+                    ));
+                    assert_eq!(expected, "invalid-profile-root");
+                }
                 _ => panic!("unknown serial pilot scenario: {scenario}"),
             }
         }

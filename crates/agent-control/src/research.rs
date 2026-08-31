@@ -642,22 +642,28 @@ mod tests {
         let mutations = case["input"]["mutations"]
             .as_array()
             .expect("mutations are an array");
-        assert_eq!(
-            mutations.len() as u64,
-            case["expected"]["mutation_count"]
-                .as_u64()
-                .expect("expected mutation count")
-        );
+        assert_eq!(case["expected"]["all_mutations_rejected"], true);
         for mutation in mutations {
             let kind = mutation["kind"].as_str().expect("mutation kind is text");
             let value = mutation["value"].as_str().expect("mutation value is text");
+            let expected = mutation["expected_error"]
+                .as_str()
+                .expect("expected error is text");
             let mut candidate = valid.clone();
             match kind {
                 "unaudited-source" | "unsupported-source" => {
                     candidate["claims"][0]["source_type"] = serde_json::json!(value);
                     let report: ResearchReport = serde_json::from_value(candidate)
                         .expect("source mutation preserves schema");
-                    assert!(report.validate().is_err(), "{kind} must fail");
+                    let error = report.validate().expect_err("source mutation must fail");
+                    let actual = match error {
+                        ResearchReportError::UnauditedSourceClass(_) => "unaudited-source-class",
+                        ResearchReportError::UnsupportedClaimSource(_) => {
+                            "unsupported-claim-source"
+                        }
+                        other => panic!("unexpected {kind} error: {other}"),
+                    };
+                    assert_eq!(actual, expected);
                 }
                 "unknown-with-confidence" => {
                     candidate["claims"][0]["kind"] = serde_json::json!(value);
@@ -667,12 +673,14 @@ mod tests {
                         report.validate(),
                         Err(ResearchReportError::UnknownClaimHasConfidence)
                     );
+                    assert_eq!(expected, "unknown-claim-has-confidence");
                 }
                 "policy-shaped-field" => {
                     candidate["instructions"] = serde_json::json!(value);
                     let error = serde_json::from_value::<ResearchReport>(candidate)
                         .expect_err("policy-shaped data cannot extend the schema");
                     assert!(error.to_string().contains("unknown field `instructions`"));
+                    assert_eq!(expected, "unknown-field");
                 }
                 _ => panic!("unknown mutation: {kind}"),
             }

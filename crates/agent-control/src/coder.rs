@@ -564,15 +564,13 @@ mod tests {
         let mutations = case["input"]["mutations"]
             .as_array()
             .expect("mutations are an array");
-        assert_eq!(
-            mutations.len() as u64,
-            case["expected"]["mutation_count"]
-                .as_u64()
-                .expect("expected mutation count")
-        );
+        assert_eq!(case["expected"]["all_mutations_rejected"], true);
 
         for mutation in mutations {
             let kind = mutation["kind"].as_str().expect("mutation kind is text");
+            let expected = mutation["expected_error"]
+                .as_str()
+                .expect("expected error is text");
             let mut candidate = serde_json::to_value(report()).expect("report serializes");
             match kind {
                 "sibling-path" | "forbidden-path" => {
@@ -596,13 +594,25 @@ mod tests {
                     let error = serde_json::from_value::<CoderReport>(candidate)
                         .expect_err("policy-shaped data cannot extend the report");
                     assert!(error.to_string().contains("unknown field `instructions`"));
+                    assert_eq!(expected, "unknown-field");
                     continue;
                 }
                 _ => panic!("unknown mutation: {kind}"),
             }
             let candidate: CoderReport =
                 serde_json::from_value(candidate).expect("mutation preserves report schema");
-            assert!(candidate.validate(&brief()).is_err(), "{kind} must fail");
+            let error = candidate
+                .validate(&brief())
+                .expect_err("mutation must fail");
+            let actual = match error {
+                CoderReportError::ChangedPathOutOfScope(_) => "changed-path-out-of-scope",
+                CoderReportError::CommandMismatch(_) => "command-mismatch",
+                CoderReportError::CommandFailed(_) => "command-failed",
+                CoderReportError::ArtifactShaMismatch(_) => "artifact-sha-mismatch",
+                CoderReportError::BaseShaMismatch => "base-sha-mismatch",
+                other => panic!("unexpected {kind} error: {other}"),
+            };
+            assert_eq!(actual, expected, "{kind} returned the wrong error");
         }
     }
 }
