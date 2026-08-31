@@ -11,8 +11,9 @@ use gym_bot::{
     clock::FixedClock,
     database::open_existing,
     mcp::{
-        BodyMetricsArgs, GymMcp, MAX_DAYS, MAX_LIMIT, MAX_METRIC_LENGTH, McpQueryError, McpServer,
-        capability_summary, connect_mcp_socket, decode_mcp_frame,
+        BodyMetricsArgs, GYM_TOOL_NAMES, GymMcp, MAX_DAYS, MAX_LIMIT, MAX_METRIC_LENGTH,
+        McpQueryError, McpServer, capability_summary, connect_mcp_socket, decode_mcp_frame,
+        run_mcp_server, run_mcp_server_for_group,
     },
 };
 use proptest::prelude::*;
@@ -22,6 +23,66 @@ use rmcp::{
 };
 
 const FIXED_TIME: &str = "2026-08-29T08:15:30+00:00";
+
+#[test]
+fn public_server_wrappers_accept_real_mcp_connections() {
+    for group_aware in [false, true] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = common::copy_fixture(&directory, "gym.db");
+        let socket = private_socket_path(&directory);
+        std::fs::set_permissions(
+            socket.parent().expect("socket parent"),
+            std::fs::Permissions::from_mode(0o2750),
+        )
+        .expect("setgid socket parent");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let clock = Arc::new(FixedClock::new(FIXED_TIME));
+            let server = if group_aware {
+                let group = directory_group(socket.parent().expect("socket parent"));
+                let server_socket = socket.clone();
+                tokio::spawn(async move {
+                    run_mcp_server_for_group(server_socket, &group, database, clock).await
+                })
+            } else {
+                tokio::spawn(run_mcp_server(socket.clone(), database, clock))
+            };
+            for _ in 0..100 {
+                if socket.exists() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let client =
+                ().serve(connect_mcp_socket(&socket).await.expect("connect"))
+                    .await
+                    .expect("handshake");
+            client.cancel().await.expect("close");
+            server.abort();
+        });
+    }
+}
+
+fn directory_group(path: &std::path::Path) -> String {
+    let output = std::process::Command::new("stat")
+        .args(if cfg!(target_os = "linux") {
+            ["-c", "%G"]
+        } else {
+            ["-f", "%Sg"]
+        })
+        .arg(path)
+        .output()
+        .expect("query directory group");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 group")
+        .trim()
+        .to_owned()
+}
 
 #[test]
 fn metric_length_boundary_is_exact() {
@@ -245,25 +306,7 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
             ])
         );
 
-        let listed = client
-            .list_tools(None)
-            .await
-            .expect("tools/list over socket");
-        assert_eq!(listed.tools.len(), 1);
-        let tool = &listed.tools[0];
-        assert_eq!(tool.name, "body_metrics");
-        assert_eq!(
-            tool.annotations
-                .as_ref()
-                .and_then(|value| value.read_only_hint),
-            Some(true)
-        );
-        assert_eq!(tool.input_schema["additionalProperties"], false);
-        assert_eq!(tool.input_schema["properties"]["days"]["maximum"], MAX_DAYS);
-        assert_eq!(
-            tool.input_schema["properties"]["limit"]["maximum"],
-            MAX_LIMIT
-        );
+        assert_reviewed_tool_list(&client).await;
 
         let result = client
             .call_tool(
@@ -277,6 +320,8 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
         assert_eq!(structured.as_array().expect("row array").len(), 1);
         assert_eq!(structured[0]["value"], 82.5);
 
+        assert_reviewed_write(&client).await;
+
         assert_eq!(
             protocol_error_code(
                 client
@@ -289,6 +334,7 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
             ),
             ErrorCode::INVALID_PARAMS
         );
+        assert_body_metric_boundaries(&client).await;
         assert_eq!(
             protocol_error_code(
                 client
@@ -311,7 +357,342 @@ fn actual_rmcp_client_and_server_exchange_protocol_over_unix_socket() {
 }
 
 #[test]
-fn socket_bind_rejects_a_directory_accessible_to_other_identities() {
+fn volume_summary_uses_exact_per_week_group_limit() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let mut connection = open_existing(&database).expect("open fixture");
+    let transaction = connection.transaction().expect("seed transaction");
+    for index in 0..54 {
+        transaction
+            .execute(
+                "INSERT INTO sessions (started_at,kind,source) \
+                 VALUES ('2026-08-29T08:15:30+00:00','strength','manual')",
+                [],
+            )
+            .expect("session");
+        let session_id = transaction.last_insert_rowid();
+        transaction
+            .execute(
+                "INSERT INTO movements (name,display_name,modality,muscle_groups) \
+                 VALUES (?1,?1,'strength',?2)",
+                rusqlite::params![format!("movement-{index}"), format!("group-{index}")],
+            )
+            .expect("movement");
+        let movement_id = transaction.last_insert_rowid();
+        transaction
+            .execute(
+                "INSERT INTO session_items (session_id,position,movement_id) VALUES (?1,1,?2)",
+                rusqlite::params![session_id, movement_id],
+            )
+            .expect("session item");
+        let item_id = transaction.last_insert_rowid();
+        transaction
+            .execute(
+                "INSERT INTO efforts (session_item_id,position,reps,weight_kg) \
+                 VALUES (?1,1,1,1)",
+                [item_id],
+            )
+            .expect("effort");
+    }
+    transaction.commit().expect("seed commit");
+    drop(connection);
+
+    let socket = private_socket_path(&directory);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let server = tokio::spawn(
+            McpServer::bind(&socket, database, Arc::new(FixedClock::new(FIXED_TIME)))
+                .expect("bind")
+                .run(),
+        );
+        let client =
+            ().serve(connect_mcp_socket(&socket).await.expect("connect"))
+                .await
+                .expect("handshake");
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("volume_summary")
+                    .with_arguments(arguments(&serde_json::json!({"weeks":1}))),
+            )
+            .await
+            .expect("volume summary");
+        assert_eq!(
+            result
+                .structured_content
+                .expect("structured result")
+                .as_array()
+                .expect("rows")
+                .len(),
+            53
+        );
+        client.cancel().await.expect("close");
+        server.abort();
+    });
+}
+
+async fn assert_body_metric_boundaries(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+) {
+    for arguments_value in [
+        serde_json::json!({"metric":"BAD"}),
+        serde_json::json!({"days":366}),
+        serde_json::json!({"limit":201}),
+    ] {
+        assert_eq!(
+            protocol_error_code(
+                client
+                    .call_tool(
+                        CallToolRequestParams::new("body_metrics")
+                            .with_arguments(arguments(&arguments_value)),
+                    )
+                    .await
+                    .expect_err("bounded body metrics")
+            ),
+            ErrorCode::INVALID_PARAMS
+        );
+    }
+}
+
+async fn assert_reviewed_tool_list(client: &rmcp::service::RunningService<rmcp::RoleClient, ()>) {
+    let listed = client
+        .list_tools(None)
+        .await
+        .expect("tools/list over socket");
+    assert_eq!(
+        listed
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<std::collections::BTreeSet<_>>(),
+        GYM_TOOL_NAMES.into_iter().collect()
+    );
+    let tool = listed
+        .tools
+        .iter()
+        .find(|tool| tool.name == "body_metrics")
+        .expect("body_metrics tool");
+    assert_eq!(
+        tool.annotations
+            .as_ref()
+            .and_then(|value| value.read_only_hint),
+        Some(true)
+    );
+    assert_eq!(tool.input_schema["additionalProperties"], false);
+    assert_eq!(tool.input_schema["properties"]["days"]["maximum"], MAX_DAYS);
+    assert_eq!(
+        tool.input_schema["properties"]["limit"]["maximum"],
+        MAX_LIMIT
+    );
+    for listed_tool in &listed.tools {
+        let write = matches!(
+            listed_tool.name.as_ref(),
+            "record_preference" | "propose_plan"
+        );
+        let annotations = listed_tool.annotations.as_ref().expect("tool annotations");
+        assert_eq!(
+            annotations.read_only_hint,
+            Some(!write),
+            "{}",
+            listed_tool.name
+        );
+        assert_eq!(
+            annotations.idempotent_hint,
+            Some(!write),
+            "{}",
+            listed_tool.name
+        );
+        assert_eq!(
+            annotations.destructive_hint,
+            Some(false),
+            "{}",
+            listed_tool.name
+        );
+        assert_eq!(
+            annotations.open_world_hint,
+            Some(false),
+            "{}",
+            listed_tool.name
+        );
+    }
+    for (name, property) in [
+        ("record_preference", "evidence"),
+        ("propose_plan", "items"),
+        ("plan_feedback", "plan_id"),
+    ] {
+        let reviewed_tool = listed
+            .tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("reviewed schema");
+        assert_eq!(reviewed_tool.input_schema["additionalProperties"], false);
+        assert!(
+            reviewed_tool.input_schema["properties"]
+                .as_object()
+                .is_some_and(|properties| properties.contains_key(property)),
+            "{name} must publish {property}"
+        );
+    }
+}
+
+async fn assert_reviewed_write(client: &rmcp::service::RunningService<rmcp::RoleClient, ()>) {
+    let preference = client
+        .call_tool(
+            CallToolRequestParams::new("record_preference").with_arguments(arguments(
+                &serde_json::json!({
+                    "key":"warmup",
+                    "value":"short",
+                    "evidence":"owner stated this in the current turn"
+                }),
+            )),
+        )
+        .await
+        .expect("reviewed write over socket");
+    assert_eq!(
+        preference.structured_content.expect("write result")["id"],
+        1
+    );
+    let preferences = client
+        .call_tool(CallToolRequestParams::new("preferences"))
+        .await
+        .expect("read preference");
+    assert_eq!(
+        preferences.structured_content.expect("preferences")[0]["key"],
+        "warmup"
+    );
+    let plan = client
+        .call_tool(
+            CallToolRequestParams::new("propose_plan").with_arguments(arguments(
+                &serde_json::json!({"focus":"legs","rationale":"fixture","for_date":"2026-08-31","items":[{"exercise":"squat","sets":[{"reps":5}]}]}),
+            )),
+        )
+        .await
+        .expect("propose plan");
+    let id = plan.structured_content.expect("plan result")["id"]
+        .as_i64()
+        .expect("plan id");
+    let feedback = client
+        .call_tool(
+            CallToolRequestParams::new("plan_feedback")
+                .with_arguments(arguments(&serde_json::json!({"plan_id":id}))),
+        )
+        .await
+        .expect("plan feedback");
+    assert_eq!(
+        feedback.structured_content.expect("feedback result")["status"],
+        "proposed"
+    );
+}
+
+#[test]
+fn every_reviewed_read_tool_executes_fixed_sql() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let socket = private_socket_path(&directory);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let server = tokio::spawn(
+            McpServer::bind(&socket, &database, Arc::new(FixedClock::new(FIXED_TIME)))
+                .expect("bind")
+                .run(),
+        );
+        let client =
+            ().serve(connect_mcp_socket(&socket).await.expect("connect"))
+                .await
+                .expect("handshake");
+        for tool in GYM_TOOL_NAMES.into_iter().filter(|name| {
+            !matches!(
+                *name,
+                "body_metrics" | "record_preference" | "propose_plan" | "plan_feedback"
+            )
+        }) {
+            let result = client
+                .call_tool(CallToolRequestParams::new(tool))
+                .await
+                .expect("fixed read tool");
+            assert!(result.structured_content.is_some(), "{tool}");
+        }
+        for (tool, arguments_value) in [
+            ("recent_sets", serde_json::json!({"limit":0})),
+            (
+                "record_preference",
+                serde_json::json!({"key":"","value":"x","evidence":"x"}),
+            ),
+            (
+                "propose_plan",
+                serde_json::json!({"focus":"x","rationale":"x","items":[]}),
+            ),
+            ("plan_feedback", serde_json::json!({"plan_id":999})),
+            ("exercise_catalogue", serde_json::json!({"unexpected":true})),
+            (
+                "record_preference",
+                serde_json::json!({"key":"x","value":"x","evidence":"x","unexpected":true}),
+            ),
+            (
+                "propose_plan",
+                serde_json::json!({"focus":"x","rationale":"x","items":[{}],"unexpected":true}),
+            ),
+            (
+                "plan_feedback",
+                serde_json::json!({"plan_id":1,"unexpected":true}),
+            ),
+            ("recent_sets", serde_json::json!({"limit":"bad"})),
+            ("body_metrics", serde_json::json!({"unknown":true})),
+            (
+                "record_preference",
+                serde_json::json!({"key":"x","value":"x"}),
+            ),
+            (
+                "propose_plan",
+                serde_json::json!({"focus":"","rationale":"x","items":[{}]}),
+            ),
+            ("interval_history", serde_json::json!({"limit":201})),
+            ("heart_rate_series", serde_json::json!({"samples":0})),
+        ] {
+            assert_eq!(
+                protocol_error_code(
+                    client
+                        .call_tool(
+                            CallToolRequestParams::new(tool)
+                                .with_arguments(arguments(&arguments_value))
+                        )
+                        .await
+                        .expect_err("invalid args")
+                ),
+                ErrorCode::INVALID_PARAMS
+            );
+        }
+        for (tool, arguments_value) in [
+            ("volume_summary", serde_json::json!({"weeks":52})),
+            ("interval_history", serde_json::json!({"limit":200})),
+            ("heart_rate_series", serde_json::json!({"samples":5000})),
+        ] {
+            assert!(
+                client
+                    .call_tool(
+                        CallToolRequestParams::new(tool)
+                            .with_arguments(arguments(&arguments_value))
+                    )
+                    .await
+                    .expect("bounded read")
+                    .structured_content
+                    .is_some()
+            );
+        }
+        client.cancel().await.expect("close");
+        server.abort();
+    });
+}
+
+#[test]
+fn socket_bind_rejects_a_world_accessible_directory() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "gym.db");
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755))
@@ -333,8 +714,72 @@ fn socket_bind_rejects_a_directory_accessible_to_other_identities() {
         .expect("public parent directory must be rejected");
     assert_eq!(
         error.to_string(),
-        "gym MCP socket error: gym MCP socket directory mode 755 permits group or other access"
+        "gym MCP socket error: gym MCP socket directory mode 755 must be 750"
     );
+}
+
+#[test]
+fn socket_parent_mode_uses_only_permission_bits() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let socket_directory = directory.path().join("sticky");
+    std::fs::DirBuilder::new()
+        .mode(0o1750)
+        .create(&socket_directory)
+        .expect("sticky directory");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let server = McpServer::bind(
+            socket_directory.join("mcp.sock"),
+            database,
+            Arc::new(FixedClock::new(FIXED_TIME)),
+        )
+        .expect("sticky bit does not alter permission mask");
+        drop(server);
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_bind_fails_closed_for_an_unknown_group() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o2750))
+        .expect("setgid test directory");
+    let error = McpServer::bind_for_group(
+        directory.path().join("mcp.sock"),
+        "nswarm-group-that-must-not-exist",
+        database,
+        Arc::new(FixedClock::new(FIXED_TIME)),
+    )
+    .err()
+    .expect("unknown production group must fail");
+    assert!(error.to_string().contains("does not exist"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_bind_requires_the_setgid_bit_exactly() {
+    for mode in [0o4750, 0o5750] {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = common::copy_fixture(&directory, "gym.db");
+        let socket_directory = directory.path().join("runtime");
+        std::fs::create_dir(&socket_directory).expect("runtime directory");
+        std::fs::set_permissions(&socket_directory, std::fs::Permissions::from_mode(mode))
+            .expect("special mode");
+        let error = McpServer::bind_for_group(
+            socket_directory.join("mcp.sock"),
+            &directory_group(&socket_directory),
+            database,
+            Arc::new(FixedClock::new(FIXED_TIME)),
+        )
+        .err()
+        .expect("setuid and sticky bits are not setgid");
+        assert!(error.to_string().contains("setgid enabled"), "{mode:o}");
+    }
 }
 
 #[test]
@@ -372,11 +817,69 @@ fn storage_failure_is_an_internal_protocol_error() {
             ),
             ErrorCode::INTERNAL_ERROR
         );
+        assert_eq!(
+            protocol_error_code(
+                client
+                    .call_tool(
+                        CallToolRequestParams::new("record_preference").with_arguments(arguments(
+                            &serde_json::json!({"key":"x","value":"x","evidence":"x"}),
+                        )),
+                    )
+                    .await
+                    .expect_err("write storage failure")
+            ),
+            ErrorCode::INTERNAL_ERROR
+        );
 
         client.cancel().await.expect("close MCP client");
         server.abort();
         assert!(server.await.expect_err("cancel server").is_cancelled());
     });
+}
+
+#[test]
+fn invalid_clock_is_an_internal_protocol_error() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let socket = private_socket_path(&directory);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let server = tokio::spawn(
+            McpServer::bind(&socket, database, Arc::new(FixedClock::new("invalid")))
+                .expect("bind")
+                .run(),
+        );
+        let client =
+            ().serve(connect_mcp_socket(&socket).await.expect("connect"))
+                .await
+                .expect("handshake");
+        assert_eq!(
+            protocol_error_code(
+                client
+                    .call_tool(CallToolRequestParams::new("body_metrics"))
+                    .await
+                    .expect_err("invalid clock")
+            ),
+            ErrorCode::INTERNAL_ERROR
+        );
+        client.cancel().await.expect("close");
+        server.abort();
+    });
+}
+
+#[test]
+fn clock_range_overflow_fails_closed() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "gym.db");
+    let service = GymMcp::new(
+        database,
+        Arc::new(FixedClock::new("-262143-01-01T00:00:00+00:00")),
+    );
+    assert!(service.body_metrics(BodyMetricsArgs::default()).is_err());
 }
 
 #[test]
@@ -398,9 +901,11 @@ fn arguments(value: &serde_json::Value) -> serde_json::Map<String, serde_json::V
 fn private_socket_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
     let socket_directory = directory.path().join("socket");
     std::fs::DirBuilder::new()
-        .mode(0o700)
+        .mode(0o750)
         .create(&socket_directory)
         .expect("private socket directory");
+    std::fs::set_permissions(&socket_directory, std::fs::Permissions::from_mode(0o750))
+        .expect("exact group socket directory permissions");
     socket_directory.join("mcp.sock")
 }
 
@@ -411,8 +916,8 @@ fn assert_private_socket_boundary(socket: &std::path::Path) {
             .permissions()
             .mode()
             & 0o777,
-        0o700,
-        "the portable access boundary is private to its service identity"
+        0o750,
+        "the runtime directory admits only the service and socket group"
     );
     assert_eq!(
         std::fs::metadata(socket)
@@ -420,8 +925,8 @@ fn assert_private_socket_boundary(socket: &std::path::Path) {
             .permissions()
             .mode()
             & 0o777,
-        0o600,
-        "the Step 2 socket is private to its service identity"
+        0o660,
+        "the Step 4 socket is shared only with its authorized group"
     );
 }
 

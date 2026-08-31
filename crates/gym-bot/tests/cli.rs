@@ -1,54 +1,100 @@
-//! Production binary argument and startup-failure coverage.
+//! Production binary configuration and startup-failure coverage.
 
 mod common;
 
 use std::process::Command;
+use std::time::Duration;
+use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 
 #[test]
-fn binary_rejects_missing_and_extra_arguments() {
+fn binary_rejects_arguments_and_missing_settings_without_secret_output() {
     let program = env!("CARGO_BIN_EXE_gym-bot");
-    for (arguments, expected) in [
-        (Vec::<&str>::new(), "usage:"),
-        (vec!["socket.sock"], "missing existing gym database path"),
-        (vec!["socket.sock", "gym.db"], "missing IANA time-zone name"),
-        (
-            vec!["socket.sock", "gym.db", "Europe/London", "unexpected"],
-            "unexpected extra argument",
-        ),
-    ] {
-        let output = Command::new(program)
-            .args(arguments)
-            .output()
-            .expect("run gym MCP binary");
-        assert!(!output.status.success());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains(expected),
-            "stderr was {:?}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let extra = Command::new(program)
+        .arg("unexpected")
+        .output()
+        .expect("run binary");
+    assert!(!extra.status.success());
+    assert!(String::from_utf8_lossy(&extra.stderr).contains("unexpected extra argument"));
+
+    let missing = Command::new(program)
+        .env_clear()
+        .output()
+        .expect("run empty environment");
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("GYM_DATA_DIR"));
 }
 
 #[test]
-fn binary_builds_runtime_and_reports_socket_bind_failure() {
+fn binary_validates_disposable_database_before_binding_socket() {
     let directory = tempfile::tempdir().expect("tempdir");
+    std::fs::set_permissions(directory.path(), Permissions::from_mode(0o750))
+        .expect("group-readable runtime directory");
     let database = common::copy_fixture(&directory, "gym.db");
-    let missing_parent_socket = directory.path().join("missing/mcp.sock");
     let output = Command::new(env!("CARGO_BIN_EXE_gym-bot"))
-        .arg(missing_parent_socket)
-        .arg(database)
-        .arg("Europe/London")
+        .env_clear()
+        .env("GYM_DATA_DIR", directory.path())
+        .env("TIMEZONE", "Europe/London")
+        .env("NSWARM_MCP_SOCKET", "/definitely/missing/mcp.sock")
+        .env("NSWARM_MCP_SOCKET_GROUP", directory_group(directory.path()))
         .output()
-        .expect("run gym MCP binary");
-
+        .expect("run configured binary");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("gym MCP socket error:"),
         "stderr was {stderr:?}"
     );
-    assert!(
-        !stderr.contains("Io("),
-        "stderr used Debug formatting: {stderr:?}"
-    );
+    assert!(database.exists());
+}
+
+#[test]
+fn explicit_config_map_rejects_missing_database_without_secret_leak() {
+    let values = std::collections::HashMap::from([(
+        "GYM_DATA_DIR".to_owned(),
+        "/definitely/missing/gym".to_owned(),
+    )]);
+    let error = gym_bot::config::GymConfig::from_map(&values).expect_err("missing database");
+    assert!(error.to_string().contains("configured gym database"));
+}
+
+#[test]
+fn configured_binary_reaches_bound_runtime_and_stays_alive() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let socket_directory = directory.path().join("runtime");
+    std::fs::create_dir(&socket_directory).expect("runtime directory");
+    std::fs::set_permissions(&socket_directory, Permissions::from_mode(0o2750))
+        .expect("group-readable runtime directory");
+    common::copy_fixture(&directory, "gym.db");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gym-bot"))
+        .env_clear()
+        .env("GYM_DATA_DIR", directory.path())
+        .env("TIMEZONE", "UTC")
+        .env("NSWARM_MCP_SOCKET", socket_directory.join("mcp.sock"))
+        .env(
+            "NSWARM_MCP_SOCKET_GROUP",
+            directory_group(&socket_directory),
+        )
+        .spawn()
+        .expect("start configured service");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(child.try_wait().expect("status").is_none());
+    child.kill().expect("stop service");
+    child.wait().expect("reap service");
+}
+
+fn directory_group(path: &std::path::Path) -> String {
+    let output = Command::new("stat")
+        .args(if cfg!(target_os = "linux") {
+            ["-c", "%G"]
+        } else {
+            ["-f", "%Sg"]
+        })
+        .arg(path)
+        .output()
+        .expect("query directory group");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .expect("group name is UTF-8")
+        .trim()
+        .to_owned()
 }

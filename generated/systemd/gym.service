@@ -1,0 +1,45 @@
+[Unit]
+Description=nswarm gym bot
+After=network-online.target hermes-gateway.service systemd-tmpfiles-setup.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gym-agent
+Group=gym-agent
+SupplementaryGroups=gym-access
+ExecStart=/opt/nswarm/gym/bin/gym-bot
+WorkingDirectory=/opt/nswarm/gym
+EnvironmentFile=/etc/nswarm/gym.env
+Environment=NSWARM_MCP_SOCKET=/run/gym/mcp.sock
+Environment=NSWARM_MCP_SOCKET_GROUP=gym-access
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+MemoryMax=1G
+CPUQuota=100%
+ReadWritePaths=/var/lib/gym-agent /var/lib/nswarm/gym
+InaccessiblePaths=/var/lib/nswarm/personal /var/lib/nswarm/tutor /var/lib/nswarm/trading /var/lib/nswarm/backups
+
+[Install]
+WantedBy=multi-user.target

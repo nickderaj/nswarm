@@ -1,0 +1,17 @@
+profile_version = 1
+policy_version = "v1"
+role = "gym"
+soul = "profiles/gym/SOUL.md"
+skills = "profiles/gym/skills"
+memory = "profiles/gym/memory"
+capabilities = ["evidence-write"]
+forbidden_capabilities = ["repository-read", "network-read", "repository-write", "branch-push", "coordinate", "verify", "integrate", "merge"]
+
+[governance]
+write_approval = true
+background_review = false
+curator = false
+
+[network]
+default = "deny"
+brief_allow_list_required = true

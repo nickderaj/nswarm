@@ -7,8 +7,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-./scripts/generate.sh "$temporary_dir"
-diff -ru generated/systemd "$temporary_dir"
+./scripts/generate.sh "$temporary_dir/generated"
+diff -ru generated/systemd "$temporary_dir/generated/systemd"
+diff -ru generated/tmpfiles "$temporary_dir/generated/tmpfiles"
 ./scripts/check_gym_fixture.sh
 
 tree_status=$(git status --porcelain=v1 --untracked-files=all -- generated profiles fixtures/gym)

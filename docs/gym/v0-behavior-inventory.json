@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "nickderaj/ultron",
+    "commit_sha": "2d7052011c17bd028fdae0fdfd521918c11de560",
+    "path": "apps/gym",
+    "frozen_schema_version": 5,
+    "surface_sha256": {
+      "telegram_commands": "ad67dbefc11d544431d7e7239f8ce38488d81638fe72eb52fd9590c4d184c7e5",
+      "mcp_tools": "fed4a2b38c25898fe7c4e224ae1fea2caf165e3882c7595d5096fe50a1fb27a7"
+    },
+    "source_files": {
+      "apps/gym/src/gym/__main__.py": "68ba3877ee9d511643f881f8951e5f369c6a7950a6685cf47c599204f50af041",
+      "apps/gym/src/gym/agent/mcp_server.py": "c7e58e739d129c76f6b58ba686d0ca16934bcbe1c1c5f7d657cdb8f30dc2bfde",
+      "apps/gym/src/gym/agent/server.py": "d2889841bef21865340c8a32310546bc5b94a8897d40a6b2a194bd0577a06fba",
+      "apps/gym/src/gym/config.py": "e0a70ae967826d95f80cb5e7ed0f3b6677a2c0b374aa4523e6d0cd3b519053de",
+      "apps/gym/src/gym/controllers/gym_controller.py": "88755ecf3f52d3e912da5dc7c3bc8ce2be6f240ff17f9bd991b335d86fef95f4",
+      "apps/gym/src/gym/db/migrations.py": "46a626ddca2e946eb6291701ad5e6b58f9cc2df11685f132092d3382d1d685eb",
+      "apps/gym/src/gym/db/schema.py": "3ab8de4524a5d1b222ee65c968362dfaa53f1c76e07a75a9c90a46896744ddc4",
+      "apps/gym/src/gym/importers/health.py": "df4952d0696f29aa887e24e7216728ea12569c8a089b1dc914904ab257aa36b6",
+      "apps/gym/src/gym/importers/receiver.py": "0e191eeef6208390f7faceb98806b4c30b4e0adca646bee0d2ccd0dcbafef97d",
+      "apps/gym/src/gym/repositories/activity.py": "877b310be5f381a834e9ff88515a31b62596d523cbad119f8fa37e17e0d18180",
+      "apps/gym/src/gym/repositories/strength.py": "df56ac07d0f068e2b86bd6022e27553a1e7a6c1a0642c3d3b7d2c992d8eb0187",
+      "apps/gym/src/gym/services/batch_service.py": "70b68e44a45a6e03b93c0b177e89b71a9dd3854ccb332b95dbc0b4a4069d6730",
+      "apps/gym/src/gym/services/coach_service.py": "4b608f80d5060d9799437e84af1ab44dbc27af618f816f76df6091890da27232",
+      "apps/gym/src/gym/services/export_service.py": "e42b01249a9b54832c1cfcb12e1d2c763be5368f10b7530a514472fd797ec625",
+      "apps/gym/src/gym/services/hermes_service.py": "53739eb8ea8f5a626f306992af610ba2723f253f62c14ec5b32032710b37a786",
+      "apps/gym/src/gym/services/reflection_service.py": "25201e692cef09487ec644ebcb5300cd669bfaeabe7a08a1d0f95e053b917538",
+      "docs/refactor/V1_REBUILD_PLAN.md": "14ba3c1c951389e9b744c67cbc9ca781eee669220deb3b2ca43b5ebf52ecee8f"
+    }
+  },
+  "dispositions": {
+    "step2": "Already supplied by the merged Step 2 slice.",
+    "ported": "Required deterministic work in PR #5.",
+    "changed_d7": "Observable database state is preserved; exact Telegram UX may change.",
+    "blocked_d23": "Conversation behavior is unavailable until a merged decision revises D23.",
+    "deferred": "Outside PR #5 with an explicit safety or scope reason."
+  },
+  "behaviors": [
+    {
+      "id": "telegram.commands",
+      "category": "telegram",
+      "surface": ["gym", "cardio", "run", "weight", "batch", "plan", "plans", "rate", "adherence", "cost", "sync", "export", "preference", "help"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:46-62", "apps/gym/src/gym/__main__.py:400-421"],
+      "disposition": "deferred",
+      "reason": "All deterministic command handlers are ported and recorded at the adapter edge; production Telegram polling is deferred until a new token is supplied and transport verification is authorized."
+    },
+    {
+      "id": "telegram.approval-callback",
+      "category": "telegram",
+      "surface": ["gym-preference:<id>:accept", "gym-preference:<id>:reject", "owner guard", "processed update dedup", "single-review transition"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:418", "apps/gym/src/gym/__main__.py:236-259", "apps/gym/src/gym/__main__.py:630-638", "apps/gym/src/gym/services/reflection_service.py:109-129"],
+      "disposition": "deferred",
+      "reason": "Callback decoding and the idempotent SQLite Keep/Reject transition are ported; production Telegram callback delivery remains deferred with polling."
+    },
+    {
+      "id": "telegram.owner-dedup",
+      "category": "telegram",
+      "surface": ["owner guard", "processed update dedup", "recorded Telegram-shaped inputs"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:85-90", "apps/gym/src/gym/db/schema.py:21-23"],
+      "disposition": "step2",
+      "reason": "Step 2 already checks owner before durable generic (surface, external_id) dedup; production polling remains deferred."
+    },
+    {
+      "id": "telegram.formatting",
+      "category": "telegram",
+      "surface": ["plain text replies", "escaped HTML plans", "collapsed equal sets"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:95-102", "apps/gym/src/gym/__main__.py:444-493"],
+      "disposition": "changed_d7",
+      "reason": "Preserve meaning, escaping, and scannability; D7 does not require transcript or exact wording parity."
+    },
+    {
+      "id": "telegram.free-text-batch",
+      "category": "telegram",
+      "surface": ["non-command text", "durable batch append"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:179-202", "apps/gym/src/gym/services/batch_service.py:13-81"],
+      "disposition": "ported",
+      "reason": "Deterministic batch routing and durable append remain available; extraction and automatic flush are owned by telegram.free-text-agent and scheduler.batch-retry."
+    },
+    {
+      "id": "telegram.free-text-agent",
+      "category": "agent",
+      "surface": ["free-text coaching", "plan generation", "batch extraction", "nightly reflection"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:203-219", "apps/gym/src/gym/services/hermes_service.py:18-74"],
+      "disposition": "blocked_d23",
+      "reason": "Pinned Hermes creates a fresh AIAgent for each HTTP request. PR #5 must fail closed and must not implement conversation code or choose a topology."
+    },
+    {
+      "id": "database.schema",
+      "category": "database",
+      "surface": ["15 tables", "8 indexes", "PRAGMA user_version=5", "foreign keys"],
+      "source_refs": ["apps/gym/src/gym/db/schema.py:1-36", "apps/gym/src/gym/db/migrations.py:8-12"],
+      "disposition": "step2",
+      "reason": "The frozen v0 schema and normalized full-state comparison are committed; Step 4 must not migrate or reshape it."
+    },
+    {
+      "id": "database.strength",
+      "category": "database",
+      "surface": ["strength logging", "recent strength history", "exercise aliases"],
+      "source_refs": ["apps/gym/src/gym/repositories/strength.py:12-66", "apps/gym/src/gym/controllers/gym_controller.py:16-55"],
+      "disposition": "ported",
+      "reason": "Port the sessions, movements, session_items, and efforts transaction and add SQLite-state parity."
+    },
+    {
+      "id": "database.cardio-metrics",
+      "category": "database",
+      "surface": ["cardio logging", "body metric logging", "history reads", "external activity identity"],
+      "source_refs": ["apps/gym/src/gym/repositories/activity.py:13-137"],
+      "disposition": "ported",
+      "reason": "Port deterministic writes and bounded reads; extend parity beyond Step 2 weight logging."
+    },
+    {
+      "id": "database.plans-preferences",
+      "category": "database",
+      "surface": ["plan persistence", "rating", "adherence", "stated preference", "inference approval"],
+      "source_refs": ["apps/gym/src/gym/services/coach_service.py:20-178", "apps/gym/src/gym/services/reflection_service.py:15-149"],
+      "disposition": "ported",
+      "reason": "Keep queryable evidence and the human Keep/Reject gate in SQLite; never replace them with Hermes memory."
+    },
+    {
+      "id": "scheduler.batch-retry",
+      "category": "scheduler",
+      "surface": ["persisted batch claims", "manual retry", "restart recovery", "snapshot discard", "12-hour due scan"],
+      "source_refs": ["apps/gym/src/gym/services/batch_service.py:13-81", "apps/gym/src/gym/__main__.py:505-603"],
+      "disposition": "blocked_d23",
+      "reason": "Durable claims, snapshots, restart recovery, and concurrent-append-safe completion are ported, but production retry and due-scan processing require the D23-blocked extraction path."
+    },
+    {
+      "id": "scheduler.maintenance",
+      "category": "scheduler",
+      "surface": ["Health staleness notice", "nightly reflection claim", "morning approval prompt"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:604-651", "apps/gym/src/gym/services/reflection_service.py:64-94"],
+      "disposition": "blocked_d23",
+      "reason": "The deterministic storage primitives are ported, but the production scheduler is deferred with the D23-blocked nightly reflection workflow."
+    },
+    {
+      "id": "health.receiver",
+      "category": "health",
+      "surface": ["POST /import/health", "bearer auth", "1 MiB body limit", "30 requests/minute", "strict payload"],
+      "source_refs": ["apps/gym/src/gym/importers/receiver.py:15-54"],
+      "disposition": "deferred",
+      "reason": "The bearer-authenticated receiver contract and deterministic importer are ported; no TCP listener or Health credentials are deployed in PR #5."
+    },
+    {
+      "id": "health.import",
+      "category": "health",
+      "surface": ["workouts", "metrics", "splits", "heart-rate samples", "duplicate replay", "manual-cardio reconciliation"],
+      "source_refs": ["apps/gym/src/gym/importers/health.py:53-137", "apps/gym/src/gym/importers/health.py:263-285"],
+      "disposition": "ported",
+      "reason": "Preserve transactionality and (source, external_id) idempotency; add duplicate, rollback, and reconciliation parity."
+    },
+    {
+      "id": "health.zip-backfill",
+      "category": "health",
+      "surface": ["import_zip", "owner-only export.zip import", "basename-only archive selection"],
+      "source_refs": ["apps/gym/src/gym/__main__.py:347-365", "apps/gym/src/gym/importers/health.py:140-261"],
+      "disposition": "deferred",
+      "reason": "The HTTP receiver and deterministic JSON contract cover parallel operation; large private Apple export ingestion is not required to start the disposable trial."
+    },
+    {
+      "id": "mcp.tools",
+      "category": "mcp",
+      "surface": ["recent_sets", "exercise_catalogue", "volume_summary", "body_metrics", "recent_runs", "pace_trend", "interval_history", "heart_rate_series", "weekly_load", "preferences", "record_preference", "propose_plan", "plan_feedback"],
+      "source_refs": ["apps/gym/src/gym/agent/server.py:22-102", "apps/gym/src/gym/agent/mcp_server.py:13-209"],
+      "disposition": "ported",
+      "reason": "Expand Step 2's body_metrics-only server to the reviewed surface over the Fleet socket; expose no resources, prompts, sampling, raw SQL, filesystem, shell, or network tools."
+    },
+    {
+      "id": "exports.csv",
+      "category": "exports",
+      "surface": ["efforts.csv", "controlled data-root destination"],
+      "source_refs": ["apps/gym/src/gym/services/export_service.py:10-28", "apps/gym/src/gym/__main__.py:340-345"],
+      "disposition": "ported",
+      "reason": "Preserve exported row semantics while allowing D7 response wording changes."
+    },
+    {
+      "id": "config.startup",
+      "category": "runtime",
+      "surface": ["timezone", "data root", "MCP socket path and group", "frozen schema validation before serving"],
+      "source_refs": ["apps/gym/src/gym/config.py:14-95", "apps/gym/src/gym/__main__.py:67-90", "apps/gym/src/gym/__main__.py:535-564"],
+      "disposition": "ported",
+      "reason": "Validate only the MCP runtime settings in use, open the explicit copied database, and reject undeclared transport configuration."
+    },
+    {
+      "id": "parallel.copy-boundary",
+      "category": "runtime",
+      "surface": ["explicit source", "explicit destination", "SQLite sidecars", "integrity", "foreign keys", "disposable state"],
+      "source_refs": ["docs/refactor/V1_REBUILD_PLAN.md:1280-1293"],
+      "disposition": "ported",
+      "reason": "PR #5 prepares but does not execute cutover; v0 remains untouched and authoritative."
+    },
+    {
+      "id": "fleet.socket-boundary",
+      "category": "fleet",
+      "surface": ["/run/gym/mcp.sock", "0660", "gym-access", "boss-agent", "approved gateway identity"],
+      "source_refs": ["docs/refactor/V1_REBUILD_PLAN.md:786-795"],
+      "disposition": "ported",
+      "reason": "Fleet owns creation and validation. D23/D24 prevent granting an unapproved Hermes topology; boss-agent remains the only unconditional peer."
+    },
+    {
+      "id": "profile.d25",
+      "category": "profile",
+      "surface": ["SOUL.md", "skills", "seeded memory", "write approvals", "skills ledger", "no background review", "no curator", "minimal toolsets"],
+      "source_refs": ["docs/refactor/V1_REBUILD_PLAN.md:655-690"],
+      "disposition": "ported",
+      "reason": "Land validated repository-owned artifacts read-only to Hermes; this does not authorize a live D23/D24 topology."
+    },
+    {
+      "id": "cutover.production",
+      "category": "runtime",
+      "surface": ["v0 shutdown", "database merge", "dual writes", "production cutover"],
+      "source_refs": ["docs/refactor/V1_REBUILD_PLAN.md:1280-1293"],
+      "disposition": "deferred",
+      "reason": "Step 4 only prepares a disposable parallel run. Cutover requires explicit later authorization and acceptance evidence."
+    }
+  ]
+}

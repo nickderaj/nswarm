@@ -12,6 +12,7 @@ WorkingDirectory=/opt/nswarm/hermes
 EnvironmentFile=/etc/nswarm/hermes-gateway.env
 Restart=on-failure
 RestartSec=5s
+UMask=0077
 NoNewPrivileges=true
 CapabilityBoundingSet=
 AmbientCapabilities=

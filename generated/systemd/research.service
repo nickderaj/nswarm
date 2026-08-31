@@ -1,6 +1,6 @@
 [Unit]
 Description=nswarm research bot
-After=network-online.target hermes-gateway.service
+After=network-online.target hermes-gateway.service systemd-tmpfiles-setup.service
 Wants=network-online.target
 
 [Service]
@@ -11,8 +11,8 @@ SupplementaryGroups=research-access
 ExecStart=/opt/nswarm/research/bin/research-bot
 WorkingDirectory=/opt/nswarm/research
 EnvironmentFile=/etc/nswarm/research.env
-RuntimeDirectory=research
-RuntimeDirectoryMode=0750
+Environment=NSWARM_MCP_SOCKET=/run/research/mcp.sock
+Environment=NSWARM_MCP_SOCKET_GROUP=research-access
 Restart=on-failure
 RestartSec=5s
 UMask=0077

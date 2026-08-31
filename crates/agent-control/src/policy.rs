@@ -119,8 +119,11 @@ impl Role {
 }
 
 #[cfg(test)]
+const GYM_PROFILE_CAPABILITIES: &[Capability] = &[Capability::EvidenceWrite];
+
+#[cfg(test)]
 mod tests {
-    use super::{Capability, Role};
+    use super::{Capability, GYM_PROFILE_CAPABILITIES, Role};
 
     #[test]
     fn eval_capability_corpus_enforces_role_boundaries() {
@@ -162,7 +165,7 @@ mod tests {
         let roles = document["roles"]
             .as_object()
             .expect("role capability map contains roles");
-        assert_eq!(roles.len(), Role::ALL.len());
+        assert_eq!(roles.len(), Role::ALL.len() + 1);
         for role in Role::ALL {
             let recorded: Vec<Capability> = serde_json::from_value(
                 roles
@@ -177,6 +180,9 @@ mod tests {
                 "capability drift for {role:?}"
             );
         }
+        let gym: Vec<Capability> = serde_json::from_value(roles["gym"].clone())
+            .expect("gym capability map uses production encodings");
+        assert_eq!(gym, GYM_PROFILE_CAPABILITIES);
     }
 
     #[test]

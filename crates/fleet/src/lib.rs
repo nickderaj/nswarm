@@ -1,6 +1,7 @@
 //! Declarative fleet manifests and deterministic systemd rendering.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -9,6 +10,7 @@ use thiserror::Error;
 
 const SYSTEMD_UNIT_DIRECTORY: &str = "etc/systemd/system";
 const ENVIRONMENT_DIRECTORY: &str = "etc/nswarm";
+const TMPFILES_DIRECTORY: &str = "usr/lib/tmpfiles.d";
 
 /// Complete declarative description of one durable bot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -212,7 +214,8 @@ impl BotManifest {
         let mut lines = vec![
             "[Unit]".to_owned(),
             format!("Description=nswarm {} bot", self.bot.name),
-            "After=network-online.target hermes-gateway.service".to_owned(),
+            "After=network-online.target hermes-gateway.service systemd-tmpfiles-setup.service"
+                .to_owned(),
             "Wants=network-online.target".to_owned(),
             String::new(),
             "[Service]".to_owned(),
@@ -223,8 +226,14 @@ impl BotManifest {
             format!("ExecStart={}", executable.display()),
             format!("WorkingDirectory={}", self.bot.prefix.display()),
             format!("EnvironmentFile=/etc/nswarm/{}.env", self.bot.name),
-            format!("RuntimeDirectory={}", self.bot.name),
-            "RuntimeDirectoryMode=0750".to_owned(),
+            format!(
+                "Environment=NSWARM_MCP_SOCKET={}",
+                self.surface.socket.display()
+            ),
+            format!(
+                "Environment=NSWARM_MCP_SOCKET_GROUP={}",
+                self.surface.socket_group
+            ),
             "Restart=on-failure".to_owned(),
             "RestartSec=5s".to_owned(),
             "UMask=0077".to_owned(),
@@ -279,6 +288,32 @@ impl BotManifest {
             "WantedBy=multi-user.target".to_owned(),
         ]);
         Ok(format!("{}\n", lines.join("\n")))
+    }
+
+    /// Renders the root-owned tmpfiles contract for the setgid socket directory.
+    ///
+    /// The directory's ordinary access bits are `0750`; setgid makes sockets
+    /// created by the unprivileged service inherit the dedicated access group.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError`] if the manifest no longer validates.
+    pub fn render_tmpfiles(&self) -> Result<String, ManifestError> {
+        self.validate()?;
+        let directory =
+            self.surface
+                .socket
+                .parent()
+                .ok_or_else(|| ManifestError::UnsafeHostPath {
+                    field: "surface.socket",
+                    path: self.surface.socket.clone(),
+                })?;
+        Ok(format!(
+            "d {directory} 2750 {user} {group} - -\n",
+            directory = directory.display(),
+            user = self.bot.user,
+            group = self.surface.socket_group,
+        ))
     }
 
     /// Compares the deterministic unit with installed bytes.
@@ -354,6 +389,16 @@ impl BotManifest {
             PathBuf::from(SYSTEMD_UNIT_DIRECTORY).join(format!("{}.service", self.bot.name)),
             PathBuf::from(ENVIRONMENT_DIRECTORY).join(format!("{}.env", self.bot.name)),
         ))
+    }
+
+    /// Returns the host-root-relative tmpfiles path governed by this manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManifestError`] if the manifest no longer validates.
+    pub fn installed_tmpfiles_path(&self) -> Result<PathBuf, ManifestError> {
+        self.validate()?;
+        Ok(PathBuf::from(TMPFILES_DIRECTORY).join(format!("nswarm-{}.conf", self.bot.name)))
     }
 
     /// Plans unit and environment changes without mutating the host or exposing
@@ -474,6 +519,24 @@ pub fn render_repository_units(
         .collect()
 }
 
+/// Renders every discovered bot tmpfiles contract in deterministic order.
+///
+/// # Errors
+///
+/// Returns [`ManifestError`] if inventory discovery or any manifest/render
+/// contract fails.
+pub fn render_repository_tmpfiles(
+    repository_root: &Path,
+) -> Result<Vec<(String, String)>, ManifestError> {
+    discover_manifests(repository_root)?
+        .into_iter()
+        .map(|(_, manifest)| {
+            let name = manifest.bot.name.clone();
+            Ok((name, manifest.render_tmpfiles()?))
+        })
+        .collect()
+}
+
 /// Plans every manifest against an explicit host root without mutation.
 ///
 /// Environment drift is reported only as clean or redacted replacement; no
@@ -492,13 +555,22 @@ pub fn plan_repository(
     let mut output = String::new();
     for (_, manifest) in discover_manifests(repository_root)? {
         let (unit_path, environment_path) = manifest.installed_paths()?;
+        let tmpfiles_path = manifest.installed_tmpfiles_path()?;
         let unit = read_optional_host_file(&host_root.join(unit_path))?;
         let environment = read_optional_host_file(&host_root.join(environment_path))?;
+        let installed_tmpfiles = read_optional_host_file(&host_root.join(tmpfiles_path))?;
         output.push_str(&manifest.render_host_plan(
             unit.as_deref(),
             environment.as_deref(),
             secrets,
         )?);
+        let rendered_tmpfiles = manifest.render_tmpfiles()?;
+        let tmpfiles_plan = if installed_tmpfiles.as_deref() == Some(rendered_tmpfiles.as_str()) {
+            "clean"
+        } else {
+            "replace"
+        };
+        writeln!(output, "tmpfiles: {tmpfiles_plan}").expect("writing to a String cannot fail");
     }
     Ok(output)
 }
@@ -612,7 +684,7 @@ impl GatewayManifest {
     pub fn render_unit(&self) -> Result<String, ManifestError> {
         self.validate()?;
         Ok(format!(
-            "[Unit]\nDescription=nswarm Hermes gateway\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser={user}\nGroup={user}\nExecStart={prefix}/bin/hermes gateway --host 127.0.0.1 --port {port}\nWorkingDirectory={prefix}\nEnvironmentFile=/etc/nswarm/hermes-gateway.env\nRestart=on-failure\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nProtectSystem=strict\nProtectHome=true\nPrivateTmp=true\nPrivateDevices=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectControlGroups=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nRestrictRealtime=true\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nIPAddressDeny=any\nIPAddressAllow=localhost\nReadWritePaths={state}\n\n[Install]\nWantedBy=multi-user.target\n",
+            "[Unit]\nDescription=nswarm Hermes gateway\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser={user}\nGroup={user}\nExecStart={prefix}/bin/hermes gateway --host 127.0.0.1 --port {port}\nWorkingDirectory={prefix}\nEnvironmentFile=/etc/nswarm/hermes-gateway.env\nRestart=on-failure\nRestartSec=5s\nUMask=0077\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nProtectSystem=strict\nProtectHome=true\nPrivateTmp=true\nPrivateDevices=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectControlGroups=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nRestrictRealtime=true\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nIPAddressDeny=any\nIPAddressAllow=localhost\nReadWritePaths={state}\n\n[Install]\nWantedBy=multi-user.target\n",
             user = self.user,
             prefix = self.prefix.display(),
             port = self.port,
@@ -837,6 +909,8 @@ deny_paths = ["/srv/nswarm/tutor"]
         for required in [
             "User=gym-agent",
             "EnvironmentFile=/etc/nswarm/gym.env",
+            "Environment=NSWARM_MCP_SOCKET=/run/gym/mcp.sock",
+            "Environment=NSWARM_MCP_SOCKET_GROUP=gym-access",
             "NoNewPrivileges=true",
             "CapabilityBoundingSet=",
             "ProtectSystem=strict",
@@ -851,6 +925,14 @@ deny_paths = ["/srv/nswarm/tutor"]
         assert!(!unit.contains(concat!("/home/", "nick")));
         assert!(!unit.contains("IPAddressDeny="));
         assert!(!unit.contains("IPAddressAllow="));
+        assert!(!unit.contains("RuntimeDirectory="));
+        assert_eq!(
+            BotManifest::parse(MANIFEST)
+                .expect("manifest validates")
+                .render_tmpfiles()
+                .expect("tmpfiles renders"),
+            "d /run/gym 2750 gym-agent gym-access - -\n"
+        );
     }
 
     #[test]
@@ -1038,6 +1120,7 @@ deny_paths = ["/srv/nswarm/tutor"]
         let manifest = BotManifest::parse(MANIFEST).expect("manifest validates");
         let unit = manifest.render_unit().expect("unit renders");
         assert!(unit.contains("SupplementaryGroups=gym-access"));
+        assert!(unit.contains("Environment=NSWARM_MCP_SOCKET_GROUP=gym-access"));
 
         for socket_group in ["boss-agent", "wheel", "gym-agent", ""] {
             let source = MANIFEST.replace(
@@ -1135,6 +1218,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             .expect("gateway validates")
             .render_unit()
             .expect("gateway renders");
+        assert!(unit.contains("UMask=0077"));
         assert!(unit.contains("--host 127.0.0.1"));
         assert!(unit.contains("IPAddressDeny=any"));
         assert!(unit.contains("IPAddressAllow=localhost"));
@@ -1199,7 +1283,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             .and_then(std::path::Path::parent)
             .expect("workspace root");
         let names = validate_repository(root).expect("repository validates");
-        assert_eq!(names, ["research"]);
+        assert_eq!(names, ["gym", "research"]);
     }
 
     #[test]
@@ -1311,17 +1395,29 @@ secrets_allow = ["OPENROUTER_API_KEY"]
     }
 
     #[test]
-    fn repository_plan_compares_both_artifacts_without_secret_output() {
+    fn repository_plan_compares_all_artifacts_without_secret_output() {
         let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(std::path::Path::parent)
             .expect("workspace root");
         let host = TempDir::new().expect("temporary host root");
         let synthetic_secret = "synthetic-provider-value";
-        let secrets =
-            BTreeMap::from([("OPENROUTER_API_KEY".to_owned(), synthetic_secret.to_owned())]);
+        let secrets = BTreeMap::from([
+            ("OPENROUTER_API_KEY".to_owned(), synthetic_secret.to_owned()),
+            ("GYM_BOT_TOKEN".to_owned(), "synthetic-gym-token".to_owned()),
+            ("OWNER_TELEGRAM_ID".to_owned(), "1001".to_owned()),
+            ("TIMEZONE".to_owned(), "Europe/London".to_owned()),
+            ("GYM_DATA_DIR".to_owned(), "/var/lib/nswarm/gym".to_owned()),
+            (
+                "HEALTH_IMPORT_TOKEN".to_owned(),
+                "synthetic-health-token".to_owned(),
+            ),
+            ("HEALTH_BIND_HOST".to_owned(), "127.0.0.1".to_owned()),
+            ("HEALTH_BIND_PORT".to_owned(), "8090".to_owned()),
+        ]);
         let first = plan_repository(repository, host.path(), &secrets).expect("plan renders");
         assert!(first.contains("environment: replace (contents redacted)"));
+        assert!(first.contains("tmpfiles: replace"));
         assert!(!first.contains(synthetic_secret));
 
         let manifest = BotManifest::parse(
@@ -1330,6 +1426,9 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         )
         .expect("manifest parses");
         let (unit_path, environment_path) = manifest.installed_paths().expect("installed paths");
+        let tmpfiles_path = manifest
+            .installed_tmpfiles_path()
+            .expect("installed tmpfiles path");
         let unit_path = host.path().join(unit_path);
         let environment_path = host.path().join(environment_path);
         fs::create_dir_all(unit_path.parent().expect("unit parent")).expect("create unit parent");
@@ -1347,10 +1446,21 @@ secrets_allow = ["OPENROUTER_API_KEY"]
                 .expect("render installed environment"),
         )
         .expect("write installed environment");
+        let tmpfiles_path = host.path().join(tmpfiles_path);
+        fs::create_dir_all(tmpfiles_path.parent().expect("tmpfiles parent"))
+            .expect("create tmpfiles parent");
+        fs::write(
+            tmpfiles_path,
+            manifest
+                .render_tmpfiles()
+                .expect("render installed tmpfiles"),
+        )
+        .expect("write installed tmpfiles");
 
         let clean = plan_repository(repository, host.path(), &secrets).expect("clean plan");
         assert!(clean.contains("unit:\nclean\n"));
         assert!(clean.contains("environment: clean"));
+        assert!(clean.contains("tmpfiles: clean"));
         assert!(!clean.contains(synthetic_secret));
     }
 }
