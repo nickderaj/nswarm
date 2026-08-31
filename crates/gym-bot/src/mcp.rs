@@ -161,6 +161,8 @@ pub struct BodyMetric {
     pub source: String,
 }
 
+/// Heap entry ordered by `(at, id)`. The database primary key makes that pair
+/// unique, so the metric payload is deliberately outside the ranking key.
 #[derive(Debug)]
 struct RankedBodyMetric {
     at: DateTime<FixedOffset>,
@@ -170,7 +172,7 @@ struct RankedBodyMetric {
 
 impl PartialEq for RankedBodyMetric {
     fn eq(&self, other: &Self) -> bool {
-        self.at == other.at && self.id == other.id
+        self.cmp(other).is_eq()
     }
 }
 
@@ -185,34 +187,6 @@ impl PartialOrd for RankedBodyMetric {
 impl Ord for RankedBodyMetric {
     fn cmp(&self, other: &Self) -> Ordering {
         self.at.cmp(&other.at).then(self.id.cmp(&other.id))
-    }
-}
-
-#[cfg(test)]
-mod ranked_body_metric_tests {
-    use super::{BodyMetric, RankedBodyMetric};
-
-    fn ranked(at: &str, id: i64) -> RankedBodyMetric {
-        RankedBodyMetric {
-            at: chrono::DateTime::parse_from_rfc3339(at).expect("valid test timestamp"),
-            id,
-            metric: BodyMetric {
-                date: at.to_owned(),
-                metric: "weight_kg".to_owned(),
-                value: 80.0,
-                unit: "kg".to_owned(),
-                source: "manual".to_owned(),
-            },
-        }
-    }
-
-    #[test]
-    fn ranking_equality_requires_both_timestamp_and_row_id() {
-        let value = ranked("2026-08-31T12:00:00Z", 7);
-
-        assert_eq!(value, ranked("2026-08-31T12:00:00Z", 7));
-        assert_ne!(value, ranked("2026-08-31T12:00:01Z", 7));
-        assert_ne!(value, ranked("2026-08-31T12:00:00Z", 8));
     }
 }
 

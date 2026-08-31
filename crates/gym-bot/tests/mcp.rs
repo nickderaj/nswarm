@@ -190,6 +190,32 @@ fn query_filters_and_orders_by_instant_across_offsets() {
 }
 
 #[test]
+fn equal_timestamps_keep_the_highest_row_id_at_the_limit() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let database = common::copy_fixture(&directory, "equal-timestamps.db");
+    open_existing(&database)
+        .expect("open fixture")
+        .execute_batch(
+            "INSERT INTO body_metrics (date, metric, value, unit, source) VALUES \
+             ('2026-08-29T08:15:30+00:00', 'weight_kg', 81, 'kg', 'manual'), \
+             ('2026-08-29T08:15:30+00:00', 'weight_kg', 82, 'kg', 'manual');",
+        )
+        .expect("seed equal timestamps in row-id order");
+    let service = GymMcp::new(&database, Arc::new(FixedClock::new(FIXED_TIME)));
+
+    let rows = service
+        .body_metrics(BodyMetricsArgs {
+            metric: Some("weight_kg".to_owned()),
+            days: Some(1),
+            limit: Some(1),
+        })
+        .expect("bounded tie-break query");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].value.to_bits(), 82.0_f64.to_bits());
+}
+
+#[test]
 fn query_includes_a_whole_second_exactly_at_the_cutoff() {
     let directory = tempfile::tempdir().expect("tempdir");
     let database = common::copy_fixture(&directory, "cutoff.db");
