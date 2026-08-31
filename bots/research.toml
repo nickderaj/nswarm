@@ -11,7 +11,7 @@ data = "/var/lib/nswarm/research"
 telegram = false
 socket = "/run/research/mcp.sock"
 socket_group = "research-access"
-ask = true
+ask = false
 peers = ["boss-agent"]
 
 [secrets]

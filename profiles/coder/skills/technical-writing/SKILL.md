@@ -4,6 +4,12 @@ description: Write concise code, documentation, and handoffs centered on observa
 policy-version: v1
 ---
 
-Lead with the result. Use stable technical names and plain language. Document
-why a boundary or invariant exists, not a restatement of syntax. Separate facts,
-inferences, and unknowns, and put exact commands next to their observed results.
+Lead with the observable result. Use stable technical names and plain language.
+Document why a boundary, invariant, failure mode, or compatibility choice exists
+rather than restating syntax. Keep comments close to the non-obvious constraint
+they protect.
+
+Separate facts, inferences, contradictions, and unknowns. Put literal commands
+next to observed results and distinguish local evidence from deployment claims.
+Do not state that a gate passed, an artifact exists, or a behavior is safe unless
+the exact candidate report contains the supporting evidence.

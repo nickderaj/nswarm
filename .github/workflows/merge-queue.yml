@@ -68,8 +68,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - run: cargo install cargo-mutants --version 27.1.0 --locked
-      - run: cargo mutants --workspace
+      - name: Build mutation diff
+        run: git diff --no-ext-diff origin/main...HEAD > /tmp/mutation.diff
+      - name: Mutate changed code
+        run: cargo mutants --workspace --in-diff /tmp/mutation.diff --jobs 4
       - name: Upload mutation report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

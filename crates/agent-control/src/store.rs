@@ -1,13 +1,13 @@
 use std::path::{Component, Path};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::types::{BriefError, report_matches_schema};
 use crate::{
-    ArtifactKind, Capability, JobBrief, JobId, JobState, LeaseKind, ProfileId, RiskClass, Role,
-    SessionId, Sha, UnitId,
+    ArtifactKind, Capability, CoderReport, JobBrief, JobId, JobState, LeaseKind, ProfileId,
+    ResearchReport, RiskClass, Role, SessionId, Sha, UnitId,
 };
 
 const SCHEMA_VERSION: i64 = 9;
@@ -197,13 +197,6 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] when validation, serialization, or the atomic
     /// insert fails.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "trusted scheduler provisioning remains private until its command adapter is implemented"
-        )
-    )]
     // coverage-critical
     pub(crate) fn create_job(&mut self, brief: &JobBrief, now: i64) -> Result<(), StoreError> {
         brief.validate()?;
@@ -211,6 +204,9 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if unit_brief_replays_tx(&transaction, &brief.unit_id, &brief_json)? {
+            return Ok(());
+        }
         let existing_scope: Option<(String, String)> = transaction
             .query_row(
                 "SELECT repository, standing_policy_version FROM jobs WHERE job_id = ?1",
@@ -315,6 +311,16 @@ impl ControlStore {
             .optional()?
             .ok_or_else(|| StoreError::UnknownUnit(unit_id.to_string()))?;
         Ok(JobState::try_from(text.as_str())?)
+    }
+
+    pub(crate) fn live_coder_profiles(&self) -> Result<Vec<ProfileId>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT profile_id FROM profiles WHERE role = ?1 AND destroyed_at IS NULL ORDER BY profile_id",
+        )?;
+        statement
+            .query_map([Role::Coder.as_str()], |row| row.get::<_, String>(0))?
+            .map(|profile| Ok(ProfileId::new(profile?)?))
+            .collect()
     }
 
     /// Performs a non-evidence-bearing state edge atomically.
@@ -1091,6 +1097,23 @@ impl ControlStore {
             "UPDATE leases SET released_at = ?1 WHERE released_at IS NULL AND expires_at <= ?1",
             [now],
         )?;
+        let replayed: Option<i64> = transaction
+            .query_row(
+                "SELECT lease_id FROM leases WHERE job_id = ?1 AND unit_id = ?2 AND kind = ?3 AND resource = ?4 AND expires_at = ?5 AND holder_profile = ?6 AND released_at IS NULL",
+                params![
+                    job_id.as_str(),
+                    unit_id.as_str(),
+                    kind.as_str(),
+                    resource,
+                    expires_at,
+                    holder.as_str()
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(lease_id) = replayed {
+            return Ok(lease_id);
+        }
         let mut statement = transaction.prepare(
             "SELECT job_id, resource FROM leases WHERE kind = ?1 AND released_at IS NULL AND expires_at > ?2",
         )?;
@@ -1254,54 +1277,107 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let command_request = json!({
-            "actor": actor.as_str(),
-            "unit_id": unit_id.as_str(),
-            "report": report
-        });
-        if let Some(result) = command_replay_tx(
-            &transaction,
-            idempotency_key,
-            "record-report",
-            &command_request,
-        )? {
-            return result
-                .as_i64()
-                .ok_or_else(|| StoreError::InvalidStoredCommand(idempotency_key.to_owned()));
-        }
-        let (job_id, _) = unit_identity_tx(&transaction, unit_id)?;
-        require_unit_actor_tx(
+        let id = record_report_tx(
             &transaction,
             actor,
-            &job_id,
             unit_id,
-            Capability::EvidenceWrite,
-        )?;
-        require_actor_lease_tx(&transaction, actor, unit_id, LeaseKind::Profile, now)?;
-        let brief_json: String = transaction.query_row(
-            "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
-            [unit_id.as_str()],
-            |row| row.get(0),
-        )?;
-        let brief: JobBrief = serde_json::from_str(&brief_json)?;
-        if !report_matches_schema(&brief.report_schema, report) {
-            return Err(StoreError::ReportSchemaViolation);
-        }
-        let id = append_event_tx(
-            &transaction,
-            &job_id,
+            report,
             idempotency_key,
-            "worker-report",
-            &json!({"actor": actor.as_str(), "report": report}),
             now,
+            |_| Ok(()),
         )?;
-        record_command_tx(
+        transaction.commit()?;
+        Ok(id)
+    }
+
+    fn record_typed_report(
+        &mut self,
+        actor: &ProfileId,
+        unit_id: &UnitId,
+        report: &Value,
+        context: (Role, &str, i64),
+        validate: impl FnOnce(&JobBrief) -> Result<(), StoreError>,
+    ) -> Result<i64, StoreError> {
+        let (expected_role, idempotency_key, now) = context;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id = record_typed_report_tx(
             &transaction,
-            idempotency_key,
-            "record-report",
-            &command_request,
-            &json!(id),
-            id,
+            actor,
+            unit_id,
+            report,
+            (expected_role, idempotency_key, now),
+            validate,
+        )?;
+        transaction.commit()?;
+        Ok(id)
+    }
+
+    /// Validates and records a research-profile report against its immutable
+    /// brief and generic report schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the actor is not the unit's live research
+    /// profile, the typed report is inconsistent, or the durable report gate
+    /// refuses it.
+    pub fn record_research_report(
+        &mut self,
+        actor: &ProfileId,
+        unit_id: &UnitId,
+        report: &ResearchReport,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<i64, StoreError> {
+        let value = serde_json::to_value(report)?;
+        self.record_typed_report(
+            actor,
+            unit_id,
+            &value,
+            (Role::Research, idempotency_key, now),
+            |brief| {
+                report.validate_for_brief(brief).map_err(|error| {
+                    StoreError::Brief(BriefError::InvalidIdentifier(error.to_string()))
+                })
+            },
+        )
+    }
+
+    /// Validates and records a coder candidate handoff against its immutable
+    /// brief and generic report schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the actor is not the unit's live coder,
+    /// exact-SHA or scope evidence differs from the brief, or the durable report
+    /// gate refuses it.
+    pub fn record_coder_report(
+        &mut self,
+        actor: &ProfileId,
+        unit_id: &UnitId,
+        report: &CoderReport,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<i64, StoreError> {
+        let value = serde_json::to_value(report)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let writable_roots = live_path_lease_roots_tx(&transaction, actor, unit_id, now)?;
+        let id = record_typed_report_tx(
+            &transaction,
+            actor,
+            unit_id,
+            &value,
+            (Role::Coder, idempotency_key, now),
+            |brief| {
+                report
+                    .validate_with_writable_roots(brief, &writable_roots)
+                    .map_err(|error| {
+                        StoreError::Brief(BriefError::InvalidIdentifier(error.to_string()))
+                    })
+            },
         )?;
         transaction.commit()?;
         Ok(id)
@@ -1313,13 +1389,6 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] for a job/unit mismatch, relative home, duplicate
     /// profile, or database failure.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "trusted scheduler provisioning remains private until its command adapter is implemented"
-        )
-    )]
     pub(crate) fn register_profile(
         &mut self,
         profile_id: &ProfileId,
@@ -1335,6 +1404,28 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String, String, String, Option<i64>)> = transaction
+            .query_row(
+                "SELECT job_id, unit_id, role, home, destroyed_at FROM profiles WHERE profile_id = ?1",
+                [profile_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()?;
+        if let Some((existing_job, existing_unit, existing_role, existing_home, destroyed_at)) =
+            existing
+        {
+            if existing_job == job_id.as_str()
+                && existing_unit == unit_id.as_str()
+                && existing_role == role.as_str()
+                && existing_home == home.to_string_lossy()
+                && destroyed_at.is_none()
+            {
+                return Ok(());
+            }
+            return Err(StoreError::Brief(BriefError::InvalidIdentifier(
+                profile_id.to_string(),
+            )));
+        }
         let (actual_job, _) = unit_identity_tx(&transaction, unit_id)?;
         if actual_job != *job_id {
             return Err(StoreError::JobUnitMismatch);
@@ -2198,6 +2289,121 @@ fn record_command_tx(
 }
 
 // coverage-critical
+fn record_report_tx(
+    transaction: &Transaction<'_>,
+    actor: &ProfileId,
+    unit_id: &UnitId,
+    report: &Value,
+    idempotency_key: &str,
+    now: i64,
+    validate: impl FnOnce(&JobBrief) -> Result<(), StoreError>,
+) -> Result<i64, StoreError> {
+    let command_request = json!({
+        "actor": actor.as_str(),
+        "unit_id": unit_id.as_str(),
+        "report": report
+    });
+    let (job_id, _) = unit_identity_tx(transaction, unit_id)?;
+    require_unit_actor_tx(
+        transaction,
+        actor,
+        &job_id,
+        unit_id,
+        Capability::EvidenceWrite,
+    )?;
+    require_actor_lease_tx(transaction, actor, unit_id, LeaseKind::Profile, now)?;
+    if let Some(result) = command_replay_tx(
+        transaction,
+        idempotency_key,
+        "record-report",
+        &command_request,
+    )? {
+        return result
+            .as_i64()
+            .ok_or_else(|| StoreError::InvalidStoredCommand(idempotency_key.to_owned()));
+    }
+    let brief_json: String = transaction.query_row(
+        "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
+        [unit_id.as_str()],
+        |row| row.get(0),
+    )?;
+    let brief: JobBrief = serde_json::from_str(&brief_json)?;
+    validate(&brief)?;
+    if !report_matches_schema(&brief.report_schema, report) {
+        return Err(StoreError::ReportSchemaViolation);
+    }
+    let id = append_event_tx(
+        transaction,
+        &job_id,
+        idempotency_key,
+        "worker-report",
+        &json!({"actor": actor.as_str(), "report": report}),
+        now,
+    )?;
+    record_command_tx(
+        transaction,
+        idempotency_key,
+        "record-report",
+        &command_request,
+        &json!(id),
+        id,
+    )?;
+    Ok(id)
+}
+
+fn record_typed_report_tx(
+    transaction: &Transaction<'_>,
+    actor: &ProfileId,
+    unit_id: &UnitId,
+    report: &Value,
+    context: (Role, &str, i64),
+    validate: impl FnOnce(&JobBrief) -> Result<(), StoreError>,
+) -> Result<i64, StoreError> {
+    let (expected_role, idempotency_key, now) = context;
+    let role: Option<String> = transaction
+        .query_row(
+            "SELECT role FROM profiles WHERE profile_id = ?1 AND unit_id = ?2 AND destroyed_at IS NULL",
+            params![actor.as_str(), unit_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if role.as_deref() != Some(expected_role.as_str()) {
+        return Err(StoreError::UnauthorizedActor(actor.to_string()));
+    }
+    record_report_tx(
+        transaction,
+        actor,
+        unit_id,
+        report,
+        idempotency_key,
+        now,
+        validate,
+    )
+}
+
+fn live_path_lease_roots_tx(
+    transaction: &Transaction<'_>,
+    actor: &ProfileId,
+    unit_id: &UnitId,
+    now: i64,
+) -> Result<Vec<std::path::PathBuf>, StoreError> {
+    let mut statement = transaction.prepare(
+        "SELECT resource FROM leases WHERE holder_profile = ?1 AND unit_id = ?2 AND kind = ?3 AND released_at IS NULL AND expires_at > ?4 ORDER BY resource",
+    )?;
+    statement
+        .query_map(
+            params![
+                actor.as_str(),
+                unit_id.as_str(),
+                LeaseKind::Path.as_str(),
+                now
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .map(|resource| Ok(resource?.into()))
+        .collect()
+}
+
 fn append_event_tx(
     transaction: &rusqlite::Transaction<'_>,
     job_id: &JobId,
@@ -2242,6 +2448,27 @@ fn path_resources_overlap(left: &str, right: &str) -> bool {
     let left = Path::new(left);
     let right = Path::new(right);
     left.starts_with(right) || right.starts_with(left)
+}
+
+fn unit_brief_replays_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    unit_id: &UnitId,
+    brief_json: &str,
+) -> Result<bool, StoreError> {
+    let existing: Option<String> = transaction
+        .query_row(
+            "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
+            [unit_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match existing {
+        Some(existing) if existing == brief_json => Ok(true),
+        Some(_) => Err(StoreError::Brief(BriefError::InvalidIdentifier(
+            unit_id.to_string(),
+        ))),
+        None => Ok(false),
+    }
 }
 
 // coverage-critical
@@ -2859,9 +3086,10 @@ mod tests {
         redact_evidence,
     };
     use crate::{
-        ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
-        NetworkMode, NetworkPolicy, PathPolicy, ProfileId, ResourceLimits, RiskClass, Role,
-        SessionId, Sha, UnitId, VerificationCommand,
+        ArtifactKind, BriefError, CoderReport, CredentialGrant, JobBrief, JobId, JobState,
+        LeaseKind, NetworkMode, NetworkPolicy, PathPolicy, ProfileId, ResearchReport,
+        ResearchReportError, ResourceLimits, RiskClass, Role, SessionId, Sha, UnitId,
+        VerificationCommand,
     };
 
     fn sha(character: char) -> Sha {
@@ -4086,6 +4314,42 @@ mod tests {
     }
 
     #[test]
+    fn exact_live_lease_provisioning_replays() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let coordinator = ensure_coordinator(&mut store, &brief, 2);
+        let coder = ensure_profile(&mut store, &brief, "replay-lease-coder", Role::Coder, 2);
+        let first = store
+            .acquire_lease(
+                &coordinator,
+                &coder,
+                &brief.job_id,
+                &brief.unit_id,
+                LeaseKind::Path,
+                "crates/assigned",
+                100,
+                2,
+            )
+            .expect("path leased");
+        assert_eq!(
+            store
+                .acquire_lease(
+                    &coordinator,
+                    &coder,
+                    &brief.job_id,
+                    &brief.unit_id,
+                    LeaseKind::Path,
+                    "crates/assigned",
+                    100,
+                    3,
+                )
+                .expect("exact lease provisioning replayed"),
+            first
+        );
+    }
+
+    #[test]
     fn invalid_path_leases_and_job_aliases_are_rejected() {
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let brief = brief();
@@ -4341,6 +4605,17 @@ mod tests {
         let mut store = ControlStore::open_in_memory().expect("store opens");
         let first = brief();
         store.create_job(&first, 1).expect("first unit created");
+        store
+            .create_job(&first, 99)
+            .expect("exact unit provisioning replayed");
+
+        let mut changed_unit = first.clone();
+        changed_unit.goal = "A different immutable goal".to_owned();
+        assert!(matches!(
+            store.create_job(&changed_unit, 2),
+            Err(StoreError::Brief(BriefError::InvalidIdentifier(unit)))
+                if unit == first.unit_id.as_str()
+        ));
 
         let mut changed_scope = first.clone();
         changed_scope.unit_id = UnitId::new("unit-scope").expect("unit id");
@@ -4498,7 +4773,7 @@ mod tests {
                 &brief.unit_id,
                 LeaseKind::Profile,
                 first.as_str(),
-                100,
+                101,
                 3,
             ),
             Err(StoreError::LeaseConflict(resource)) if resource == first.as_str()
@@ -4791,6 +5066,222 @@ mod tests {
         assert!(!stored.contains("synthetic-camel-case-key"));
         assert_eq!(stored.matches("[REDACTED]").count(), 6);
         assert!(stored.contains("focused test passed"));
+    }
+
+    #[test]
+    fn typed_research_reports_require_exact_roles_and_briefs() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let mut research_brief = brief();
+        research_brief.goal = "What changed?".to_owned();
+        research_brief.report_schema = json!({
+            "type": "object",
+            "required": ["schema_version"],
+            "properties": {"schema_version": {"type": "integer"}},
+            "additionalProperties": true
+        });
+        store
+            .create_job(&research_brief, 1)
+            .expect("research job created");
+        let researcher = ensure_profile(
+            &mut store,
+            &research_brief,
+            "typed-researcher",
+            Role::Research,
+            2,
+        );
+        ensure_profile_lease(&mut store, &research_brief, &researcher, 2);
+        let research: ResearchReport = serde_json::from_value(json!({
+            "schema_version": 1,
+            "question": "What changed?",
+            "done_predicate": "The required source classes are accounted for.",
+            "claims": [{
+                "kind": "direct",
+                "text": "The parser rejects blank input.",
+                "source_type": "source-control",
+                "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "location": "crates/assigned/src/lib.rs:parse",
+                "observed_at": "2026-08-31T08:00:00Z",
+                "confidence": "high",
+                "limitations": ["Deployment was not observed."]
+            }],
+            "sources": {
+                "searched": ["source-control"],
+                "empty": [],
+                "unavailable": ["observability"],
+                "skipped": []
+            },
+            "critic": null,
+            "limitations": ["No production access was granted."]
+        }))
+        .expect("research report parses");
+        store
+            .record_research_report(
+                &researcher,
+                &research_brief.unit_id,
+                &research,
+                "typed-research-report",
+                3,
+            )
+            .expect("typed research report recorded");
+        store
+            .record_research_report(
+                &researcher,
+                &research_brief.unit_id,
+                &research,
+                "typed-research-report",
+                4,
+            )
+            .expect("typed research report replayed");
+
+        let coder = ensure_profile(
+            &mut store,
+            &research_brief,
+            "wrong-role-typed-reporter",
+            Role::Coder,
+            3,
+        );
+        ensure_profile_lease(&mut store, &research_brief, &coder, 3);
+        assert!(matches!(
+            store.record_research_report(
+                &coder,
+                &research_brief.unit_id,
+                &research,
+                "wrong-role-research-report",
+                3,
+            ),
+            Err(StoreError::UnauthorizedActor(actor)) if actor == coder.as_str()
+        ));
+        let mut wrong_question = research.clone();
+        wrong_question.question = "A different question".to_owned();
+        assert!(matches!(
+            store.record_research_report(
+                &researcher,
+                &research_brief.unit_id,
+                &wrong_question,
+                "wrong-question-report",
+                3,
+            ),
+            Err(StoreError::Brief(BriefError::InvalidIdentifier(message)))
+                if message == ResearchReportError::QuestionMismatch.to_string()
+        ));
+    }
+
+    #[test]
+    fn typed_coder_reports_require_exact_roles_briefs_and_scopes() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let mut coder_brief = brief();
+        coder_brief.job_id = JobId::new("coder-report-job").expect("job id");
+        coder_brief.unit_id = UnitId::new("coder-report-unit").expect("unit id");
+        coder_brief.report_schema = json!({
+            "type": "object",
+            "required": ["schema_version"],
+            "properties": {"schema_version": {"type": "integer"}},
+            "additionalProperties": true
+        });
+        store
+            .create_job(&coder_brief, 4)
+            .expect("coder job created");
+        let coder = ensure_profile(&mut store, &coder_brief, "typed-coder", Role::Coder, 5);
+        ensure_profile_lease(&mut store, &coder_brief, &coder, 5);
+        let coordinator = ensure_coordinator(&mut store, &coder_brief, 5);
+        store
+            .acquire_lease(
+                &coordinator,
+                &coder,
+                &coder_brief.job_id,
+                &coder_brief.unit_id,
+                LeaseKind::Path,
+                "crates/assigned/src",
+                10_000,
+                5,
+            )
+            .expect("path lease acquired");
+        let coder_report: CoderReport = serde_json::from_value(json!({
+            "schema_version": 1,
+            "repository": coder_brief.repository,
+            "base_sha": coder_brief.base_sha,
+            "head_sha": sha('b'),
+            "changed_paths": ["crates/assigned/src/lib.rs"],
+            "acceptance": [{
+                "criterion": "focused test passes",
+                "evidence": "The focused test exited zero."
+            }],
+            "commands": [{
+                "command": {
+                    "program": "cargo",
+                    "arguments": ["test", "-p", "assigned"]
+                },
+                "exit_code": 0,
+                "output_digest": "c".repeat(64)
+            }],
+            "artifacts": [{
+                "kind": "test-report",
+                "path": "artifacts/test.json",
+                "head_sha": sha('b'),
+                "digest": "d".repeat(64)
+            }],
+            "remaining_risks": ["No deployment was attempted."],
+            "deviations": ["none"]
+        }))
+        .expect("coder report parses");
+        store
+            .record_coder_report(
+                &coder,
+                &coder_brief.unit_id,
+                &coder_report,
+                "typed-coder-report",
+                6,
+            )
+            .expect("typed coder report recorded");
+
+        let mut out_of_scope = coder_report;
+        out_of_scope.changed_paths = vec![PathBuf::from("crates/sibling/src/lib.rs")];
+        assert!(matches!(
+            store.record_coder_report(
+                &coder,
+                &coder_brief.unit_id,
+                &out_of_scope,
+                "out-of-scope-coder-report",
+                6,
+            ),
+            Err(StoreError::Brief(BriefError::InvalidIdentifier(message)))
+                if message.contains("changed path is outside scope")
+        ));
+
+        let mut unleased = out_of_scope;
+        unleased.changed_paths = vec![PathBuf::from("crates/assigned/README.md")];
+        assert!(matches!(
+            store.record_coder_report(
+                &coder,
+                &coder_brief.unit_id,
+                &unleased,
+                "unleased-coder-report",
+                6,
+            ),
+            Err(StoreError::Brief(BriefError::InvalidIdentifier(message)))
+                if message.contains("changed path is outside scope")
+        ));
+    }
+
+    #[test]
+    fn typed_report_replay_requires_a_live_profile_lease() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let actor = ensure_profile(&mut store, &brief, "expiring-reporter", Role::Coder, 2);
+        ensure_profile_lease(&mut store, &brief, &actor, 2);
+        let report = json!({
+            "head_sha": sha('b'),
+            "evidence": {"checks": ["focused test passed"]}
+        });
+        store
+            .record_report(&actor, &brief.unit_id, &report, "expiring-report", 3)
+            .expect("report recorded");
+
+        assert!(matches!(
+            store.record_report(&actor, &brief.unit_id, &report, "expiring-report", 10_001),
+            Err(StoreError::MissingActorLease { .. })
+        ));
     }
 
     #[test]
@@ -5734,6 +6225,46 @@ mod tests {
                 7,
             )
             .expect("leased coder records tracked candidate");
+    }
+
+    #[test]
+    fn exact_profile_registration_replays_but_scope_drift_fails() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let brief = brief();
+        store.create_job(&brief, 1).expect("job created");
+        let profile = ProfileId::new("replay-profile").expect("profile id");
+        let home = std::path::Path::new("/tmp/nswarm-replay-profile");
+        store
+            .register_profile(
+                &profile,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::Coder,
+                home,
+                2,
+            )
+            .expect("profile registered");
+        store
+            .register_profile(
+                &profile,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::Coder,
+                home,
+                99,
+            )
+            .expect("exact profile provisioning replayed");
+        assert!(matches!(
+            store.register_profile(
+                &profile,
+                &brief.job_id,
+                &brief.unit_id,
+                Role::Research,
+                home,
+                3,
+            ),
+            Err(StoreError::Brief(BriefError::InvalidIdentifier(id))) if id == profile.as_str()
+        ));
     }
 
     #[test]

@@ -16,9 +16,12 @@ CORPUS = ROOT / "eval" / "corpus"
 CASE_FIELDS = {"schema_version", "id", "package", "test", "input", "expected"}
 REQUIRED_CASES = {
     "capability-boundaries",
+    "coder-containment",
     "exact-sha",
     "path-containment",
     "redaction",
+    "research-evidence",
+    "serial-pilot",
     "transition-policy",
 }
 IDENTIFIER = re.compile(r"[a-z][a-z0-9-]*\Z")

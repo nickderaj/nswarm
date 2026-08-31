@@ -28,6 +28,14 @@ rewriting the direct gym call sites would remove no resolved crate or duplicate.
 The gym slice's explicit stored-timestamp policy is documented in its crate
 README.
 
+Step 4 merged as `f4a40e07e226757f218c0aa45d992237c43a21e0` in PR #5. The
+Step 5 branch implements the research/coder policy bundles, typed evidence
+contracts, hostile-input evals and the one-live-coder scheduler gate. Live
+Hermes sessions and the first end-to-end serial pilot remain gated by D23/D24;
+the concurrency limit stays at one. See
+[`docs/STEP5_STATUS.md`](docs/STEP5_STATUS.md) for the exact implemented and
+deferred boundary.
+
 ## Tenancy
 
 Single-user operation is a product decision. A future web adapter will rely on

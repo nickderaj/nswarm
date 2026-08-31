@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "serial-pilot",
+  "package": "agent-control",
+  "test": "pilot::tests::eval_serial_pilot_corpus_enforces_single_writer",
+  "input": {
+    "scenarios": [
+      {"kind": "exact-replay", "expected_outcome": "identical-assignment"},
+      {"kind": "nested-writable-collapse", "expected_outcome": "one-path-lease"},
+      {"kind": "concurrent-coder-refused", "expected_outcome": "another-coder-active"},
+      {"kind": "unsafe-profile-root-refused", "expected_outcome": "invalid-profile-root"}
+    ]
+  },
+  "expected": {"single_writer_enforced": true}
+}
