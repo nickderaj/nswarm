@@ -12,7 +12,7 @@ use thiserror::Error;
 
 /// Identifies a front-end such as `telegram`, `web`, or `socket`.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(transparent)]
+#[serde(try_from = "String")]
 pub struct SurfaceId(String);
 
 impl SurfaceId {
@@ -38,6 +38,14 @@ impl SurfaceId {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for SurfaceId {
+    type Error = ValidationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
     }
 }
 
@@ -278,6 +286,24 @@ mod tests {
         request.conversation_id = "chat-1".to_owned();
         request.text = "  ".to_owned();
         assert_eq!(request.validate(), Err(ValidationError::EmptyText));
+    }
+
+    #[test]
+    fn deserialization_cannot_bypass_surface_validation() {
+        let surface: SurfaceId =
+            serde_json::from_str(r#""telegram-bot1""#).expect("valid surface deserializes");
+        assert_eq!(surface.as_str(), "telegram-bot1");
+        assert_eq!(
+            serde_json::to_string(&surface).expect("surface serializes transparently"),
+            r#""telegram-bot1""#
+        );
+
+        for invalid in [r#"""#, r#""Telegram""#, r#""bad_surface""#] {
+            assert!(
+                serde_json::from_str::<SurfaceId>(invalid).is_err(),
+                "invalid surface deserialized: {invalid}"
+            );
+        }
     }
 
     #[test]

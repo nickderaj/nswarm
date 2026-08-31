@@ -9,7 +9,7 @@ macro_rules! identifier {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
         #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-        #[serde(transparent)]
+        #[serde(try_from = "String")]
         pub struct $name(String);
 
         impl $name {
@@ -38,6 +38,14 @@ macro_rules! identifier {
             }
         }
 
+        impl TryFrom<String> for $name {
+            type Error = BriefError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
         impl Display for $name {
             fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str(&self.0)
@@ -59,7 +67,7 @@ identifier!(SessionId, "Stable identifier for one profile conversation.");
 
 /// Full Git object id used by verification and merge authorization.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(transparent)]
+#[serde(try_from = "String")]
 pub struct Sha(String);
 
 impl Sha {
@@ -84,6 +92,14 @@ impl Sha {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for Sha {
+    type Error = BriefError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
     }
 }
 
@@ -857,6 +873,27 @@ mod tests {
     #[test]
     fn abbreviated_sha_is_rejected() {
         assert!(Sha::new("abc123").is_err());
+    }
+
+    #[test]
+    fn deserialization_preserves_identifier_invariants() {
+        let job: JobId = serde_json::from_str(r#""job-1""#).expect("valid job id deserializes");
+        let sha: Sha = serde_json::from_str(&format!(r#""{}""#, "a".repeat(40)))
+            .expect("valid SHA deserializes");
+        assert_eq!(job.as_str(), "job-1");
+        assert_eq!(sha.as_str(), "a".repeat(40));
+        assert_eq!(
+            serde_json::to_string(&job).expect("job id serializes transparently"),
+            r#""job-1""#
+        );
+
+        for invalid in [r#"""#, r#""Job-1""#, r#""job_1""#] {
+            assert!(
+                serde_json::from_str::<JobId>(invalid).is_err(),
+                "invalid job id deserialized: {invalid}"
+            );
+        }
+        assert!(serde_json::from_str::<Sha>(r#""abc123""#).is_err());
     }
 
     #[test]
