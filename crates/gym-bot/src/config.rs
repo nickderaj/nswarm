@@ -30,16 +30,7 @@ impl GymConfig {
     ///
     /// Returns [`ConfigError`] for missing or invalid settings and storage.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let values = [
-            "GYM_DATA_DIR",
-            "NSWARM_MCP_SOCKET",
-            "NSWARM_MCP_SOCKET_GROUP",
-            "TIMEZONE",
-        ]
-        .into_iter()
-        .filter_map(|name| env::var(name).ok().map(|value| (name.to_owned(), value)))
-        .collect();
-        Self::from_values(&values)
+        Self::from_lookup(|name| env::var(name).ok())
     }
 
     /// Loads an explicit setting map for supervised adapters and tests.
@@ -76,17 +67,23 @@ impl GymConfig {
     }
 
     fn from_values(values: &HashMap<String, String>) -> Result<Self, ConfigError> {
-        let data = PathBuf::from(required(values, "GYM_DATA_DIR")?);
+        Self::from_lookup(|name| values.get(name).cloned())
+    }
+
+    fn from_lookup(
+        mut lookup: impl FnMut(&'static str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        let data = PathBuf::from(required(&mut lookup, "GYM_DATA_DIR")?);
         if !data.is_absolute() {
             return Err(ConfigError::DataRoot);
         }
         let database_path = data.join("gym.db");
         validate_existing(&database_path).map_err(ConfigError::Database)?;
-        let socket_path = PathBuf::from(required(values, "NSWARM_MCP_SOCKET")?);
+        let socket_path = PathBuf::from(required(&mut lookup, "NSWARM_MCP_SOCKET")?);
         if !socket_path.is_absolute() {
             return Err(ConfigError::SocketPath);
         }
-        let socket_group = required(values, "NSWARM_MCP_SOCKET_GROUP")?;
+        let socket_group = required(&mut lookup, "NSWARM_MCP_SOCKET_GROUP")?;
         if socket_group.len() > 64
             || !socket_group
                 .bytes()
@@ -98,19 +95,18 @@ impl GymConfig {
             database_path,
             socket_path,
             socket_group,
-            timezone: values
-                .get("TIMEZONE")
-                .cloned()
+            timezone: lookup("TIMEZONE")
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "Europe/London".to_owned()),
         })
     }
 }
 
-fn required(values: &HashMap<String, String>, name: &'static str) -> Result<String, ConfigError> {
-    values
-        .get(name)
-        .cloned()
+fn required(
+    lookup: &mut impl FnMut(&'static str) -> Option<String>,
+    name: &'static str,
+) -> Result<String, ConfigError> {
+    lookup(name)
         .filter(|value| !value.trim().is_empty())
         .ok_or(ConfigError::Missing(name))
 }
