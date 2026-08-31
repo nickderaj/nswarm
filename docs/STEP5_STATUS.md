@@ -71,6 +71,15 @@ Settlement requires a reviewed replacement for D23/section 6.3, followed by the
 ordered D24 measurements in [`HERMES_SPIKE.md`](HERMES_SPIKE.md). Only then can
 the research socket and one-coder runtime be wired to a selected Hermes route.
 
+The native-adapter follow-up evaluated the pinned native platform and relay
+paths. Native adapters reuse warm agents but are internal Python integration
+points that would make Hermes own Telegram and provide no synchronous `ask()`.
+The relay path also reuses warm agents but is explicitly experimental and
+depends on an external, unpinned connector contract. Neither is a reviewed D23
+replacement. The external requirement is an upstream-reviewed cached
+request-response API or a stable, independently pinned local connector contract;
+D24 remains blocked until one exists.
+
 ## Live completion sequence
 
 After D23/D24 settle, the Step 5 completion run is:

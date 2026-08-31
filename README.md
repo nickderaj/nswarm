@@ -17,7 +17,10 @@ Step 3 merged as `c8c1b69390f607be7f0ae895441b2141c74a3d93` in PR #3. The
 pinned Hermes `v2026.8.19` HTTP session route constructs a fresh `AIAgent` for
 every request, including repeated turns on one explicit session ID. D23 and
 section 6.3 must therefore be revisited before any `botkit` conversation code
-is written; D24 remains unevaluated and no fallback topology has been selected.
+is written. The native-adapter follow-up found warm reuse only behind internal
+platform-adapter APIs or the experimental external-connector relay contract, so
+no reviewed replacement is available. D24 remains unevaluated and no fallback
+topology has been selected.
 See [`docs/HERMES_SPIKE.md`](docs/HERMES_SPIKE.md) for the reproducible evidence
 and [`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md) for verified checkpoints and
 remaining gates.

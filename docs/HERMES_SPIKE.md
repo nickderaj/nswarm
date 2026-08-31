@@ -1,6 +1,7 @@
 # Hermes gateway architecture-gate report
 
-Status: D23 gate failed on 2026-08-30. D24 was not reached.
+Status: D23 gate failed on 2026-08-30. The native-adapter follow-up found no
+reviewable replacement in the pinned release on 2026-08-31. D24 was not reached.
 
 ## Pinned provenance
 
@@ -135,6 +136,39 @@ D23 is blocked: the HTTP shape must be changed or replaced before conversation
 code is written. Candidates for a new architectural decision include routing
 through Hermes's native cached gateway path or adding an upstream-reviewed
 HTTP agent-cache contract. This spike does not choose between them.
+
+## Native-adapter follow-up
+
+The pinned source was re-inspected for a route that keeps Hermes's native agent
+cache while preserving `botkit` as the transport owner. The executable source
+gate now pins and checks the relevant base-adapter and relay bytes. Its generated
+result is [`../spikes/hermes/evidence/native-adapter.json`](../spikes/hermes/evidence/native-adapter.json).
+
+| Candidate | Stable external contract | Warm agent | Required boundary | Result |
+| --- | --- | --- | --- | --- |
+| HTTP session API | yes | no | preserves `botkit` transport ownership | rejected by the original gate |
+| Native platform adapter | no; Python internals | yes | Hermes owns Telegram; no synchronous `ask()` | rejected |
+| Hermes Relay adapter | no; experimental | yes | needs an external connector and changing frame contract | rejected |
+
+`BasePlatformAdapter.handle_message()` enters the cached gateway path, but it is
+an internal Python method coupled to `MessageEvent`, `SessionSource`, runner
+handler injection and private adapter lifecycle. Building an nswarm adapter
+against it would turn internal upstream modules into an unreviewed API and would
+not satisfy section 6.6's rule to couple only to declared contracts.
+
+Relay is closer to the desired topology because a connector can own Telegram
+while Hermes keeps the warm agent. The pinned source nevertheless labels its
+adapter, transport and WebSocket protocol experimental, explicitly permits
+changes without a deprecation cycle, and points to a separate connector repo for
+the other half of the contract. Adopting it would replace one failed assumption
+with an unpinned service and unstable wire format.
+
+There is no D23 replacement to implement from the reviewed pin. Settlement now
+requires an upstream-reviewed cached request-response API, or a stable and
+independently pinned local connector contract that preserves plain-text
+request/response, explicit session identity, profile selection, streaming,
+interruption and synchronous `ask()` semantics. D24 remains blocked until that
+contract exists and is reviewed.
 
 Per the required measurement order, the following were not executed after the
 architecture gate failed:

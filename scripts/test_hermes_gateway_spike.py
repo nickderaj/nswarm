@@ -188,5 +188,40 @@ class EvidenceContractTests(unittest.TestCase):
         self.assertIn("Raspberry Pi latency", self.evidence["claims_excluded"])
 
 
+class NativeAdapterEvidenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.evidence = json.loads(
+            (
+                ROOT / "spikes" / "hermes" / "evidence" / "native-adapter.json"
+            ).read_text(encoding="utf-8")
+        )
+
+    def test_candidates_preserve_no_supported_d23_replacement(self) -> None:
+        candidates = self.evidence["d23_candidates"]
+        self.assertEqual(
+            set(candidates),
+            {"http_session_api", "native_platform_adapter", "relay_adapter"},
+        )
+        self.assertTrue(
+            all(item["result"] == "rejected" for item in candidates.values())
+        )
+        self.assertFalse(self.evidence["decision"]["d23_replacement_available"])
+
+    def test_native_and_relay_limits_are_explicit(self) -> None:
+        contract = self.evidence["architecture_contract"]
+        self.assertTrue(contract["native_gateway_agent_cache_present"])
+        self.assertTrue(contract["native_adapter_ingress_is_internal_python_api"])
+        self.assertTrue(contract["relay_transport_is_experimental"])
+        self.assertTrue(contract["relay_requires_external_connector_contract"])
+        self.assertFalse(contract["stable_external_cached_request_response_surface"])
+
+    def test_external_requirement_is_exact(self) -> None:
+        self.assertEqual(
+            self.evidence["decision"]["external_requirement"],
+            "an upstream-reviewed cached request-response API or stable local connector contract",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

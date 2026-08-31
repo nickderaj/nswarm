@@ -1,0 +1,65 @@
+{
+  "architecture_contract": {
+    "agent_memory_load_per_construction_when_enabled": true,
+    "agent_todo_state_per_construction": true,
+    "agent_tool_snapshot_per_construction": true,
+    "api_agent_cache_present": false,
+    "gateway_startup_mcp_discovery": {
+      "count": 1,
+      "executor_line": 30698
+    },
+    "native_adapter_ingress_is_internal_python_api": true,
+    "native_adapter_ingress_line": 6260,
+    "native_gateway_agent_cache_present": true,
+    "prompt_full_build_first_turn": true,
+    "prompt_restored_from_session_db_later_turns": true,
+    "relay_requires_external_connector_contract": true,
+    "relay_transport_is_experimental": true,
+    "run_agent_calls_create_agent": {
+      "count": 1,
+      "line": 6388
+    },
+    "session_chat_calls_run_agent": {
+      "count": 1,
+      "line": 3803
+    },
+    "stable_external_cached_request_response_surface": false,
+    "warm_agent_reuse_on_http_session_route": false
+  },
+  "d23_candidates": {
+    "http_session_api": {
+      "result": "rejected",
+      "stable_external_contract": true,
+      "warm_agent_reuse": false
+    },
+    "native_platform_adapter": {
+      "botkit_owns_telegram": false,
+      "result": "rejected",
+      "stable_external_contract": false,
+      "synchronous_ask_surface": false,
+      "warm_agent_reuse": true
+    },
+    "relay_adapter": {
+      "requires_external_connector": true,
+      "result": "rejected",
+      "stable_external_contract": false,
+      "warm_agent_reuse": true
+    }
+  },
+  "decision": {
+    "d23_replacement_available": false,
+    "external_requirement": "an upstream-reviewed cached request-response API or stable local connector contract",
+    "reason": "the pinned release exposes no stable external surface that preserves both warm agent reuse and botkit-owned transports"
+  },
+  "pin": {
+    "commit_sha": "fcbd1076a93841fa88855acce810e342a5b78101",
+    "package": "hermes-agent",
+    "package_version": "0.20.5",
+    "plan_source_commit_prefix": "68518c1",
+    "python_requires": ">=3.11,<3.14",
+    "repository": "https://github.com/NousResearch/hermes-agent.git",
+    "tag": "v2026.8.19",
+    "tag_object_sha": "b05e680e63d39d5a8e3ec0f5842a41d1c4209c03"
+  },
+  "schema_version": 1
+}
