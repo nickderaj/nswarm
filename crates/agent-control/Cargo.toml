@@ -13,6 +13,7 @@ keywords = ["agents", "audit", "sqlite"]
 categories = ["database-implementations"]
 
 [dependencies]
+chrono.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

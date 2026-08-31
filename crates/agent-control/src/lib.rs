@@ -1,3 +1,4 @@
+#![allow(clippy::multiple_crate_versions)]
 //! Enforced control plane for research and coding agent jobs.
 
 mod coder;
@@ -18,7 +19,8 @@ pub use provisioner::{
     WorktreeProvisioner, WorktreeRequest,
 };
 pub use research::{
-    ClaimConfidence, ClaimKind, ResearchClaim, ResearchReport, ResearchReportError, SourceAudit,
+    ClaimConfidence, ClaimKind, CriticAttestation, ResearchClaim, ResearchReport,
+    ResearchReportError, SourceAudit,
 };
 pub use store::{
     ControlStore, FindingDisposition, ReviewAssessment, StoreError, VerificationVerdict,

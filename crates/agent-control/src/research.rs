@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -112,6 +113,12 @@ impl ResearchClaim {
         if !is_rfc3339(&self.observed_at) {
             return Err(ResearchReportError::InvalidObservationTime);
         }
+        if !is_immutable_revision(&self.revision) {
+            return Err(ResearchReportError::MutableRevision);
+        }
+        if !is_tight_location(&self.location) {
+            return Err(ResearchReportError::ImpreciseLocation);
+        }
         if self.limitations.is_empty()
             || self
                 .limitations
@@ -150,90 +157,54 @@ impl ResearchClaim {
             ClaimKind::Direct if self.confidence == ClaimConfidence::None => {
                 Err(ResearchReportError::DirectClaimHasNoConfidence)
             }
+            ClaimKind::Inferred | ClaimKind::Contradicted
+                if self.confidence == ClaimConfidence::None =>
+            {
+                Err(ResearchReportError::SupportedClaimHasNoConfidence)
+            }
             _ => Ok(()),
         }
     }
 }
 
 fn is_rfc3339(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() < 20 || !bytes.is_ascii() {
-        return false;
-    }
-    let digits = |range: std::ops::Range<usize>| {
-        bytes
-            .get(range)
-            .is_some_and(|part| part.iter().all(u8::is_ascii_digit))
-    };
-    if !digits(0..4)
-        || bytes[4] != b'-'
-        || !digits(5..7)
-        || bytes[7] != b'-'
-        || !digits(8..10)
-        || bytes[10] != b'T'
-        || !digits(11..13)
-        || bytes[13] != b':'
-        || !digits(14..16)
-        || bytes[16] != b':'
-        || !digits(17..19)
-    {
-        return false;
-    }
+    DateTime::parse_from_rfc3339(value).is_ok()
+        && value.as_bytes().get(10) == Some(&b'T')
+        && !value.starts_with("0000-")
+}
 
-    let parse = |range: std::ops::Range<usize>| {
-        std::str::from_utf8(&bytes[range])
-            .ok()
-            .and_then(|part| part.parse::<u32>().ok())
-    };
-    let Some((year, month, day, hour, minute, second)) = parse(0..4)
-        .zip(parse(5..7))
-        .zip(parse(8..10))
-        .zip(parse(11..13))
-        .zip(parse(14..16))
-        .zip(parse(17..19))
-        .map(|(((((year, month), day), hour), minute), second)| {
-            (year, month, day, hour, minute, second)
-        })
-    else {
-        return false;
-    };
-    let leap_year =
-        year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
-    let max_day = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap_year => 29,
-        2 => 28,
-        _ => return false,
-    };
-    if year == 0 || day == 0 || day > max_day || hour > 23 || minute > 59 || second > 59 {
-        return false;
-    }
+fn is_immutable_revision(value: &str) -> bool {
+    let value = value.trim();
+    (value.len() == 40 || value.len() == 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
 
-    let mut zone_start = 19;
-    if bytes.get(zone_start) == Some(&b'.') {
-        zone_start += 1;
-        let fraction_start = zone_start;
-        while bytes.get(zone_start).is_some_and(u8::is_ascii_digit) {
-            zone_start += 1;
-        }
-        if zone_start == fraction_start {
-            return false;
-        }
-    }
-    match &bytes[zone_start..] {
-        [b'Z'] => true,
-        [sign @ (b'+' | b'-'), h1, h2, b':', m1, m2] => {
-            let _ = sign;
-            h1.is_ascii_digit()
-                && h2.is_ascii_digit()
-                && m1.is_ascii_digit()
-                && m2.is_ascii_digit()
-                && (u32::from(h1 - b'0') * 10 + u32::from(h2 - b'0')) <= 23
-                && (u32::from(m1 - b'0') * 10 + u32::from(m2 - b'0')) <= 59
-        }
-        _ => false,
-    }
+fn is_tight_location(value: &str) -> bool {
+    let value = value.trim();
+    value.starts_with("https://")
+        || (value.contains('/')
+            && value.rsplit_once(':').is_some_and(|(_, anchor)| {
+                !anchor.is_empty()
+                    && (anchor
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || byte == b'-')
+                        || anchor.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+                        }))
+            }))
+}
+
+/// Independent read-only critic result over the normalized claims.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CriticAttestation {
+    /// Profile or session identity distinct from the research worker.
+    pub critic_id: String,
+    /// Whether normalized claims, links, and secret safety passed review.
+    pub passed: bool,
+    /// SHA-256 digest of the normalized claim manifest reviewed by the critic.
+    pub claims_digest: String,
+    /// Explicit critic findings; use `"none"` only when no finding remains.
+    pub findings: Vec<String>,
 }
 
 /// Complete machine-readable output of one read-only investigation.
@@ -250,6 +221,8 @@ pub struct ResearchReport {
     pub claims: Vec<ResearchClaim>,
     /// Disposition of every source class required by the brief.
     pub sources: SourceAudit,
+    /// Independent read-only review of normalized claims and references.
+    pub critic: CriticAttestation,
     /// Report-level caveats and exact follow-up actions.
     pub limitations: Vec<String>,
 }
@@ -284,6 +257,23 @@ impl ResearchReport {
                 .any(|limitation| limitation.trim().is_empty())
         {
             return Err(ResearchReportError::InvalidLimitations);
+        }
+        if self.critic.critic_id.trim().is_empty()
+            || !self.critic.passed
+            || self.critic.claims_digest.len() != 64
+            || !self
+                .critic
+                .claims_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || self.critic.findings.is_empty()
+            || self
+                .critic
+                .findings
+                .iter()
+                .any(|finding| finding.trim().is_empty())
+        {
+            return Err(ResearchReportError::InvalidCriticAttestation);
         }
         self.sources.validate()?;
         for claim in &self.claims {
@@ -338,6 +328,12 @@ pub enum ResearchReportError {
     /// Observation times must be machine-comparable and include an offset.
     #[error("research claim observation time must be RFC 3339 with an explicit offset")]
     InvalidObservationTime,
+    /// Evidence revisions must be immutable hexadecimal identifiers.
+    #[error("research claim revision must be a full immutable digest")]
+    MutableRevision,
+    /// Evidence locations must be permalinks or paths with a symbol/line anchor.
+    #[error("research claim location must be a permalink or tightly anchored path")]
+    ImpreciseLocation,
     /// Claims and reports must state their limitations explicitly.
     #[error("research limitations must contain non-blank entries")]
     InvalidLimitations,
@@ -353,6 +349,12 @@ pub enum ResearchReportError {
     /// A direct claim must carry a real confidence assessment.
     #[error("direct claims cannot use confidence none")]
     DirectClaimHasNoConfidence,
+    /// Inferred and contradicted claims still require calibrated confidence.
+    #[error("supported claims cannot use confidence none")]
+    SupportedClaimHasNoConfidence,
+    /// A report requires a successful independent critic attestation.
+    #[error("research critic attestation is incomplete or unsuccessful")]
+    InvalidCriticAttestation,
     /// Research output cannot be replayed under another immutable goal.
     #[error("research report question differs from brief goal")]
     QuestionMismatch,
@@ -365,7 +367,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ClaimConfidence, ClaimKind, ResearchClaim, ResearchReport, ResearchReportError, SourceAudit,
+        ClaimConfidence, ClaimKind, CriticAttestation, ResearchClaim, ResearchReport,
+        ResearchReportError, SourceAudit,
     };
     use crate::{
         JobBrief, JobId, NetworkMode, NetworkPolicy, PathPolicy, ResourceLimits, RiskClass, Sha,
@@ -436,6 +439,12 @@ mod tests {
                 empty: vec!["issues".to_owned()],
                 unavailable: vec!["observability".to_owned()],
                 skipped: vec!["analytics".to_owned()],
+            },
+            critic: CriticAttestation {
+                critic_id: "critic-research-unit".to_owned(),
+                passed: true,
+                claims_digest: "b".repeat(64),
+                findings: vec!["none".to_owned()],
             },
             limitations: vec!["No production access was granted.".to_owned()],
         }
@@ -519,6 +528,20 @@ mod tests {
         );
 
         let mut invalid = report();
+        invalid.claims[0].revision = "latest".to_owned();
+        assert_eq!(
+            invalid.validate(),
+            Err(ResearchReportError::MutableRevision)
+        );
+
+        let mut invalid = report();
+        invalid.claims[0].location = "the parser".to_owned();
+        assert_eq!(
+            invalid.validate(),
+            Err(ResearchReportError::ImpreciseLocation)
+        );
+
+        let mut invalid = report();
         invalid.claims[0].observed_at = "2026-08-31 08:00:00".to_owned();
         assert_eq!(
             invalid.validate(),
@@ -531,7 +554,6 @@ mod tests {
             "2026-13-01T00:00:00Z",
             "2026-08-31T24:00:00Z",
             "2026-08-31T08:60:00Z",
-            "2026-08-31T08:00:60Z",
             "2026-08-31T08:00:00.",
             "2026-08-31T08:00:00+24:00",
             "2026-08-31T08:00:00+00:60",
@@ -550,12 +572,61 @@ mod tests {
         offset.claims[0].observed_at = "2024-02-29T08:00:00.123+01:30".to_owned();
         assert_eq!(offset.validate(), Ok(()));
 
+        let mut leap_second = report();
+        leap_second.claims[0].observed_at = "1990-12-31T23:59:60Z".to_owned();
+        assert_eq!(leap_second.validate(), Ok(()));
+
         let mut invalid = report();
         invalid.limitations.clear();
         assert_eq!(
             invalid.validate(),
             Err(ResearchReportError::InvalidLimitations)
         );
+
+        let mut invalid = report();
+        invalid.critic.passed = false;
+        assert_eq!(
+            invalid.validate(),
+            Err(ResearchReportError::InvalidCriticAttestation)
+        );
+    }
+
+    #[test]
+    fn report_shape_and_confidence_branches_fail_closed() {
+        let mut invalid = report();
+        invalid.schema_version = 2;
+        assert_eq!(
+            invalid.validate(),
+            Err(ResearchReportError::UnsupportedSchemaVersion(2))
+        );
+
+        let mut invalid = report();
+        invalid.done_predicate.clear();
+        assert_eq!(
+            invalid.validate(),
+            Err(ResearchReportError::BlankDonePredicate)
+        );
+
+        let mut invalid = report();
+        invalid.claims.clear();
+        assert_eq!(invalid.validate(), Err(ResearchReportError::NoClaims));
+
+        let mut invalid = report();
+        invalid.limitations[0].clear();
+        assert_eq!(
+            invalid.validate(),
+            Err(ResearchReportError::InvalidLimitations)
+        );
+
+        for kind in [ClaimKind::Inferred, ClaimKind::Contradicted] {
+            let mut invalid = report();
+            invalid.claims[0].kind = kind;
+            invalid.claims[0].confidence = ClaimConfidence::None;
+            assert_eq!(
+                invalid.validate(),
+                Err(ResearchReportError::SupportedClaimHasNoConfidence)
+            );
+        }
     }
 
     #[test]
