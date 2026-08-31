@@ -187,12 +187,9 @@ fn is_tight_location(value: &str) -> bool {
         || (value.contains('/')
             && value.rsplit_once(':').is_some_and(|(_, anchor)| {
                 !anchor.is_empty()
-                    && (anchor
+                    && anchor
                         .bytes()
-                        .all(|byte| byte.is_ascii_digit() || byte == b'-')
-                        || anchor.bytes().all(|byte| {
-                            byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
-                        }))
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
             }))
 }
 
@@ -503,6 +500,18 @@ mod tests {
         );
         unknown.claims[0].confidence = ClaimConfidence::None;
         assert_eq!(unknown.validate(), Ok(()));
+
+        let mut direct = report();
+        direct.claims[0].confidence = ClaimConfidence::None;
+        assert_eq!(
+            direct.validate(),
+            Err(ResearchReportError::DirectClaimHasNoConfidence)
+        );
+
+        let mut inferred = report();
+        inferred.claims[0].kind = ClaimKind::Inferred;
+        inferred.claims[0].confidence = ClaimConfidence::Low;
+        assert_eq!(inferred.validate(), Ok(()));
     }
 
     #[test]
@@ -530,27 +539,18 @@ mod tests {
         );
 
         let mut invalid = report();
-        invalid.claims[0].revision = "latest".to_owned();
+        invalid.claims[0].limitations.clear();
         assert_eq!(
             invalid.validate(),
-            Err(ResearchReportError::MutableRevision)
+            Err(ResearchReportError::InvalidLimitations)
         );
 
         let mut invalid = report();
-        invalid.claims[0].location = "the parser".to_owned();
+        invalid.claims[0].limitations[0].clear();
         assert_eq!(
             invalid.validate(),
-            Err(ResearchReportError::ImpreciseLocation)
+            Err(ResearchReportError::InvalidLimitations)
         );
-
-        for location in ["https://example.com", "https://example.com/main"] {
-            let mut invalid = report();
-            invalid.claims[0].location = location.to_owned();
-            assert_eq!(
-                invalid.validate(),
-                Err(ResearchReportError::ImpreciseLocation)
-            );
-        }
 
         let mut invalid = report();
         invalid.claims[0].observed_at = "2026-08-31 08:00:00".to_owned();
@@ -612,6 +612,54 @@ mod tests {
                 invalid.validate(),
                 Err(ResearchReportError::InvalidCriticAttestation)
             );
+        }
+    }
+
+    #[test]
+    fn revisions_and_locations_have_exact_boundaries() {
+        let mut invalid = report();
+        invalid.claims[0].revision = "latest".to_owned();
+        assert_eq!(
+            invalid.validate(),
+            Err(ResearchReportError::MutableRevision)
+        );
+
+        let mut digest_revision = report();
+        digest_revision.claims[0].revision = "b".repeat(64);
+        assert_eq!(digest_revision.validate(), Ok(()));
+
+        for revision in ["b".repeat(39), "b".repeat(41), "b".repeat(63)] {
+            let mut invalid = report();
+            invalid.claims[0].revision = revision;
+            assert_eq!(
+                invalid.validate(),
+                Err(ResearchReportError::MutableRevision)
+            );
+        }
+
+        for location in [
+            "the parser",
+            "https://example.com",
+            "https://example.com/main",
+        ] {
+            let mut invalid = report();
+            invalid.claims[0].location = location.to_owned();
+            assert_eq!(
+                invalid.validate(),
+                Err(ResearchReportError::ImpreciseLocation)
+            );
+        }
+
+        for location in [
+            "https://example.com/repository/blob/aaaaaaaa/file.rs",
+            "https://example.com/document#section",
+            "crates/example/src/lib.rs:parse_value",
+            "crates/example/src/lib.rs:parse-value",
+            "crates/example/src/lib.rs:10-20",
+        ] {
+            let mut valid = report();
+            valid.claims[0].location = location.to_owned();
+            assert_eq!(valid.validate(), Ok(()), "{location} must pass");
         }
     }
 
