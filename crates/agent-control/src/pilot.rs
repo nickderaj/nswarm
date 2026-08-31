@@ -310,4 +310,81 @@ mod tests {
             Err(StoreError::UnknownUnit(_))
         ));
     }
+
+    #[test]
+    fn eval_serial_pilot_corpus_enforces_single_writer() {
+        let case: serde_json::Value =
+            serde_json::from_str(include_str!("../../../eval/corpus/serial-pilot.json"))
+                .expect("serial pilot corpus parses");
+        let scenarios = case["input"]["scenarios"]
+            .as_array()
+            .expect("scenarios are an array");
+        assert_eq!(
+            scenarios.len() as u64,
+            case["expected"]["scenario_count"]
+                .as_u64()
+                .expect("expected scenario count")
+        );
+        for scenario in scenarios {
+            let scenario = scenario.as_str().expect("scenario is text");
+            let mut store = ControlStore::open_in_memory().expect("store opens");
+            let first_brief = brief("eval-pilot-one", "eval-unit-one");
+            match scenario {
+                "exact-replay" | "nested-writable-collapse" => {
+                    let first = SerialCoderPilot::prepare(
+                        &mut store,
+                        &first_brief,
+                        Path::new("/tmp/nswarm-eval-pilot"),
+                        100,
+                        1,
+                    )
+                    .expect("pilot prepared");
+                    if scenario == "exact-replay" {
+                        let replayed = SerialCoderPilot::prepare(
+                            &mut store,
+                            &first_brief,
+                            Path::new("/tmp/nswarm-eval-pilot"),
+                            100,
+                            2,
+                        )
+                        .expect("pilot replayed");
+                        assert_eq!(first, replayed);
+                    } else {
+                        assert_eq!(first.leases.paths.len(), 1);
+                    }
+                }
+                "concurrent-coder-refused" => {
+                    SerialCoderPilot::prepare(
+                        &mut store,
+                        &first_brief,
+                        Path::new("/tmp/nswarm-eval-pilot"),
+                        100,
+                        1,
+                    )
+                    .expect("first pilot prepared");
+                    assert!(matches!(
+                        SerialCoderPilot::prepare(
+                            &mut store,
+                            &brief("eval-pilot-two", "eval-unit-two"),
+                            Path::new("/tmp/nswarm-eval-pilot"),
+                            100,
+                            2,
+                        ),
+                        Err(PilotError::AnotherCoderActive(_))
+                    ));
+                }
+                "unsafe-profile-root-refused" => assert!(matches!(
+                    SerialCoderPilot::prepare(
+                        &mut store,
+                        &first_brief,
+                        Path::new("relative/eval-pilot"),
+                        100,
+                        1,
+                    ),
+                    Err(PilotError::InvalidProfileRoot(_))
+                )),
+                _ => panic!("unknown serial pilot scenario: {scenario}"),
+            }
+        }
+    }
 }

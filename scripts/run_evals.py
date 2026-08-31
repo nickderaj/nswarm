@@ -21,6 +21,7 @@ REQUIRED_CASES = {
     "path-containment",
     "redaction",
     "research-evidence",
+    "serial-pilot",
     "transition-policy",
 }
 IDENTIFIER = re.compile(r"[a-z][a-z0-9-]*\Z")

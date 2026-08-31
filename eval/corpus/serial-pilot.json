@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "serial-pilot",
+  "package": "agent-control",
+  "test": "pilot::tests::eval_serial_pilot_corpus_enforces_single_writer",
+  "input": {
+    "scenarios": [
+      "exact-replay",
+      "nested-writable-collapse",
+      "concurrent-coder-refused",
+      "unsafe-profile-root-refused"
+    ]
+  },
+  "expected": {"scenario_count": 4}
+}
