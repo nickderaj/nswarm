@@ -10,7 +10,7 @@ boundary is recorded in [`STEP5_STATUS.md`](STEP5_STATUS.md).
 The branch implements schema-closed research evidence with a reserved critic
 attestation field, exact-SHA coder handoffs bound to live path leases, transactional
 typed persistence, replay-safe provisioning, fixed independent control roles,
-and a scheduler that refuses a second live coder. Full `just ci` passes with
+and a deterministic adapter that rejects a second sequential coder. Full `just ci` passes with
 251 files policy-scanned, 3 profiles validated, 8 production-backed eval cases,
 210 nextest tests, doctests, rustdoc, dependency checks, and 196 semver checks
 per crate. Strict coverage passes at 1,274/1,296 changed executable lines
@@ -23,6 +23,10 @@ research or coder pilot, ask surface, fallback topology, or concurrency above
 one is claimed. Deterministic startup and containment tests do not satisfy the
 live serial-pilot gate. This PR was produced through the ordinary maintainer
 workflow, and coder concurrency remains one.
+
+The deterministic adapter does not yet prove atomic multi-process admission or
+rollback after partial startup. Those runtime properties remain gated with the
+live pilot after D23/D24 settle.
 
 The frozen `ultron` checkout remained read-only. No credentials, private
 databases, transcripts, production state, or private paths were accessed.

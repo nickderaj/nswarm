@@ -24,9 +24,9 @@ claimed.
   live profile, lease and role before the ordinary brief-schema evidence gate;
 - replay-safe job, profile and active-lease creation, rejecting any retry that
   changes immutable scope;
-- a serial scheduler adapter that derives unique fixed-role profiles, grants
-  only the coder profile and minimal writable path roots, enters `grounding`,
-  and refuses to prepare a different coder while any coder profile is live;
+- a deterministic serial-pilot adapter that derives unique fixed-role profiles,
+  grants only the coder profile and minimal writable path roots, enters
+  `grounding`, and rejects a second coder in sequential startup tests;
 - production-backed named eval cases for hostile research evidence, coder path,
   branch, command, artifact and policy containment, and serial-startup recovery.
 
@@ -44,6 +44,11 @@ only after one real coding unit traverses the complete brief → worker → veri
 → two reviews → integration → protected CI sequence and the ephemeral profile,
 worktree, identity, credentials and writable state are destroyed after the
 audited handoff.
+
+The adapter is not represented as an atomic multi-process scheduler. Concurrent
+admission, rollback after injected partial-start failures, and normal teardown
+recovery remain part of the live runtime gate after D23/D24 select a process and
+session topology.
 
 The current PR was produced through the ordinary maintainer workflow. It is not
 represented as output from that live coder pilot.
