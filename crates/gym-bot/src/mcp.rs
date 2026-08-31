@@ -119,11 +119,11 @@ fn validate_metric(metric: &str) -> Result<String, McpQueryError> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedBodyMetricsArgs {
     /// Optional exact metric filter.
-    metric: Option<String>,
+    pub metric: Option<String>,
     /// Validated inclusive lookback.
-    days: u16,
+    pub days: u16,
     /// Validated row cap.
-    limit: u16,
+    pub limit: u16,
 }
 
 impl ValidatedBodyMetricsArgs {

@@ -198,7 +198,7 @@ fn format_v0_general(value: f64) -> String {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeightCommand {
     /// Positive, finite weight in kilograms.
-    kilograms: f64,
+    pub kilograms: f64,
 }
 
 impl WeightCommand {
