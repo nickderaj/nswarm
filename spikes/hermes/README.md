@@ -37,7 +37,7 @@ No profile state, credentials, transcripts, caches, or owner-specific paths are
 stored here. Runtime measurements and their limitations are recorded separately
 after the source gate passes.
 
-The committed result is `evidence/http-reuse.json`. It confirms that every
+The HTTP result is `evidence/http-reuse.json`. It confirms that every
 request, including all repeated calls to the same session ID, invokes the agent
 factory and receives a distinct agent instance. The session transcript and
 system prompt can be restored from SQLite, and MCP discovery is process-wide,
@@ -45,3 +45,12 @@ but the `AIAgent`, memory load, tool snapshot and in-memory session state are
 reconstructed. This fails the D23 architecture gate, so the multiplexing/Pi,
 credential-isolation, socket-ACL and prompt-size phases are intentionally not
 executed until §6.3 is revisited.
+
+The native-adapter follow-up is `evidence/native-adapter.json`. Native messaging
+reuses cached agents, but only behind first-class platform adapters and private
+Python ingress methods. That would move Telegram out of `botkit` and does not
+provide synchronous `ask()`. Hermes Relay retains native cache reuse while
+separating transport ownership, but its protocol is explicitly experimental and
+requires a connector outside the reviewed pin. Neither path is a reviewed D23
+local-agent-cache replacement. The stable HTTP transport remains a candidate;
+provider-side prefix-cache behavior and cost are the next unmeasured D23 gate.

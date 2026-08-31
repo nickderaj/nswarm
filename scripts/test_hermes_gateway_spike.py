@@ -35,6 +35,10 @@ class PinTests(unittest.TestCase):
                 "agent/agent_init.py",
                 "agent/conversation_loop.py",
                 "gateway/platforms/api_server.py",
+                "gateway/platforms/base.py",
+                "gateway/relay/adapter.py",
+                "gateway/relay/transport.py",
+                "gateway/relay/ws_transport.py",
                 "gateway/run.py",
                 "pyproject.toml",
                 "tools/mcp_tool.py",
@@ -182,6 +186,50 @@ class EvidenceContractTests(unittest.TestCase):
             self.evidence["provider_boundary"], "deterministic_local_fake"
         )
         self.assertIn("Raspberry Pi latency", self.evidence["claims_excluded"])
+
+
+class NativeAdapterEvidenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.evidence = json.loads(
+            (
+                ROOT / "spikes" / "hermes" / "evidence" / "native-adapter.json"
+            ).read_text(encoding="utf-8")
+        )
+
+    def test_candidate_decisions_are_internally_consistent(self) -> None:
+        candidates = self.evidence["d23_candidates"]
+        self.assertEqual(
+            set(candidates),
+            {"http_session_api", "native_platform_adapter", "relay_adapter"},
+        )
+        self.assertEqual(
+            candidates["http_session_api"]["result"],
+            "pending_provider_cache_measurement",
+        )
+        self.assertTrue(
+            all(
+                item["result"] != "accepted"
+                for item in candidates.values()
+                if not item["stable_external_contract"]
+            )
+        )
+        self.assertFalse(self.evidence["decision"]["d23_settled"])
+
+    def test_native_and_relay_limits_are_explicit(self) -> None:
+        contract = self.evidence["architecture_contract"]
+        self.assertTrue(contract["native_gateway_agent_cache_present"])
+        self.assertTrue(contract["native_adapter_ingress_is_internal_python_api"])
+        self.assertIsInstance(contract["native_adapter_ingress_line"], int)
+        self.assertGreater(contract["native_adapter_ingress_line"], 0)
+        self.assertTrue(contract["relay_transport_is_experimental"])
+        self.assertTrue(contract["relay_requires_external_connector_contract"])
+        self.assertFalse(contract["stable_external_cached_request_response_surface"])
+
+    def test_http_provider_cache_measurement_remains_open(self) -> None:
+        http = self.evidence["d23_candidates"]["http_session_api"]
+        self.assertTrue(http["stable_external_contract"])
+        self.assertFalse(http["provider_prefix_cache_measured"])
 
 
 if __name__ == "__main__":

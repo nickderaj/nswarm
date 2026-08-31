@@ -117,6 +117,14 @@ def references_name(node: ast.AST, name: str) -> list[int]:
     )
 
 
+def string_literals(tree: ast.AST) -> set[str]:
+    return {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+
 def verify_git_identity(source: Path, pin: dict[str, Any]) -> tuple[str, str, str]:
     """Verify the pinned commit, tag name, and annotated tag object."""
     head = git_output(source, "rev-parse", "HEAD")
@@ -179,6 +187,62 @@ def verify_source(source: Path, pin: dict[str, Any]) -> dict[str, Any]:
     if len(mcp_discovery_references) != 1 or "self._agent_cache" not in gateway_text:
         raise SpikeError("native gateway warm-cache/MCP startup contract differs")
 
+    base_path = source / "gateway" / "platforms" / "base.py"
+    base_tree = ast.parse(base_path.read_text(encoding="utf-8"), filename=str(base_path))
+    handle_message = class_method(base_tree, "BasePlatformAdapter", "handle_message")
+    native_ingress_calls = calls_attribute(
+        handle_message, "self", "_start_session_processing"
+    )
+    if len(native_ingress_calls) != 1:
+        raise SpikeError("native adapter ingress contract differs")
+
+    relay_files = [
+        source / "gateway" / "relay" / name
+        for name in ("adapter.py", "transport.py", "ws_transport.py")
+    ]
+    relay_transport_path = source / "gateway" / "relay" / "transport.py"
+    relay_literals = set().union(
+        *(string_literals(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))) for path in relay_files)
+    )
+    experimental_markers = {
+        literal for literal in relay_literals if "EXPERIMENTAL" in literal
+    }
+    if len(experimental_markers) < 3 or not any(
+        "may change without a deprecation cycle" in marker
+        for marker in experimental_markers
+    ):
+        raise SpikeError("relay stability warning differs")
+    relay_transport = ast.parse(
+        relay_transport_path.read_text(encoding="utf-8"),
+        filename=str(relay_transport_path),
+    )
+    relay_protocol = next(
+        (
+            node
+            for node in relay_transport.body
+            if isinstance(node, ast.ClassDef) and node.name == "RelayTransport"
+        ),
+        None,
+    )
+    if relay_protocol is None:
+        raise SpikeError("relay transport protocol is missing")
+    relay_methods = {
+        node.name
+        for node in relay_protocol.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    required_relay_methods = {
+        "connect",
+        "disconnect",
+        "handshake",
+        "set_inbound_handler",
+        "send_outbound",
+        "get_chat_info",
+        "send_interrupt",
+    }
+    if not required_relay_methods.issubset(relay_methods):
+        raise SpikeError("relay transport surface differs")
+
     init_path = source / "agent" / "agent_init.py"
     init_text = init_path.read_text(encoding="utf-8")
     for anchor in (
@@ -227,6 +291,38 @@ def verify_source(source: Path, pin: dict[str, Any]) -> dict[str, Any]:
             "prompt_full_build_first_turn": True,
             "prompt_restored_from_session_db_later_turns": True,
             "warm_agent_reuse_on_http_session_route": False,
+            "native_adapter_ingress_is_internal_python_api": True,
+            "native_adapter_ingress_line": native_ingress_calls[0],
+            "relay_transport_is_experimental": True,
+            "relay_requires_external_connector_contract": True,
+            "stable_external_cached_request_response_surface": False,
+        },
+        "d23_candidates": {
+            "http_session_api": {
+                "stable_external_contract": True,
+                "warm_agent_reuse": False,
+                "provider_prefix_cache_measured": False,
+                "result": "pending_provider_cache_measurement",
+            },
+            "native_platform_adapter": {
+                "stable_external_contract": False,
+                "warm_agent_reuse": True,
+                "botkit_owns_telegram": False,
+                "synchronous_ask_surface": False,
+                "result": "rejected",
+            },
+            "relay_adapter": {
+                "stable_external_contract": False,
+                "warm_agent_reuse": True,
+                "requires_external_connector": True,
+                "result": "rejected",
+            },
+        },
+        "decision": {
+            "local_warm_agent_replacement_available": False,
+            "d23_settled": False,
+            "reason": "native and relay paths provide no stable external local-agent-cache contract preserving botkit-owned transports",
+            "next_measurement": "provider-side byte-prefix cache behavior and cost on repeated HTTP session turns",
         },
     }
 

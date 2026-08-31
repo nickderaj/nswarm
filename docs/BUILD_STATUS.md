@@ -1,5 +1,23 @@
 # nswarm v1 build status
 
+## Checkpoint AB - D23 native-adapter architecture gate
+
+Updated: 2026-08-31. The pinned Hermes native messaging path reuses cached
+agents, but exposes no stable external request-response contract that also
+preserves `botkit` ownership of Telegram and synchronous `ask()` semantics. A
+custom adapter would bind nswarm to private Python ingress and lifecycle APIs.
+Hermes Relay is closer to the required split, but the pinned adapter, transport
+and frame protocol are explicitly experimental and require a separate connector
+contract outside the reviewed pin.
+
+The source verifier now pins those relevant files and emits the three-candidate
+decision in `spikes/hermes/evidence/native-adapter.json`. No D23 replacement,
+Hermes session, model call, D24 measurement, fallback topology, live pilot,
+deployment or concurrency increase is claimed. The stable HTTP transport remains
+a candidate; provider-side byte-prefix cache behavior and cost on repeated turns
+are the next D23 measurement. A deterministic fake cannot establish that result.
+Coder concurrency remains one.
+
 ## Checkpoint AA - Step 5 research and serial-coder boundary
 
 Updated: 2026-08-31. Active branch:

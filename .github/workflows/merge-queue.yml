@@ -73,9 +73,13 @@ jobs:
       - name: Build mutation diff
         run: git diff --no-ext-diff origin/main...HEAD > /tmp/mutation.diff
       - name: Mutate changed code
-        run: cargo mutants --workspace --in-diff /tmp/mutation.diff --jobs 4
+        run: |
+          cargo mutants --workspace --in-diff /tmp/mutation.diff --jobs 4
+          if [[ ! -d mutants.out ]]; then
+            echo "No mutable Rust in diff"
+          fi
       - name: Upload mutation report
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && hashFiles('mutants.out/**') != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: merge-mutation-${{ github.sha }}
@@ -97,4 +101,6 @@ jobs:
           python3 -m unittest scripts/test_gym_sqlite_copy.py
           python3 -m unittest scripts/test_gym_socket_contract.py
           ./scripts/run_gym_parity.sh
+      - name: Hermes evidence integrity
+        run: python3 -m unittest scripts/test_hermes_gateway_spike.py
       - run: cargo test --workspace --all-features --locked
