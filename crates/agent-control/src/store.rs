@@ -11,6 +11,16 @@ use crate::{
 };
 
 const SCHEMA_VERSION: i64 = 9;
+const MIGRATIONS: [(i64, &str); 8] = [
+    (2, MIGRATION_2),
+    (3, MIGRATION_3),
+    (4, MIGRATION_4),
+    (5, MIGRATION_5),
+    (6, MIGRATION_6),
+    (7, MIGRATION_7),
+    (8, MIGRATION_8),
+    (9, MIGRATION_9),
+];
 
 /// Reviewer assessment recorded against one exact candidate SHA.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,7 +114,7 @@ impl ControlStore {
         let version = self
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > SCHEMA_VERSION {
+        if !(0..=SCHEMA_VERSION).contains(&version) {
             return Err(StoreError::UnsupportedSchema(version));
         }
         let mut version = version;
@@ -117,76 +127,17 @@ impl ControlStore {
             transaction.commit()?;
             version = 1;
         }
-        if version == 1 {
+        for (target_version, migration) in MIGRATIONS {
+            if version >= target_version {
+                continue;
+            }
             let transaction = self
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute_batch(MIGRATION_2)?;
-            transaction.pragma_update(None, "user_version", 2_i64)?;
+            transaction.execute_batch(migration)?;
+            transaction.pragma_update(None, "user_version", target_version)?;
             transaction.commit()?;
-            version = 2;
-        }
-        if version == 2 {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute_batch(MIGRATION_3)?;
-            transaction.pragma_update(None, "user_version", 3_i64)?;
-            transaction.commit()?;
-            version = 3;
-        }
-        if version == 3 {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute_batch(MIGRATION_4)?;
-            transaction.pragma_update(None, "user_version", 4_i64)?;
-            transaction.commit()?;
-            version = 4;
-        }
-        if version == 4 {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute_batch(MIGRATION_5)?;
-            transaction.pragma_update(None, "user_version", 5_i64)?;
-            transaction.commit()?;
-            version = 5;
-        }
-        if version == 5 {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute_batch(MIGRATION_6)?;
-            transaction.pragma_update(None, "user_version", 6_i64)?;
-            transaction.commit()?;
-            version = 6;
-        }
-        if version == 6 {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute_batch(MIGRATION_7)?;
-            transaction.pragma_update(None, "user_version", 7_i64)?;
-            transaction.commit()?;
-            version = 7;
-        }
-        if version == 7 {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute_batch(MIGRATION_8)?;
-            transaction.pragma_update(None, "user_version", 8_i64)?;
-            transaction.commit()?;
-            version = 8;
-        }
-        if version == 8 {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute_batch(MIGRATION_9)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            transaction.commit()?;
+            version = target_version;
         }
         Ok(())
     }
@@ -3533,17 +3484,18 @@ mod tests {
     }
 
     #[test]
-    fn migration_refuses_a_newer_unknown_schema() {
-        let connection = rusqlite::Connection::open_in_memory().expect("connection opens");
-        connection
-            .pragma_update(None, "user_version", super::SCHEMA_VERSION + 1)
-            .expect("future version set");
-        let mut store = ControlStore { connection };
-        assert!(matches!(
-            store.migrate(),
-            Err(StoreError::UnsupportedSchema(version))
-                if version == super::SCHEMA_VERSION + 1
-        ));
+    fn migration_refuses_unknown_schema_versions() {
+        for unsupported in [-1, super::SCHEMA_VERSION + 1] {
+            let connection = rusqlite::Connection::open_in_memory().expect("connection opens");
+            connection
+                .pragma_update(None, "user_version", unsupported)
+                .expect("unsupported version set");
+            let mut store = ControlStore { connection };
+            assert!(matches!(
+                store.migrate(),
+                Err(StoreError::UnsupportedSchema(version)) if version == unsupported
+            ));
+        }
     }
 
     #[test]
