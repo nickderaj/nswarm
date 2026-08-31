@@ -217,7 +217,7 @@ fn read(path: &Path) -> Result<String, String> {
 }
 
 fn display_file_name(path: &Path) -> String {
-    Path::new(path).file_name().map_or_else(
+    path.file_name().map_or_else(
         || path.to_string_lossy().into_owned(),
         |name| name.to_string_lossy().into_owned(),
     )
