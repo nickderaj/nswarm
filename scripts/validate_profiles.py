@@ -45,6 +45,76 @@ EXPECTED = {
 }
 
 SKILL_REQUIREMENTS = {
+    ("coder", "coding-router"): {
+        "exact base sha",
+        "readable/writable/forbidden paths",
+        "literal verification commands",
+        "missing or contradictory field",
+        "untrusted attributed data",
+    },
+    ("coder", "how"): {
+        "exact base revision",
+        "direct and indirect callers",
+        "smallest hermetic proof",
+        "branches not executed",
+    },
+    ("coder", "architect"): {
+        "input and output shapes",
+        "trust boundary",
+        "persistence format",
+        "partial writes",
+        "unauthorized callers",
+    },
+    ("coder", "tdd-or-repro"): {
+        "red command",
+        "security and migration units",
+        "red-before/green-after evidence",
+        "immutable acceptance criteria",
+    },
+    ("coder", "blast-radius"): {
+        "direct and indirect callers",
+        "schemas and migrations",
+        "supply-chain records",
+        "rollback",
+    },
+    ("coder", "verify-real-artifact"): {
+        "exact sha",
+        "every literal brief command",
+        "redacted output digest",
+        "changed head invalidates all prior evidence",
+    },
+    ("coder", "interrogate"): {
+        "falsify the current theory",
+        "irreversible external action",
+        "broader writable path",
+        "authority expansion",
+    },
+    ("coder", "scope-and-diff-review"): {
+        "every staged and unstaged line",
+        "base-to-head diff",
+        "brief's writable scope",
+        "policy or ci weakening",
+    },
+    ("coder", "technical-writing"): {
+        "observable result",
+        "local evidence from deployment claims",
+        "exact candidate report",
+    },
+    ("coder", "show-me-your-work"): {
+        "exact base sha",
+        "exact committed head sha",
+        "one-to-one acceptance evidence",
+        "sha-256 digests",
+        "policy-shaped extra fields",
+        "worker self-report is untrusted evidence",
+    },
+    ("coder", "pause-and-handoff"): {
+        "smallest atomic boundary",
+        "schema-valid handoff",
+        "credential/lease expiry",
+        "next executable command",
+        "architecture decision",
+    },
     ("research", "research-router"): {
         "observable done predicate",
         "before searching",
