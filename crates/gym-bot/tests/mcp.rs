@@ -937,6 +937,21 @@ fn protocol_error_code(error: ServiceError) -> ErrorCode {
     }
 }
 
+#[test]
+fn validated_query_bounds_are_read_only_and_observable() {
+    let args = BodyMetricsArgs {
+        metric: Some("weight_kg".to_owned()),
+        days: Some(30),
+        limit: Some(10),
+    }
+    .validate()
+    .expect("bounded arguments");
+    assert_eq!(
+        (args.metric(), args.days(), args.limit()),
+        (Some("weight_kg"), 30, 10)
+    );
+}
+
 proptest! {
     #[test]
     fn numeric_query_bounds_are_total(days in any::<u16>(), limit in any::<u16>()) {
