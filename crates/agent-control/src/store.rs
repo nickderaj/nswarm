@@ -2303,6 +2303,15 @@ fn record_report_tx(
         "unit_id": unit_id.as_str(),
         "report": report
     });
+    let (job_id, _) = unit_identity_tx(transaction, unit_id)?;
+    require_unit_actor_tx(
+        transaction,
+        actor,
+        &job_id,
+        unit_id,
+        Capability::EvidenceWrite,
+    )?;
+    require_actor_lease_tx(transaction, actor, unit_id, LeaseKind::Profile, now)?;
     if let Some(result) = command_replay_tx(
         transaction,
         idempotency_key,
@@ -2313,15 +2322,6 @@ fn record_report_tx(
             .as_i64()
             .ok_or_else(|| StoreError::InvalidStoredCommand(idempotency_key.to_owned()));
     }
-    let (job_id, _) = unit_identity_tx(transaction, unit_id)?;
-    require_unit_actor_tx(
-        transaction,
-        actor,
-        &job_id,
-        unit_id,
-        Capability::EvidenceWrite,
-    )?;
-    require_actor_lease_tx(transaction, actor, unit_id, LeaseKind::Profile, now)?;
     let brief_json: String = transaction.query_row(
         "SELECT brief_json FROM unit_briefs WHERE unit_id = ?1",
         [unit_id.as_str()],
@@ -5137,6 +5137,16 @@ mod tests {
                 4,
             )
             .expect("typed research report replayed");
+        assert!(matches!(
+            store.record_research_report(
+                &researcher,
+                &research_brief.unit_id,
+                &research,
+                "typed-research-report",
+                10_001,
+            ),
+            Err(StoreError::MissingActorLease { .. })
+        ));
 
         let coder = ensure_profile(
             &mut store,
