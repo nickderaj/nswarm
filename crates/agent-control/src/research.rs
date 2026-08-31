@@ -109,6 +109,9 @@ impl ResearchClaim {
                 return Err(ResearchReportError::BlankClaimField(field));
             }
         }
+        if !is_rfc3339(&self.observed_at) {
+            return Err(ResearchReportError::InvalidObservationTime);
+        }
         if self.limitations.is_empty()
             || self
                 .limitations
@@ -149,6 +152,87 @@ impl ResearchClaim {
             }
             _ => Ok(()),
         }
+    }
+}
+
+fn is_rfc3339(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20 || !bytes.is_ascii() {
+        return false;
+    }
+    let digits = |range: std::ops::Range<usize>| {
+        bytes
+            .get(range)
+            .is_some_and(|part| part.iter().all(u8::is_ascii_digit))
+    };
+    if !digits(0..4)
+        || bytes[4] != b'-'
+        || !digits(5..7)
+        || bytes[7] != b'-'
+        || !digits(8..10)
+        || bytes[10] != b'T'
+        || !digits(11..13)
+        || bytes[13] != b':'
+        || !digits(14..16)
+        || bytes[16] != b':'
+        || !digits(17..19)
+    {
+        return false;
+    }
+
+    let parse = |range: std::ops::Range<usize>| {
+        std::str::from_utf8(&bytes[range])
+            .ok()
+            .and_then(|part| part.parse::<u32>().ok())
+    };
+    let Some((year, month, day, hour, minute, second)) = parse(0..4)
+        .zip(parse(5..7))
+        .zip(parse(8..10))
+        .zip(parse(11..13))
+        .zip(parse(14..16))
+        .zip(parse(17..19))
+        .map(|(((((year, month), day), hour), minute), second)| {
+            (year, month, day, hour, minute, second)
+        })
+    else {
+        return false;
+    };
+    let leap_year =
+        year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year => 29,
+        2 => 28,
+        _ => return false,
+    };
+    if year == 0 || day == 0 || day > max_day || hour > 23 || minute > 59 || second > 59 {
+        return false;
+    }
+
+    let mut zone_start = 19;
+    if bytes.get(zone_start) == Some(&b'.') {
+        zone_start += 1;
+        let fraction_start = zone_start;
+        while bytes.get(zone_start).is_some_and(u8::is_ascii_digit) {
+            zone_start += 1;
+        }
+        if zone_start == fraction_start {
+            return false;
+        }
+    }
+    match &bytes[zone_start..] {
+        [b'Z'] => true,
+        [sign @ (b'+' | b'-'), h1, h2, b':', m1, m2] => {
+            let _ = sign;
+            h1.is_ascii_digit()
+                && h2.is_ascii_digit()
+                && m1.is_ascii_digit()
+                && m2.is_ascii_digit()
+                && (u32::from(h1 - b'0') * 10 + u32::from(h2 - b'0')) <= 23
+                && (u32::from(m1 - b'0') * 10 + u32::from(m2 - b'0')) <= 59
+        }
+        _ => false,
     }
 }
 
@@ -251,6 +335,9 @@ pub enum ResearchReportError {
     /// A required claim field is blank.
     #[error("research claim field must not be blank: {0}")]
     BlankClaimField(&'static str),
+    /// Observation times must be machine-comparable and include an offset.
+    #[error("research claim observation time must be RFC 3339 with an explicit offset")]
+    InvalidObservationTime,
     /// Claims and reports must state their limitations explicitly.
     #[error("research limitations must contain non-blank entries")]
     InvalidLimitations,
@@ -430,6 +517,38 @@ mod tests {
             invalid.validate(),
             Err(ResearchReportError::BlankClaimField("revision"))
         );
+
+        let mut invalid = report();
+        invalid.claims[0].observed_at = "2026-08-31 08:00:00".to_owned();
+        assert_eq!(
+            invalid.validate(),
+            Err(ResearchReportError::InvalidObservationTime)
+        );
+
+        for observed_at in [
+            "0000-01-01T00:00:00Z",
+            "2025-02-29T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-08-31T24:00:00Z",
+            "2026-08-31T08:60:00Z",
+            "2026-08-31T08:00:60Z",
+            "2026-08-31T08:00:00.",
+            "2026-08-31T08:00:00+24:00",
+            "2026-08-31T08:00:00+00:60",
+            "2026-08-31 08:00:00Z",
+        ] {
+            let mut invalid = report();
+            invalid.claims[0].observed_at = observed_at.to_owned();
+            assert_eq!(
+                invalid.validate(),
+                Err(ResearchReportError::InvalidObservationTime),
+                "{observed_at} must fail"
+            );
+        }
+
+        let mut offset = report();
+        offset.claims[0].observed_at = "2024-02-29T08:00:00.123+01:30".to_owned();
+        assert_eq!(offset.validate(), Ok(()));
 
         let mut invalid = report();
         invalid.limitations.clear();
