@@ -1,6 +1,7 @@
 //! Minimal read-only fleet CLI for validation and deterministic rendering.
 
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
@@ -11,7 +12,7 @@ use fleet::{
 };
 
 fn main() -> ExitCode {
-    match run(env::args().skip(1)) {
+    match run(env::args_os().skip(1)) {
         Ok(output) => {
             print!("{output}");
             ExitCode::SUCCESS
@@ -23,93 +24,201 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: impl Iterator<Item = String>) -> Result<String, String> {
-    let args = args.collect::<Vec<_>>();
-    let (command, rest) = args.split_first().ok_or_else(|| {
-        "usage: fleet <check|validate|render|render-all|render-tmpfiles-all|render-gateway|plan> ..."
-            .to_owned()
-    })?;
-    match command.as_str() {
-        "check" if rest.len() <= 1 => {
-            let root = rest.first().map_or(".", String::as_str);
-            let names = validate_repository(Path::new(root)).map_err(|error| error.to_string())?;
-            Ok(format!(
-                "{} manifest(s): {}\n",
-                names.len(),
-                names.join(", ")
-            ))
+const USAGE: &str =
+    "usage: fleet <check|validate|render|render-all|render-tmpfiles-all|render-gateway|plan> ...";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandName {
+    Check,
+    Validate,
+    Render,
+    RenderAll,
+    RenderTmpfilesAll,
+    RenderGateway,
+    Plan,
+}
+
+impl CommandName {
+    fn parse(value: &OsStr) -> Result<Self, String> {
+        match value.to_str() {
+            Some("check") => Ok(Self::Check),
+            Some("validate") => Ok(Self::Validate),
+            Some("render") => Ok(Self::Render),
+            Some("render-all") => Ok(Self::RenderAll),
+            Some("render-tmpfiles-all") => Ok(Self::RenderTmpfilesAll),
+            Some("render-gateway") => Ok(Self::RenderGateway),
+            Some("plan") => Ok(Self::Plan),
+            _ => Err(format!("unknown command: {}", value.to_string_lossy())),
         }
-        "validate" if rest.len() == 1 => {
-            let path = &rest[0];
-            let source = read(path)?;
-            BotManifest::parse(&source).map_err(|error| error.to_string())?;
-            Ok(format!("{}: valid", display_file_name(path)))
-        }
-        "render" if rest.len() == 1 => {
-            let source = read(&rest[0])?;
-            BotManifest::parse(&source)
-                .and_then(|manifest| manifest.render_unit())
-                .map_err(|error| error.to_string())
-        }
-        "render" if rest.len() == 3 && rest[1] == "--diff" => {
-            let source = read(&rest[0])?;
-            let installed = read(&rest[2])?;
-            BotManifest::parse(&source)
-                .and_then(|manifest| manifest.render_diff(&installed))
-                .map_err(|error| error.to_string())
-        }
-        "render-all" if rest.len() == 2 => {
-            let output = Path::new(&rest[1]);
-            fs::create_dir_all(output).map_err(|error| error.to_string())?;
-            let units =
-                render_repository_units(Path::new(&rest[0])).map_err(|error| error.to_string())?;
-            for (name, unit) in &units {
-                fs::write(output.join(format!("{name}.service")), unit)
-                    .map_err(|error| error.to_string())?;
-            }
-            Ok(format!("{} unit(s) rendered\n", units.len()))
-        }
-        "render-tmpfiles-all" if rest.len() == 2 => {
-            let output = Path::new(&rest[1]);
-            fs::create_dir_all(output).map_err(|error| error.to_string())?;
-            let entries = render_repository_tmpfiles(Path::new(&rest[0]))
-                .map_err(|error| error.to_string())?;
-            for (name, entry) in &entries {
-                fs::write(output.join(format!("nswarm-{name}.conf")), entry)
-                    .map_err(|error| error.to_string())?;
-            }
-            Ok(format!("{} tmpfiles contract(s) rendered\n", entries.len()))
-        }
-        "render-gateway" if rest.len() == 1 => {
-            let source = read(&rest[0])?;
-            GatewayManifest::parse(&source)
-                .and_then(|manifest| manifest.render_unit())
-                .map_err(|error| error.to_string())
-        }
-        "plan" if rest.len() == 4 && rest[0] == "--all" => {
-            let secrets =
-                parse_secret_source(&read(&rest[3])?).map_err(|error| error.to_string())?;
-            plan_repository(Path::new(&rest[1]), Path::new(&rest[2]), &secrets)
-                .map_err(|error| error.to_string())
-        }
-        "check"
-        | "validate"
-        | "render"
-        | "render-all"
-        | "render-tmpfiles-all"
-        | "render-gateway"
-        | "plan" => Err(format!("unexpected arguments for {command}")),
-        _ => Err(format!("unknown command: {command}")),
     }
 }
 
-fn read(path: &str) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|error| format!("read {path}: {error}"))
+#[derive(Debug, Eq, PartialEq)]
+enum CliCommand<'a> {
+    Check {
+        root: &'a Path,
+    },
+    Validate {
+        manifest: &'a Path,
+    },
+    Render {
+        manifest: &'a Path,
+    },
+    RenderDiff {
+        manifest: &'a Path,
+        installed: &'a Path,
+    },
+    RenderAll {
+        root: &'a Path,
+        output: &'a Path,
+    },
+    RenderTmpfilesAll {
+        root: &'a Path,
+        output: &'a Path,
+    },
+    RenderGateway {
+        manifest: &'a Path,
+    },
+    Plan {
+        root: &'a Path,
+        host: &'a Path,
+        secrets: &'a Path,
+    },
 }
 
-fn display_file_name(path: &str) -> String {
+impl<'a> CliCommand<'a> {
+    fn parse(args: &'a [OsString]) -> Result<Self, String> {
+        let (command_text, rest) = args.split_first().ok_or_else(|| USAGE.to_owned())?;
+        let command = CommandName::parse(command_text)?;
+        match (command, rest) {
+            (CommandName::Check, []) => Ok(Self::Check {
+                root: Path::new("."),
+            }),
+            (CommandName::Check, [root]) => Ok(Self::Check {
+                root: Path::new(root),
+            }),
+            (CommandName::Validate, [manifest]) => Ok(Self::Validate {
+                manifest: Path::new(manifest),
+            }),
+            (CommandName::Render, [manifest]) => Ok(Self::Render {
+                manifest: Path::new(manifest),
+            }),
+            (CommandName::Render, [manifest, flag, installed]) if flag == OsStr::new("--diff") => {
+                Ok(Self::RenderDiff {
+                    manifest: Path::new(manifest),
+                    installed: Path::new(installed),
+                })
+            }
+            (CommandName::RenderAll, [root, output]) => Ok(Self::RenderAll {
+                root: Path::new(root),
+                output: Path::new(output),
+            }),
+            (CommandName::RenderTmpfilesAll, [root, output]) => Ok(Self::RenderTmpfilesAll {
+                root: Path::new(root),
+                output: Path::new(output),
+            }),
+            (CommandName::RenderGateway, [manifest]) => Ok(Self::RenderGateway {
+                manifest: Path::new(manifest),
+            }),
+            (CommandName::Plan, [flag, root, host, secrets]) if flag == OsStr::new("--all") => {
+                Ok(Self::Plan {
+                    root: Path::new(root),
+                    host: Path::new(host),
+                    secrets: Path::new(secrets),
+                })
+            }
+            (_, _) => Err(format!(
+                "unexpected arguments for {}",
+                command_text.to_string_lossy()
+            )),
+        }
+    }
+
+    fn execute(self) -> Result<String, String> {
+        match self {
+            Self::Check { root } => {
+                let names = validate_repository(root).map_err(|error| error.to_string())?;
+                Ok(format!(
+                    "{} manifest(s): {}\n",
+                    names.len(),
+                    names.join(", ")
+                ))
+            }
+            Self::Validate { manifest } => {
+                let source = read(manifest)?;
+                BotManifest::parse(&source).map_err(|error| error.to_string())?;
+                Ok(format!("{}: valid", display_file_name(manifest)))
+            }
+            Self::Render { manifest } => {
+                let source = read(manifest)?;
+                BotManifest::parse(&source)
+                    .and_then(|manifest| manifest.render_unit())
+                    .map_err(|error| error.to_string())
+            }
+            Self::RenderDiff {
+                manifest,
+                installed,
+            } => {
+                let source = read(manifest)?;
+                let installed = read(installed)?;
+                BotManifest::parse(&source)
+                    .and_then(|manifest| manifest.render_diff(&installed))
+                    .map_err(|error| error.to_string())
+            }
+            Self::RenderAll { root, output } => {
+                fs::create_dir_all(output).map_err(|error| error.to_string())?;
+                let units = render_repository_units(root).map_err(|error| error.to_string())?;
+                for (name, unit) in &units {
+                    fs::write(output.join(format!("{name}.service")), unit)
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(format!("{} unit(s) rendered\n", units.len()))
+            }
+            Self::RenderTmpfilesAll { root, output } => {
+                fs::create_dir_all(output).map_err(|error| error.to_string())?;
+                let entries =
+                    render_repository_tmpfiles(root).map_err(|error| error.to_string())?;
+                for (name, entry) in &entries {
+                    fs::write(output.join(format!("nswarm-{name}.conf")), entry)
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(format!("{} tmpfiles contract(s) rendered\n", entries.len()))
+            }
+            Self::RenderGateway { manifest } => {
+                let source = read(manifest)?;
+                GatewayManifest::parse(&source)
+                    .and_then(|manifest| manifest.render_unit())
+                    .map_err(|error| error.to_string())
+            }
+            Self::Plan {
+                root,
+                host,
+                secrets,
+            } => {
+                let secrets =
+                    parse_secret_source(&read(secrets)?).map_err(|error| error.to_string())?;
+                plan_repository(root, host, &secrets).map_err(|error| error.to_string())
+            }
+        }
+    }
+}
+
+fn run<I, S>(args: I) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<OsString>,
+{
+    let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    CliCommand::parse(&args)?.execute()
+}
+
+fn read(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))
+}
+
+fn display_file_name(path: &Path) -> String {
     Path::new(path).file_name().map_or_else(
-        || path.to_owned(),
+        || path.to_string_lossy().into_owned(),
         |name| name.to_string_lossy().into_owned(),
     )
 }
@@ -164,7 +273,8 @@ secrets_allow = ["OPENROUTER_API_KEY"]
 
     #[test]
     fn missing_command_is_refused() {
-        let error = run(std::iter::empty()).expect_err("missing command must fail");
+        let error =
+            run(std::iter::empty::<std::ffi::OsString>()).expect_err("missing command must fail");
         assert!(error.contains("usage"));
     }
 
@@ -176,12 +286,12 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         fs::write(&bot_path, BOT).expect("write bot fixture");
         fs::write(&gateway_path, GATEWAY).expect("write gateway fixture");
 
-        let validated = run(["validate".to_owned(), bot_path.display().to_string()].into_iter())
+        let validated = run(["validate".to_owned(), bot_path.display().to_string()])
             .expect("validation succeeds");
         assert_eq!(validated, "research.toml: valid");
 
-        let unit = run(["render".to_owned(), bot_path.display().to_string()].into_iter())
-            .expect("render succeeds");
+        let unit =
+            run(["render".to_owned(), bot_path.display().to_string()]).expect("render succeeds");
         assert!(unit.contains("User=research-agent"));
         assert!(unit.contains("SupplementaryGroups=research-access"));
         assert!(unit.contains("UMask=0077"));
@@ -194,16 +304,14 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             bot_path.display().to_string(),
             "--diff".to_owned(),
             installed_path.display().to_string(),
-        ]
-        .into_iter())
+        ])
         .expect("diff succeeds");
         assert_eq!(plan, "clean\n");
 
         let gateway = run([
             "render-gateway".to_owned(),
             gateway_path.display().to_string(),
-        ]
-        .into_iter())
+        ])
         .expect("gateway render succeeds");
         assert!(gateway.contains("IPAddressDeny=any"));
         assert!(gateway.contains("UMask=0077"));
@@ -220,7 +328,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         let directory = TempDir::new().expect("temporary directory");
         let path = directory.path().join("fixture.toml");
         fs::write(&path, BOT).expect("write fixture");
-        let unknown = run(["unknown".to_owned(), path.display().to_string()].into_iter())
+        let unknown = run(["unknown".to_owned(), path.display().to_string()])
             .expect_err("unknown command must fail");
         assert!(unknown.contains("unknown command"));
 
@@ -253,14 +361,32 @@ secrets_allow = ["OPENROUTER_API_KEY"]
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cli_parser_preserves_non_utf8_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let args = [
+            OsString::from("validate"),
+            OsString::from_vec(b"manifest-\xff.toml".to_vec()),
+        ];
+        let command =
+            super::CliCommand::parse(&args).expect("non-UTF-8 paths are valid CLI arguments");
+        let super::CliCommand::Validate { manifest } = command else {
+            panic!("validate command expected");
+        };
+        assert_eq!(manifest.as_os_str().as_bytes(), b"manifest-\xff.toml");
+    }
+
     #[test]
     fn check_enumerates_the_workspace_manifests() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(std::path::Path::parent)
             .expect("workspace root");
-        let output = run(["check".to_owned(), root.display().to_string()].into_iter())
-            .expect("fleet check succeeds");
+        let output =
+            run(["check".to_owned(), root.display().to_string()]).expect("fleet check succeeds");
         assert_eq!(output, "2 manifest(s): gym, research\n");
 
         let rendered = TempDir::new().expect("temporary rendered directory");
@@ -268,8 +394,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             "render-all".to_owned(),
             root.display().to_string(),
             rendered.path().display().to_string(),
-        ]
-        .into_iter())
+        ])
         .expect("all units render");
         assert_eq!(output, "2 unit(s) rendered\n");
         assert!(rendered.path().join("gym.service").is_file());
@@ -280,8 +405,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             "render-tmpfiles-all".to_owned(),
             root.display().to_string(),
             tmpfiles.path().display().to_string(),
-        ]
-        .into_iter())
+        ])
         .expect("all tmpfiles contracts render");
         assert_eq!(output, "2 tmpfiles contract(s) rendered\n");
         assert_eq!(
@@ -322,8 +446,7 @@ secrets_allow = ["OPENROUTER_API_KEY"]
             root.display().to_string(),
             host.path().display().to_string(),
             secret_path.display().to_string(),
-        ]
-        .into_iter())
+        ])
         .expect("plan succeeds");
         assert!(plan.contains("bot: gym"));
         assert!(plan.contains("bot: research"));
