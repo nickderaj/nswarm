@@ -1,0 +1,87 @@
+# Research and one-coder Step 5 status
+
+Status: deterministic profile, evidence and serial-scheduling boundaries are
+implemented. Live Hermes-backed research and coding sessions remain gated by
+D23/D24, so the first end-to-end research report and coding candidate are not
+claimed.
+
+## Implemented
+
+- the root-owned research and coder SOUL, memory and complete named skill
+  bundles from section 7.5, with generated-profile drift checks;
+- a physically read-only research role: repository and allow-listed network
+  reads plus evidence-ledger writes, with no repository edit, push, coordinate,
+  verify, integrate or merge capability;
+- a schema-closed research report contract covering exact question binding,
+  searched/empty/unavailable/skipped source dispositions, direct/inferred/
+  contradicted/unknown claims, immutable revisions, tight locations, valid RFC
+  3339 observation times, calibrated confidence and explicit limitations;
+- a schema-closed coder handoff bound to the immutable repository/base SHA,
+  committed head SHA, leased changed paths, every acceptance criterion, exact
+  verification commands and exit codes, SHA-256 output/artifact digests, risks
+  and deviations;
+- transactional typed report persistence that requires the exact job, unit,
+  live profile, lease and role before the ordinary brief-schema evidence gate;
+- replay-safe job, profile and active-lease creation, rejecting any retry that
+  changes immutable scope;
+- a serial scheduler adapter that derives unique fixed-role profiles, grants
+  only the coder profile and minimal writable path roots, enters `grounding`,
+  and refuses to prepare a different coder while any coder profile is live;
+- production-backed named eval cases for hostile research evidence, coder path,
+  branch, command, artifact and policy containment, and serial-startup recovery.
+
+The existing control plane continues to enforce candidate SHA registration,
+fresh exact-SHA verification, two independent medium/high-risk reviews,
+finding disposition by the integrator, verdict invalidation after content
+change, fresh integration verification, exact-SHA merge authorization and a
+distinct capability-limited shipper.
+
+## Concurrency gate
+
+The coder concurrency limit remains one. Passing deterministic startup and
+containment tests does not satisfy the plan's live-pilot gate. It may increase
+only after one real coding unit traverses the complete brief → worker → verifier
+→ two reviews → integration → protected CI sequence and the ephemeral profile,
+worktree, identity, credentials and writable state are destroyed after the
+audited handoff.
+
+The current PR was produced through the ordinary maintainer workflow. It is not
+represented as output from that live coder pilot.
+
+## D23 and D24
+
+The pinned Hermes HTTP session route creates a fresh `AIAgent` per request. No
+merged decision has revised D23, and D24's multiplexing, credential isolation,
+Pi resource use, prompt size, dedicated-user sandbox and socket ACL sequence was
+not reached. Consequently:
+
+- `research-bot` still exits unsuccessfully by design;
+- the research manifest advertises no `ask` surface;
+- no Hermes session, model call, critic session or coder transient service is
+  launched by this repository work;
+- no fallback gateway topology or gateway socket identity is selected;
+- no live report, coding branch, push credential or deployment is claimed.
+
+Settlement requires a reviewed replacement for D23/section 6.3, followed by the
+ordered D24 measurements in [`HERMES_SPIKE.md`](HERMES_SPIKE.md). Only then can
+the research socket and one-coder runtime be wired to a selected Hermes route.
+
+## Live completion sequence
+
+After D23/D24 settle, the Step 5 completion run is:
+
+1. install the generated root-owned profiles and verify their byte identity;
+2. start the research socket with read-only repository/source methods and
+   brief-scoped egress, then run benign, ambiguous and hostile-input cases;
+3. validate and persist the first critic-checked research report, prove all
+   source dispositions and citations, and prove the workspace is unchanged;
+4. provision one disposable coder identity, profile home, worktree, branch,
+   artifact directory, resource budget and method-scoped push credential;
+5. run one bounded coding brief through independent exact-SHA verification,
+   two read-only reviews, fresh integration, required protected CI and handoff;
+6. revoke credentials and leases, destroy the ephemeral writable state, audit
+   the durable ledger and keep concurrency at one until owner review accepts
+   the complete evidence.
+
+No production credential, private database, transcript, owner data or private
+path was accessed or committed while implementing these boundaries.
