@@ -583,12 +583,21 @@ mod tests {
             Err(ResearchReportError::InvalidLimitations)
         );
 
-        let mut invalid = report();
-        invalid.critic.passed = false;
-        assert_eq!(
-            invalid.validate(),
-            Err(ResearchReportError::InvalidCriticAttestation)
-        );
+        for mutate in [
+            |report: &mut ResearchReport| report.critic.critic_id.clear(),
+            |report: &mut ResearchReport| report.critic.passed = false,
+            |report: &mut ResearchReport| report.critic.claims_digest.pop().map_or((), drop),
+            |report: &mut ResearchReport| report.critic.claims_digest = "g".repeat(64),
+            |report: &mut ResearchReport| report.critic.findings.clear(),
+            |report: &mut ResearchReport| report.critic.findings[0].clear(),
+        ] {
+            let mut invalid = report();
+            mutate(&mut invalid);
+            assert_eq!(
+                invalid.validate(),
+                Err(ResearchReportError::InvalidCriticAttestation)
+            );
+        }
     }
 
     #[test]

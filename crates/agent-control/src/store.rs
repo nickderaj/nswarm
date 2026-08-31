@@ -5127,6 +5127,15 @@ mod tests {
                 3,
             )
             .expect("typed research report recorded");
+        store
+            .record_research_report(
+                &researcher,
+                &research_brief.unit_id,
+                &research,
+                "typed-research-report",
+                4,
+            )
+            .expect("typed research report replayed");
 
         let coder = ensure_profile(
             &mut store,
