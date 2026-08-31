@@ -7,8 +7,8 @@ Updated: 2026-08-31. Active branch:
 `f4a40e07e226757f218c0aa45d992237c43a21e0`. The implemented and deferred
 boundary is recorded in [`STEP5_STATUS.md`](STEP5_STATUS.md).
 
-The branch implements schema-closed research evidence with independent critic
-attestation, exact-SHA coder handoffs bound to live path leases, transactional
+The branch implements schema-closed research evidence with a reserved critic
+attestation field, exact-SHA coder handoffs bound to live path leases, transactional
 typed persistence, replay-safe provisioning, fixed independent control roles,
 and a scheduler that refuses a second live coder. Full `just ci` passes with
 251 files policy-scanned, 3 profiles validated, 8 production-backed eval cases,

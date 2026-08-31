@@ -5110,12 +5110,7 @@ mod tests {
                 "unavailable": ["observability"],
                 "skipped": []
             },
-            "critic": {
-                "critic_id": "critic-typed-research",
-                "passed": true,
-                "claims_digest": "b".repeat(64),
-                "findings": ["none"]
-            },
+            "critic": null,
             "limitations": ["No production access was granted."]
         }))
         .expect("research report parses");

@@ -26,12 +26,7 @@
         "unavailable": ["observability"],
         "skipped": ["analytics"]
       },
-      "critic": {
-        "critic_id": "critic-research-evidence",
-        "passed": true,
-        "claims_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "findings": ["none"]
-      },
+      "critic": null,
       "limitations": ["No production access was granted."]
     },
     "mutations": [

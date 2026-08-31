@@ -193,7 +193,7 @@ fn is_tight_location(value: &str) -> bool {
             }))
 }
 
-/// Independent read-only critic result over the normalized claims.
+/// Reserved read-only critic result over the normalized claims.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CriticAttestation {
@@ -221,8 +221,8 @@ pub struct ResearchReport {
     pub claims: Vec<ResearchClaim>,
     /// Disposition of every source class required by the brief.
     pub sources: SourceAudit,
-    /// Independent read-only review of normalized claims and references.
-    pub critic: CriticAttestation,
+    /// Reserved attestation populated only after the live critic topology exists.
+    pub critic: Option<CriticAttestation>,
     /// Report-level caveats and exact follow-up actions.
     pub limitations: Vec<String>,
 }
@@ -258,22 +258,22 @@ impl ResearchReport {
         {
             return Err(ResearchReportError::InvalidLimitations);
         }
-        if self.critic.critic_id.trim().is_empty()
-            || !self.critic.passed
-            || self.critic.claims_digest.len() != 64
-            || !self
-                .critic
-                .claims_digest
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
-            || self.critic.findings.is_empty()
-            || self
-                .critic
-                .findings
-                .iter()
-                .any(|finding| finding.trim().is_empty())
-        {
-            return Err(ResearchReportError::InvalidCriticAttestation);
+        if let Some(critic) = &self.critic {
+            if critic.critic_id.trim().is_empty()
+                || !critic.passed
+                || critic.claims_digest.len() != 64
+                || !critic
+                    .claims_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                || critic.findings.is_empty()
+                || critic
+                    .findings
+                    .iter()
+                    .any(|finding| finding.trim().is_empty())
+            {
+                return Err(ResearchReportError::InvalidCriticAttestation);
+            }
         }
         self.sources.validate()?;
         for claim in &self.claims {
@@ -440,12 +440,12 @@ mod tests {
                 unavailable: vec!["observability".to_owned()],
                 skipped: vec!["analytics".to_owned()],
             },
-            critic: CriticAttestation {
+            critic: Some(CriticAttestation {
                 critic_id: "critic-research-unit".to_owned(),
                 passed: true,
                 claims_digest: "b".repeat(64),
                 findings: vec!["none".to_owned()],
-            },
+            }),
             limitations: vec!["No production access was granted.".to_owned()],
         }
     }
@@ -584,12 +584,22 @@ mod tests {
         );
 
         for mutate in [
-            |report: &mut ResearchReport| report.critic.critic_id.clear(),
-            |report: &mut ResearchReport| report.critic.passed = false,
-            |report: &mut ResearchReport| report.critic.claims_digest.pop().map_or((), drop),
-            |report: &mut ResearchReport| report.critic.claims_digest = "g".repeat(64),
-            |report: &mut ResearchReport| report.critic.findings.clear(),
-            |report: &mut ResearchReport| report.critic.findings[0].clear(),
+            |report: &mut ResearchReport| report.critic.as_mut().unwrap().critic_id.clear(),
+            |report: &mut ResearchReport| report.critic.as_mut().unwrap().passed = false,
+            |report: &mut ResearchReport| {
+                report
+                    .critic
+                    .as_mut()
+                    .unwrap()
+                    .claims_digest
+                    .pop()
+                    .map_or((), drop)
+            },
+            |report: &mut ResearchReport| {
+                report.critic.as_mut().unwrap().claims_digest = "g".repeat(64)
+            },
+            |report: &mut ResearchReport| report.critic.as_mut().unwrap().findings.clear(),
+            |report: &mut ResearchReport| report.critic.as_mut().unwrap().findings[0].clear(),
         ] {
             let mut invalid = report();
             mutate(&mut invalid);
