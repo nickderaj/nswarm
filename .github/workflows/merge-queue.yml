@@ -71,19 +71,15 @@ jobs:
           fetch-depth: 0
       - run: cargo install cargo-mutants --version 27.1.0 --locked
       - name: Build mutation diff
-        id: mutation-diff
-        run: |
-          git diff --no-ext-diff origin/main...HEAD > /tmp/mutation.diff
-          if git diff --name-only origin/main...HEAD | grep -Eq '^crates/.*/src/.*\.rs$'; then
-            echo "rust-changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "rust-changed=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: git diff --no-ext-diff origin/main...HEAD > /tmp/mutation.diff
       - name: Mutate changed code
-        if: ${{ steps.mutation-diff.outputs.rust-changed == 'true' }}
-        run: cargo mutants --workspace --in-diff /tmp/mutation.diff --jobs 4
+        run: |
+          cargo mutants --workspace --in-diff /tmp/mutation.diff --jobs 4
+          if [[ ! -d mutants.out ]]; then
+            echo "No mutable Rust in diff"
+          fi
       - name: Upload mutation report
-        if: ${{ !cancelled() && steps.mutation-diff.outputs.rust-changed == 'true' }}
+        if: ${{ !cancelled() && hashFiles('mutants.out/**') != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: merge-mutation-${{ github.sha }}
