@@ -96,9 +96,9 @@ fn deterministic_reads_preferences_and_rating_work_without_an_agent() {
     );
     assert_eq!(
         service
-            .handle(&request("/cardio bike ride 12 3"))
+            .handle(&request("/cardio indoor easy bike 12 3"))
             .expect("multiword activity"),
-        "Logged bike ride: 12 min, 3 km"
+        "Logged indoor easy bike: 12 min, 3 km"
     );
     assert!(
         service
