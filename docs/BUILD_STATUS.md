@@ -11,11 +11,11 @@ The branch implements schema-closed research evidence with a reserved critic
 attestation field, exact-SHA coder handoffs bound to live path leases, transactional
 typed persistence, replay-safe provisioning, fixed independent control roles,
 and a deterministic adapter that rejects a second sequential coder. Full `just ci` passes with
-251 files policy-scanned, 3 profiles validated, 8 production-backed eval cases,
-210 nextest tests, doctests, rustdoc, dependency checks, and 196 semver checks
-per crate. Strict coverage passes at 1,274/1,296 changed executable lines
-(98.30%), 316/316 critical branch outcomes (100.00%), and 10,237/10,546
-repository lines (97.07%).
+253 files policy-scanned, 3 profiles validated, 8 production-backed eval cases,
+211 nextest tests, doctests, rustdoc, dependency checks, and 196 semver checks
+per crate. Strict coverage passes at 1,305/1,327 changed executable lines
+(98.34%), 318/318 critical branch outcomes (100.00%), and 10,267/10,576
+repository lines (97.08%).
 
 D23 remains unresolved because the pinned Hermes HTTP route creates a fresh
 `AIAgent` per request, and D24 remains unevaluated. Therefore no live Hermes
