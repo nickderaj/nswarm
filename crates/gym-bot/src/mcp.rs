@@ -118,11 +118,31 @@ fn validate_metric(metric: &str) -> Result<String, McpQueryError> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedBodyMetricsArgs {
     /// Optional exact metric filter.
-    pub metric: Option<String>,
+    metric: Option<String>,
     /// Validated inclusive lookback.
-    pub days: u16,
+    days: u16,
     /// Validated row cap.
-    pub limit: u16,
+    limit: u16,
+}
+
+impl ValidatedBodyMetricsArgs {
+    /// Returns the optional validated metric filter.
+    #[must_use]
+    pub fn metric(&self) -> Option<&str> {
+        self.metric.as_deref()
+    }
+
+    /// Returns the validated inclusive lookback.
+    #[must_use]
+    pub const fn days(&self) -> u16 {
+        self.days
+    }
+
+    /// Returns the validated row cap.
+    #[must_use]
+    pub const fn limit(&self) -> u16 {
+        self.limit
+    }
 }
 
 /// One read-only body metric returned by MCP.

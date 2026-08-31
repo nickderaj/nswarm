@@ -349,14 +349,14 @@ proptest! {
     fn every_positive_finite_decimal_round_trips(value in 0.001_f64..1000.0) {
         let text = format!("/weight {value}kg");
         let parsed = parse_weight_command(&text).expect("positive finite property input");
-        prop_assert_eq!(parsed.kilograms.to_bits(), value.to_bits());
+        prop_assert_eq!(parsed.kilograms().to_bits(), value.to_bits());
     }
 
     #[test]
     fn arbitrary_text_never_yields_an_invalid_weight(text in ".{0,256}") {
         if let Ok(parsed) = parse_weight_command(&text) {
-            prop_assert!(parsed.kilograms.is_finite());
-            prop_assert!(parsed.kilograms > 0.0);
+            prop_assert!(parsed.kilograms().is_finite());
+            prop_assert!(parsed.kilograms() > 0.0);
         } else {
             prop_assert_eq!(parse_weight_command(&text), Err(WeightParseError::Usage));
         }

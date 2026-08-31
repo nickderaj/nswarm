@@ -190,9 +190,9 @@ impl GymService {
         connection.execute(
             "INSERT INTO body_metrics (date, metric, value, unit, source) \
              VALUES (?1, 'weight_kg', ?2, 'kg', 'manual')",
-            params![self.clock.now_iso8601(), parsed.kilograms],
+            params![self.clock.now_iso8601(), parsed.kilograms()],
         )?;
-        Ok(format!("Logged weight: {} kg", General(parsed.kilograms)))
+        Ok(format!("Logged weight: {} kg", General(parsed.kilograms())))
     }
 
     fn strength(&self, connection: &Connection, text: &str) -> Result<String, ServiceError> {
