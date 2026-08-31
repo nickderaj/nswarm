@@ -14,13 +14,13 @@ use crate::database::validate_existing;
 #[derive(Debug)]
 pub struct GymConfig {
     /// Disposable copied frozen-schema database.
-    pub database_path: PathBuf,
+    database_path: PathBuf,
     /// Fleet-owned MCP socket.
-    pub socket_path: PathBuf,
+    socket_path: PathBuf,
     /// Fleet-owned group expected on the MCP socket directory and socket.
-    pub socket_group: String,
+    socket_group: String,
     /// Configured IANA time zone.
-    pub timezone: String,
+    timezone: String,
 }
 
 impl GymConfig {
