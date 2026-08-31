@@ -13,9 +13,10 @@ contract outside the reviewed pin.
 The source verifier now pins those relevant files and emits the three-candidate
 decision in `spikes/hermes/evidence/native-adapter.json`. No D23 replacement,
 Hermes session, model call, D24 measurement, fallback topology, live pilot,
-deployment or concurrency increase is claimed. The next external requirement is
-an upstream-reviewed cached request-response API or a stable independently
-pinned local connector contract. Coder concurrency remains one.
+deployment or concurrency increase is claimed. The stable HTTP transport remains
+a candidate; provider-side byte-prefix cache behavior and cost on repeated turns
+are the next D23 measurement. A deterministic fake cannot establish that result.
+Coder concurrency remains one.
 
 ## Checkpoint AA - Step 5 research and serial-coder boundary
 

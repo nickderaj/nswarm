@@ -200,6 +200,7 @@ def verify_source(source: Path, pin: dict[str, Any]) -> dict[str, Any]:
         source / "gateway" / "relay" / name
         for name in ("adapter.py", "transport.py", "ws_transport.py")
     ]
+    relay_transport_path = source / "gateway" / "relay" / "transport.py"
     relay_literals = set().union(
         *(string_literals(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))) for path in relay_files)
     )
@@ -212,7 +213,8 @@ def verify_source(source: Path, pin: dict[str, Any]) -> dict[str, Any]:
     ):
         raise SpikeError("relay stability warning differs")
     relay_transport = ast.parse(
-        relay_files[1].read_text(encoding="utf-8"), filename=str(relay_files[1])
+        relay_transport_path.read_text(encoding="utf-8"),
+        filename=str(relay_transport_path),
     )
     relay_protocol = next(
         (
@@ -299,7 +301,8 @@ def verify_source(source: Path, pin: dict[str, Any]) -> dict[str, Any]:
             "http_session_api": {
                 "stable_external_contract": True,
                 "warm_agent_reuse": False,
-                "result": "rejected",
+                "provider_prefix_cache_measured": False,
+                "result": "pending_provider_cache_measurement",
             },
             "native_platform_adapter": {
                 "stable_external_contract": False,
@@ -316,9 +319,10 @@ def verify_source(source: Path, pin: dict[str, Any]) -> dict[str, Any]:
             },
         },
         "decision": {
-            "d23_replacement_available": False,
-            "reason": "the pinned release exposes no stable external surface that preserves both warm agent reuse and botkit-owned transports",
-            "external_requirement": "an upstream-reviewed cached request-response API or stable local connector contract",
+            "local_warm_agent_replacement_available": False,
+            "d23_settled": False,
+            "reason": "native and relay paths provide no stable external local-agent-cache contract preserving botkit-owned transports",
+            "next_measurement": "provider-side byte-prefix cache behavior and cost on repeated HTTP session turns",
         },
     }
 

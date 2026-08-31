@@ -28,7 +28,8 @@
   },
   "d23_candidates": {
     "http_session_api": {
-      "result": "rejected",
+      "provider_prefix_cache_measured": false,
+      "result": "pending_provider_cache_measurement",
       "stable_external_contract": true,
       "warm_agent_reuse": false
     },
@@ -47,9 +48,10 @@
     }
   },
   "decision": {
-    "d23_replacement_available": false,
-    "external_requirement": "an upstream-reviewed cached request-response API or stable local connector contract",
-    "reason": "the pinned release exposes no stable external surface that preserves both warm agent reuse and botkit-owned transports"
+    "d23_settled": false,
+    "local_warm_agent_replacement_available": false,
+    "next_measurement": "provider-side byte-prefix cache behavior and cost on repeated HTTP session turns",
+    "reason": "native and relay paths provide no stable external local-agent-cache contract preserving botkit-owned transports"
   },
   "pin": {
     "commit_sha": "fcbd1076a93841fa88855acce810e342a5b78101",

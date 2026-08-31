@@ -19,8 +19,9 @@ every request, including repeated turns on one explicit session ID. D23 and
 section 6.3 must therefore be revisited before any `botkit` conversation code
 is written. The native-adapter follow-up found warm reuse only behind internal
 platform-adapter APIs or the experimental external-connector relay contract, so
-no reviewed replacement is available. D24 remains unevaluated and no fallback
-topology has been selected.
+no reviewed local-agent-cache replacement is available. The stable HTTP route's
+provider-side prefix-cache behavior remains unmeasured. D24 remains unevaluated
+and no fallback topology has been selected.
 See [`docs/HERMES_SPIKE.md`](docs/HERMES_SPIKE.md) for the reproducible evidence
 and [`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md) for verified checkpoints and
 remaining gates.

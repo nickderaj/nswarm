@@ -76,9 +76,10 @@ paths. Native adapters reuse warm agents but are internal Python integration
 points that would make Hermes own Telegram and provide no synchronous `ask()`.
 The relay path also reuses warm agents but is explicitly experimental and
 depends on an external, unpinned connector contract. Neither is a reviewed D23
-replacement. The external requirement is an upstream-reviewed cached
-request-response API or a stable, independently pinned local connector contract;
-D24 remains blocked until one exists.
+local-agent-cache replacement. The stable HTTP route remains a candidate, and
+provider-side byte-prefix cache behavior and cost on repeated turns are the next
+D23 measurement. D24 remains blocked until that evidence is reviewed and D23 is
+settled.
 
 ## Live completion sequence
 

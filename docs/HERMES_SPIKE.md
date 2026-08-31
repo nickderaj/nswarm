@@ -146,7 +146,7 @@ result is [`../spikes/hermes/evidence/native-adapter.json`](../spikes/hermes/evi
 
 | Candidate | Stable external contract | Warm agent | Required boundary | Result |
 | --- | --- | --- | --- | --- |
-| HTTP session API | yes | no | preserves `botkit` transport ownership | rejected by the original gate |
+| HTTP session API | yes | no | preserves `botkit` transport ownership | provider-cache measurement pending |
 | Native platform adapter | no; Python internals | yes | Hermes owns Telegram; no synchronous `ask()` | rejected |
 | Hermes Relay adapter | no; experimental | yes | needs an external connector and changing frame contract | rejected |
 
@@ -163,12 +163,13 @@ changes without a deprecation cycle, and points to a separate connector repo for
 the other half of the contract. Adopting it would replace one failed assumption
 with an unpinned service and unstable wire format.
 
-There is no D23 replacement to implement from the reviewed pin. Settlement now
-requires an upstream-reviewed cached request-response API, or a stable and
-independently pinned local connector contract that preserves plain-text
-request/response, explicit session identity, profile selection, streaming,
-interruption and synchronous `ask()` semantics. D24 remains blocked until that
-contract exists and is reviewed.
+There is no stable local-agent-cache replacement to implement from the reviewed
+pin. This does not reject the HTTP transport: provider-side byte-prefix cache
+behavior and cost on repeated session turns remain unmeasured and are the next
+D23 step. A deterministic fake cannot measure a real provider cache. If that
+measurement is unfavorable, settlement requires an upstream-reviewed cached
+request-response API or a stable, independently pinned local connector contract.
+D24 remains blocked until D23 is reviewed and settled.
 
 Per the required measurement order, the following were not executed after the
 architecture gate failed:

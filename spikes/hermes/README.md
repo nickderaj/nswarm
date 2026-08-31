@@ -52,4 +52,5 @@ Python ingress methods. That would move Telegram out of `botkit` and does not
 provide synchronous `ask()`. Hermes Relay retains native cache reuse while
 separating transport ownership, but its protocol is explicitly experimental and
 requires a connector outside the reviewed pin. Neither path is a reviewed D23
-replacement.
+local-agent-cache replacement. The stable HTTP transport remains a candidate;
+provider-side prefix-cache behavior and cost are the next unmeasured D23 gate.

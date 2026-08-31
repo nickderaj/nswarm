@@ -197,30 +197,39 @@ class NativeAdapterEvidenceTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
         )
 
-    def test_candidates_preserve_no_supported_d23_replacement(self) -> None:
+    def test_candidate_decisions_are_internally_consistent(self) -> None:
         candidates = self.evidence["d23_candidates"]
         self.assertEqual(
             set(candidates),
             {"http_session_api", "native_platform_adapter", "relay_adapter"},
         )
-        self.assertTrue(
-            all(item["result"] == "rejected" for item in candidates.values())
+        self.assertEqual(
+            candidates["http_session_api"]["result"],
+            "pending_provider_cache_measurement",
         )
-        self.assertFalse(self.evidence["decision"]["d23_replacement_available"])
+        self.assertTrue(
+            all(
+                item["result"] != "accepted"
+                for item in candidates.values()
+                if not item["stable_external_contract"]
+            )
+        )
+        self.assertFalse(self.evidence["decision"]["d23_settled"])
 
     def test_native_and_relay_limits_are_explicit(self) -> None:
         contract = self.evidence["architecture_contract"]
         self.assertTrue(contract["native_gateway_agent_cache_present"])
         self.assertTrue(contract["native_adapter_ingress_is_internal_python_api"])
+        self.assertIsInstance(contract["native_adapter_ingress_line"], int)
+        self.assertGreater(contract["native_adapter_ingress_line"], 0)
         self.assertTrue(contract["relay_transport_is_experimental"])
         self.assertTrue(contract["relay_requires_external_connector_contract"])
         self.assertFalse(contract["stable_external_cached_request_response_surface"])
 
-    def test_external_requirement_is_exact(self) -> None:
-        self.assertEqual(
-            self.evidence["decision"]["external_requirement"],
-            "an upstream-reviewed cached request-response API or stable local connector contract",
-        )
+    def test_http_provider_cache_measurement_remains_open(self) -> None:
+        http = self.evidence["d23_candidates"]["http_session_api"]
+        self.assertTrue(http["stable_external_contract"])
+        self.assertFalse(http["provider_prefix_cache_measured"])
 
 
 if __name__ == "__main__":
