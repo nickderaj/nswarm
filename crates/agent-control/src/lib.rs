@@ -1,4 +1,8 @@
-#![allow(clippy::multiple_crate_versions)]
+#![expect(
+    clippy::multiple_crate_versions,
+    reason = "chrono 0.4 and rusqlite 0.38 currently select incompatible exact transitive syn majors"
+)]
+
 //! Enforced control plane for research and coding agent jobs.
 
 mod coder;
