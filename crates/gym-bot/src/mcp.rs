@@ -188,6 +188,34 @@ impl Ord for RankedBodyMetric {
     }
 }
 
+#[cfg(test)]
+mod ranked_body_metric_tests {
+    use super::{BodyMetric, RankedBodyMetric};
+
+    fn ranked(at: &str, id: i64) -> RankedBodyMetric {
+        RankedBodyMetric {
+            at: chrono::DateTime::parse_from_rfc3339(at).expect("valid test timestamp"),
+            id,
+            metric: BodyMetric {
+                date: at.to_owned(),
+                metric: "weight_kg".to_owned(),
+                value: 80.0,
+                unit: "kg".to_owned(),
+                source: "manual".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn ranking_equality_requires_both_timestamp_and_row_id() {
+        let value = ranked("2026-08-31T12:00:00Z", 7);
+
+        assert_eq!(value, ranked("2026-08-31T12:00:00Z", 7));
+        assert_ne!(value, ranked("2026-08-31T12:00:01Z", 7));
+        assert_ne!(value, ranked("2026-08-31T12:00:00Z", 8));
+    }
+}
+
 /// Production implementation of the bounded gym tool.
 #[derive(Clone)]
 pub struct GymMcp {
