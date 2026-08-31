@@ -1,6 +1,10 @@
 //! Secret-safe gym runtime configuration.
 
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{
+    collections::HashMap,
+    env,
+    path::{Path, PathBuf},
+};
 
 use thiserror::Error;
 
@@ -10,13 +14,13 @@ use crate::database::validate_existing;
 #[derive(Debug)]
 pub struct GymConfig {
     /// Disposable copied frozen-schema database.
-    pub database_path: PathBuf,
+    database_path: PathBuf,
     /// Fleet-owned MCP socket.
-    pub socket_path: PathBuf,
+    socket_path: PathBuf,
     /// Fleet-owned group expected on the MCP socket directory and socket.
-    pub socket_group: String,
+    socket_group: String,
     /// Configured IANA time zone.
-    pub timezone: String,
+    timezone: String,
 }
 
 impl GymConfig {
@@ -26,7 +30,16 @@ impl GymConfig {
     ///
     /// Returns [`ConfigError`] for missing or invalid settings and storage.
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_values(&env::vars().collect())
+        let values = [
+            "GYM_DATA_DIR",
+            "NSWARM_MCP_SOCKET",
+            "NSWARM_MCP_SOCKET_GROUP",
+            "TIMEZONE",
+        ]
+        .into_iter()
+        .filter_map(|name| env::var(name).ok().map(|value| (name.to_owned(), value)))
+        .collect();
+        Self::from_values(&values)
     }
 
     /// Loads an explicit setting map for supervised adapters and tests.
@@ -36,6 +49,30 @@ impl GymConfig {
     /// Returns [`ConfigError`] for missing or invalid settings and storage.
     pub fn from_map(values: &HashMap<String, String>) -> Result<Self, ConfigError> {
         Self::from_values(values)
+    }
+
+    /// Returns the validated database path.
+    #[must_use]
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
+    }
+
+    /// Returns the validated MCP socket path.
+    #[must_use]
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Returns the validated socket group.
+    #[must_use]
+    pub fn socket_group(&self) -> &str {
+        &self.socket_group
+    }
+
+    /// Returns the configured IANA time zone.
+    #[must_use]
+    pub fn timezone(&self) -> &str {
+        &self.timezone
     }
 
     fn from_values(values: &HashMap<String, String>) -> Result<Self, ConfigError> {
@@ -145,16 +182,16 @@ mod tests {
             ),
         ]);
         let config = GymConfig::from_values(&values).expect("valid config");
-        assert_eq!(config.timezone, "Europe/London");
-        assert_eq!(config.database_path, directory.path().join("gym.db"));
-        assert_eq!(config.socket_path, PathBuf::from("/run/gym/mcp.sock"));
-        assert_eq!(config.socket_group, "gym-access");
+        assert_eq!(config.timezone(), "Europe/London");
+        assert_eq!(config.database_path(), directory.path().join("gym.db"));
+        assert_eq!(config.socket_path(), PathBuf::from("/run/gym/mcp.sock"));
+        assert_eq!(config.socket_group(), "gym-access");
         let mut custom = values;
         custom.insert("TIMEZONE".to_owned(), "UTC".to_owned());
         assert_eq!(
             GymConfig::from_values(&custom)
                 .expect("custom zone")
-                .timezone,
+                .timezone(),
             "UTC"
         );
         custom.insert("NSWARM_MCP_SOCKET".to_owned(), "relative.sock".to_owned());

@@ -83,3 +83,16 @@ fn receiver_authorization_matches_the_exact_bearer_value() {
         200
     );
 }
+
+#[test]
+fn request_debug_redacts_credentials_and_health_payloads() {
+    let request = HealthRequest {
+        authorization: Some("Bearer fixture-secret"),
+        body: br#"{"sensitive":"health-data"}"#,
+    };
+    let debug = format!("{request:?}");
+    assert!(debug.contains("[REDACTED]"));
+    assert!(debug.contains("body_len"));
+    assert!(!debug.contains("fixture-secret"));
+    assert!(!debug.contains("health-data"));
+}
