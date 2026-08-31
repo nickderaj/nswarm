@@ -180,7 +180,10 @@ fn is_immutable_revision(value: &str) -> bool {
 
 fn is_tight_location(value: &str) -> bool {
     let value = value.trim();
-    value.starts_with("https://")
+    (value.starts_with("https://")
+        && value.strip_prefix("https://").is_some_and(|rest| {
+            rest.contains('/') && (rest.contains('#') || rest.contains("/blob/"))
+        }))
         || (value.contains('/')
             && value.rsplit_once(':').is_some_and(|(_, anchor)| {
                 !anchor.is_empty()
@@ -540,6 +543,15 @@ mod tests {
             invalid.validate(),
             Err(ResearchReportError::ImpreciseLocation)
         );
+
+        for location in ["https://example.com", "https://example.com/main"] {
+            let mut invalid = report();
+            invalid.claims[0].location = location.to_owned();
+            assert_eq!(
+                invalid.validate(),
+                Err(ResearchReportError::ImpreciseLocation)
+            );
+        }
 
         let mut invalid = report();
         invalid.claims[0].observed_at = "2026-08-31 08:00:00".to_owned();
