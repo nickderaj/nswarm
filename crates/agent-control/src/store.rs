@@ -6,8 +6,8 @@ use thiserror::Error;
 
 use crate::types::{BriefError, report_matches_schema};
 use crate::{
-    ArtifactKind, Capability, JobBrief, JobId, JobState, LeaseKind, ProfileId, RiskClass, Role,
-    SessionId, Sha, UnitId,
+    ArtifactKind, Capability, CoderReport, CoderReportError, JobBrief, JobId, JobState, LeaseKind,
+    ProfileId, ResearchReport, ResearchReportError, RiskClass, Role, SessionId, Sha, UnitId,
 };
 
 const SCHEMA_VERSION: i64 = 9;
@@ -1307,6 +1307,73 @@ impl ControlStore {
         Ok(id)
     }
 
+    /// Validates and records a research-profile report against its immutable
+    /// brief and generic report schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the actor is not the unit's live research
+    /// profile, the typed report is inconsistent, or the durable report gate
+    /// refuses it.
+    pub fn record_research_report(
+        &mut self,
+        actor: &ProfileId,
+        unit_id: &UnitId,
+        report: &ResearchReport,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<i64, StoreError> {
+        let brief = self.typed_report_brief(actor, unit_id, Role::Research)?;
+        report.validate_for_brief(&brief)?;
+        let value = serde_json::to_value(report)?;
+        self.record_report(actor, unit_id, &value, idempotency_key, now)
+    }
+
+    /// Validates and records a coder candidate handoff against its immutable
+    /// brief and generic report schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the actor is not the unit's live coder,
+    /// exact-SHA or scope evidence differs from the brief, or the durable report
+    /// gate refuses it.
+    pub fn record_coder_report(
+        &mut self,
+        actor: &ProfileId,
+        unit_id: &UnitId,
+        report: &CoderReport,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<i64, StoreError> {
+        let brief = self.typed_report_brief(actor, unit_id, Role::Coder)?;
+        report.validate(&brief)?;
+        let value = serde_json::to_value(report)?;
+        self.record_report(actor, unit_id, &value, idempotency_key, now)
+    }
+
+    fn typed_report_brief(
+        &self,
+        actor: &ProfileId,
+        unit_id: &UnitId,
+        expected_role: Role,
+    ) -> Result<JobBrief, StoreError> {
+        let context: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT profiles.role, unit_briefs.brief_json FROM profiles JOIN unit_briefs USING (unit_id) WHERE profiles.profile_id = ?1 AND profiles.unit_id = ?2 AND profiles.destroyed_at IS NULL",
+                params![actor.as_str(), unit_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((role, brief_json)) = context else {
+            return Err(StoreError::UnauthorizedActor(actor.to_string()));
+        };
+        if role != expected_role.as_str() {
+            return Err(StoreError::UnauthorizedActor(actor.to_string()));
+        }
+        Ok(serde_json::from_str(&brief_json)?)
+    }
+
     /// Registers one role-bound isolated profile home.
     ///
     /// # Errors
@@ -2344,6 +2411,12 @@ pub enum StoreError {
     /// JSON evidence failed serialization.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    /// Research evidence did not satisfy the Step 5 typed contract.
+    #[error("research report validation error: {0}")]
+    ResearchReport(#[from] ResearchReportError),
+    /// Coder handoff did not satisfy the Step 5 typed contract.
+    #[error("coder report validation error: {0}")]
+    CoderReport(#[from] CoderReportError),
     /// Database was created by a newer incompatible binary.
     #[error("unsupported control-plane schema version: {0}")]
     UnsupportedSchema(i64),
@@ -2859,9 +2932,10 @@ mod tests {
         redact_evidence,
     };
     use crate::{
-        ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind,
-        NetworkMode, NetworkPolicy, PathPolicy, ProfileId, ResourceLimits, RiskClass, Role,
-        SessionId, Sha, UnitId, VerificationCommand,
+        ArtifactKind, BriefError, CoderReport, CoderReportError, CredentialGrant, JobBrief, JobId,
+        JobState, LeaseKind, NetworkMode, NetworkPolicy, PathPolicy, ProfileId, ResearchReport,
+        ResearchReportError, ResourceLimits, RiskClass, Role, SessionId, Sha, UnitId,
+        VerificationCommand,
     };
 
     fn sha(character: char) -> Sha {
@@ -4791,6 +4865,166 @@ mod tests {
         assert!(!stored.contains("synthetic-camel-case-key"));
         assert_eq!(stored.matches("[REDACTED]").count(), 6);
         assert!(stored.contains("focused test passed"));
+    }
+
+    #[test]
+    fn typed_research_reports_require_exact_roles_and_briefs() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let mut research_brief = brief();
+        research_brief.goal = "What changed?".to_owned();
+        research_brief.report_schema = json!({
+            "type": "object",
+            "required": ["schema_version"],
+            "properties": {"schema_version": {"type": "integer"}},
+            "additionalProperties": true
+        });
+        store
+            .create_job(&research_brief, 1)
+            .expect("research job created");
+        let researcher = ensure_profile(
+            &mut store,
+            &research_brief,
+            "typed-researcher",
+            Role::Research,
+            2,
+        );
+        ensure_profile_lease(&mut store, &research_brief, &researcher, 2);
+        let research: ResearchReport = serde_json::from_value(json!({
+            "schema_version": 1,
+            "question": "What changed?",
+            "done_predicate": "The required source classes are accounted for.",
+            "claims": [{
+                "kind": "direct",
+                "text": "The parser rejects blank input.",
+                "source_type": "source-control",
+                "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "location": "crates/assigned/src/lib.rs:parse",
+                "observed_at": "2026-08-31T08:00:00Z",
+                "confidence": "high",
+                "limitations": ["Deployment was not observed."]
+            }],
+            "sources": {
+                "searched": ["source-control"],
+                "empty": [],
+                "unavailable": ["observability"],
+                "skipped": []
+            },
+            "limitations": ["No production access was granted."]
+        }))
+        .expect("research report parses");
+        store
+            .record_research_report(
+                &researcher,
+                &research_brief.unit_id,
+                &research,
+                "typed-research-report",
+                3,
+            )
+            .expect("typed research report recorded");
+
+        let coder = ensure_profile(
+            &mut store,
+            &research_brief,
+            "wrong-role-typed-reporter",
+            Role::Coder,
+            3,
+        );
+        ensure_profile_lease(&mut store, &research_brief, &coder, 3);
+        assert!(matches!(
+            store.record_research_report(
+                &coder,
+                &research_brief.unit_id,
+                &research,
+                "wrong-role-research-report",
+                3,
+            ),
+            Err(StoreError::UnauthorizedActor(actor)) if actor == coder.as_str()
+        ));
+        let mut wrong_question = research.clone();
+        wrong_question.question = "A different question".to_owned();
+        assert!(matches!(
+            store.record_research_report(
+                &researcher,
+                &research_brief.unit_id,
+                &wrong_question,
+                "wrong-question-report",
+                3,
+            ),
+            Err(StoreError::ResearchReport(
+                ResearchReportError::QuestionMismatch
+            ))
+        ));
+    }
+
+    #[test]
+    fn typed_coder_reports_require_exact_roles_briefs_and_scopes() {
+        let mut store = ControlStore::open_in_memory().expect("store opens");
+        let mut coder_brief = brief();
+        coder_brief.job_id = JobId::new("coder-report-job").expect("job id");
+        coder_brief.unit_id = UnitId::new("coder-report-unit").expect("unit id");
+        coder_brief.report_schema = json!({
+            "type": "object",
+            "required": ["schema_version"],
+            "properties": {"schema_version": {"type": "integer"}},
+            "additionalProperties": true
+        });
+        store
+            .create_job(&coder_brief, 4)
+            .expect("coder job created");
+        let coder = ensure_profile(&mut store, &coder_brief, "typed-coder", Role::Coder, 5);
+        ensure_profile_lease(&mut store, &coder_brief, &coder, 5);
+        let coder_report: CoderReport = serde_json::from_value(json!({
+            "schema_version": 1,
+            "repository": coder_brief.repository,
+            "base_sha": coder_brief.base_sha,
+            "head_sha": sha('b'),
+            "changed_paths": ["crates/assigned/src/lib.rs"],
+            "acceptance": [{
+                "criterion": "focused test passes",
+                "evidence": "The focused test exited zero."
+            }],
+            "commands": [{
+                "command": {
+                    "program": "cargo",
+                    "arguments": ["test", "-p", "assigned"]
+                },
+                "exit_code": 0,
+                "output_digest": "c".repeat(64)
+            }],
+            "artifacts": [{
+                "kind": "test-report",
+                "path": "artifacts/test.json",
+                "head_sha": sha('b'),
+                "digest": "d".repeat(64)
+            }],
+            "remaining_risks": ["No deployment was attempted."],
+            "deviations": ["none"]
+        }))
+        .expect("coder report parses");
+        store
+            .record_coder_report(
+                &coder,
+                &coder_brief.unit_id,
+                &coder_report,
+                "typed-coder-report",
+                6,
+            )
+            .expect("typed coder report recorded");
+
+        let mut out_of_scope = coder_report;
+        out_of_scope.changed_paths = vec![PathBuf::from("crates/sibling/src/lib.rs")];
+        assert!(matches!(
+            store.record_coder_report(
+                &coder,
+                &coder_brief.unit_id,
+                &out_of_scope,
+                "out-of-scope-coder-report",
+                6,
+            ),
+            Err(StoreError::CoderReport(
+                CoderReportError::ChangedPathOutOfScope(_)
+            ))
+        ));
     }
 
     #[test]

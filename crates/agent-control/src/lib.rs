@@ -18,7 +18,9 @@ pub use provisioner::{
 pub use research::{
     ClaimConfidence, ClaimKind, ResearchClaim, ResearchReport, ResearchReportError, SourceAudit,
 };
-pub use store::{ControlStore, FindingDisposition, ReviewAssessment, StoreError};
+pub use store::{
+    ControlStore, FindingDisposition, ReviewAssessment, StoreError, VerificationVerdict,
+};
 pub use types::{
     ArtifactKind, BriefError, CredentialGrant, JobBrief, JobId, JobState, LeaseKind, NetworkMode,
     NetworkPolicy, PathPolicy, ProfileId, ResourceLimits, RiskClass, SessionId, Sha, UnitId,
