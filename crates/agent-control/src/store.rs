@@ -197,13 +197,6 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] when validation, serialization, or the atomic
     /// insert fails.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "trusted scheduler provisioning remains private until its command adapter is implemented"
-        )
-    )]
     // coverage-critical
     pub(crate) fn create_job(&mut self, brief: &JobBrief, now: i64) -> Result<(), StoreError> {
         brief.validate()?;
@@ -318,6 +311,16 @@ impl ControlStore {
             .optional()?
             .ok_or_else(|| StoreError::UnknownUnit(unit_id.to_string()))?;
         Ok(JobState::try_from(text.as_str())?)
+    }
+
+    pub(crate) fn live_coder_profiles(&self) -> Result<Vec<ProfileId>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT profile_id FROM profiles WHERE role = 'coder' AND destroyed_at IS NULL ORDER BY profile_id",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|profile| Ok(ProfileId::new(profile?)?))
+            .collect()
     }
 
     /// Performs a non-evidence-bearing state edge atomically.
@@ -1400,13 +1403,6 @@ impl ControlStore {
     ///
     /// Returns [`StoreError`] for a job/unit mismatch, relative home, duplicate
     /// profile, or database failure.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "trusted scheduler provisioning remains private until its command adapter is implemented"
-        )
-    )]
     pub(crate) fn register_profile(
         &mut self,
         profile_id: &ProfileId,
@@ -4685,7 +4681,7 @@ mod tests {
                 &brief.unit_id,
                 LeaseKind::Profile,
                 first.as_str(),
-                100,
+                101,
                 3,
             ),
             Err(StoreError::LeaseConflict(resource)) if resource == first.as_str()
