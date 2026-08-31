@@ -80,6 +80,14 @@ impl CoderReport {
     /// from the brief.
     // coverage-critical
     pub fn validate(&self, brief: &JobBrief) -> Result<(), CoderReportError> {
+        self.validate_with_writable_roots(brief, &brief.paths.writable)
+    }
+
+    pub(crate) fn validate_with_writable_roots(
+        &self,
+        brief: &JobBrief,
+        writable_roots: &[PathBuf],
+    ) -> Result<(), CoderReportError> {
         if self.schema_version != 1 {
             return Err(CoderReportError::UnsupportedSchemaVersion(
                 self.schema_version,
@@ -94,7 +102,7 @@ impl CoderReport {
         if self.head_sha == self.base_sha {
             return Err(CoderReportError::UnchangedHead);
         }
-        validate_changed_paths(&self.changed_paths, brief)?;
+        validate_changed_paths(&self.changed_paths, writable_roots)?;
         validate_acceptance(&self.acceptance, brief)?;
         validate_commands(&self.commands, brief)?;
         validate_artifacts(&self.artifacts, &self.head_sha)?;
@@ -106,7 +114,7 @@ impl CoderReport {
 
 fn validate_changed_paths(
     changed_paths: &[PathBuf],
-    brief: &JobBrief,
+    writable_roots: &[PathBuf],
 ) -> Result<(), CoderReportError> {
     if changed_paths.is_empty() {
         return Err(CoderReportError::NoChangedPaths);
@@ -116,7 +124,7 @@ fn validate_changed_paths(
         if !unique.insert(path) {
             return Err(CoderReportError::DuplicateChangedPath(path.clone()));
         }
-        if !brief.paths.can_write(path) {
+        if !writable_roots.iter().any(|root| path.starts_with(root)) {
             return Err(CoderReportError::ChangedPathOutOfScope(path.clone()));
         }
     }

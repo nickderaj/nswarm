@@ -1302,23 +1302,12 @@ impl ControlStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let role: Option<String> = transaction
-            .query_row(
-                "SELECT role FROM profiles WHERE profile_id = ?1 AND unit_id = ?2 AND destroyed_at IS NULL",
-                params![actor.as_str(), unit_id.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if role.as_deref() != Some(expected_role.as_str()) {
-            return Err(StoreError::UnauthorizedActor(actor.to_string()));
-        }
-        let id = record_report_tx(
+        let id = record_typed_report_tx(
             &transaction,
             actor,
             unit_id,
             report,
-            idempotency_key,
-            now,
+            (expected_role, idempotency_key, now),
             validate,
         )?;
         transaction.commit()?;
@@ -1368,13 +1357,20 @@ impl ControlStore {
         now: i64,
     ) -> Result<i64, StoreError> {
         let value = serde_json::to_value(report)?;
-        self.record_typed_report(
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let writable_roots = live_path_lease_roots_tx(&transaction, actor, unit_id, now)?;
+        let id = record_typed_report_tx(
+            &transaction,
             actor,
             unit_id,
             &value,
             (Role::Coder, idempotency_key, now),
-            |brief| Ok(report.validate(brief)?),
-        )
+            |brief| Ok(report.validate_with_writable_roots(brief, &writable_roots)?),
+        )?;
+        transaction.commit()?;
+        Ok(id)
     }
 
     /// Registers one role-bound isolated profile home.
@@ -2343,6 +2339,59 @@ fn record_report_tx(
         id,
     )?;
     Ok(id)
+}
+
+fn record_typed_report_tx(
+    transaction: &Transaction<'_>,
+    actor: &ProfileId,
+    unit_id: &UnitId,
+    report: &Value,
+    context: (Role, &str, i64),
+    validate: impl FnOnce(&JobBrief) -> Result<(), StoreError>,
+) -> Result<i64, StoreError> {
+    let (expected_role, idempotency_key, now) = context;
+    let role: Option<String> = transaction
+        .query_row(
+            "SELECT role FROM profiles WHERE profile_id = ?1 AND unit_id = ?2 AND destroyed_at IS NULL",
+            params![actor.as_str(), unit_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if role.as_deref() != Some(expected_role.as_str()) {
+        return Err(StoreError::UnauthorizedActor(actor.to_string()));
+    }
+    record_report_tx(
+        transaction,
+        actor,
+        unit_id,
+        report,
+        idempotency_key,
+        now,
+        validate,
+    )
+}
+
+fn live_path_lease_roots_tx(
+    transaction: &Transaction<'_>,
+    actor: &ProfileId,
+    unit_id: &UnitId,
+    now: i64,
+) -> Result<Vec<std::path::PathBuf>, StoreError> {
+    let mut statement = transaction.prepare(
+        "SELECT resource FROM leases WHERE holder_profile = ?1 AND unit_id = ?2 AND kind = ?3 AND released_at IS NULL AND expires_at > ?4 ORDER BY resource",
+    )?;
+    statement
+        .query_map(
+            params![
+                actor.as_str(),
+                unit_id.as_str(),
+                LeaseKind::Path.as_str(),
+                now
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .map(|resource| Ok(resource?.into()))
+        .collect()
 }
 
 fn append_event_tx(
@@ -5060,6 +5109,12 @@ mod tests {
                 "unavailable": ["observability"],
                 "skipped": []
             },
+            "critic": {
+                "critic_id": "critic-typed-research",
+                "passed": true,
+                "claims_digest": "b".repeat(64),
+                "findings": ["none"]
+            },
             "limitations": ["No production access was granted."]
         }))
         .expect("research report parses");
@@ -5124,6 +5179,19 @@ mod tests {
             .expect("coder job created");
         let coder = ensure_profile(&mut store, &coder_brief, "typed-coder", Role::Coder, 5);
         ensure_profile_lease(&mut store, &coder_brief, &coder, 5);
+        let coordinator = ensure_coordinator(&mut store, &coder_brief, 5);
+        store
+            .acquire_lease(
+                &coordinator,
+                &coder,
+                &coder_brief.job_id,
+                &coder_brief.unit_id,
+                LeaseKind::Path,
+                "crates/assigned/src",
+                10_000,
+                5,
+            )
+            .expect("path lease acquired");
         let coder_report: CoderReport = serde_json::from_value(json!({
             "schema_version": 1,
             "repository": coder_brief.repository,
@@ -5170,6 +5238,21 @@ mod tests {
                 &coder_brief.unit_id,
                 &out_of_scope,
                 "out-of-scope-coder-report",
+                6,
+            ),
+            Err(StoreError::CoderReport(
+                CoderReportError::ChangedPathOutOfScope(_)
+            ))
+        ));
+
+        let mut unleased = out_of_scope;
+        unleased.changed_paths = vec![PathBuf::from("crates/assigned/README.md")];
+        assert!(matches!(
+            store.record_coder_report(
+                &coder,
+                &coder_brief.unit_id,
+                &unleased,
+                "unleased-coder-report",
                 6,
             ),
             Err(StoreError::CoderReport(
