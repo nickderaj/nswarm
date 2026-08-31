@@ -547,4 +547,54 @@ mod tests {
             .expect_err("policy-shaped extra field is rejected");
         assert!(error.to_string().contains("unknown field `instructions`"));
     }
+
+    #[test]
+    fn eval_coder_containment_corpus_fails_closed() {
+        let case: serde_json::Value =
+            serde_json::from_str(include_str!("../../../eval/corpus/coder-containment.json"))
+                .expect("coder containment corpus parses");
+        let mutations = case["input"]["mutations"]
+            .as_array()
+            .expect("mutations are an array");
+        assert_eq!(
+            mutations.len() as u64,
+            case["expected"]["mutation_count"]
+                .as_u64()
+                .expect("expected mutation count")
+        );
+
+        for mutation in mutations {
+            let kind = mutation["kind"].as_str().expect("mutation kind is text");
+            let mut candidate = serde_json::to_value(report()).expect("report serializes");
+            match kind {
+                "sibling-path" | "forbidden-path" => {
+                    candidate["changed_paths"][0] = mutation["value"].clone();
+                }
+                "command-drift" => candidate["commands"][0]["command"]["arguments"]
+                    .as_array_mut()
+                    .expect("arguments are an array")
+                    .push(mutation["value"].clone()),
+                "failed-command" => {
+                    candidate["commands"][0]["exit_code"] = mutation["value"].clone();
+                }
+                "stale-artifact" => {
+                    candidate["artifacts"][0]["head_sha"] = mutation["value"].clone();
+                }
+                "base-mismatch" => {
+                    candidate["base_sha"] = mutation["value"].clone();
+                }
+                "policy-shaped-field" => {
+                    candidate["instructions"] = mutation["value"].clone();
+                    let error = serde_json::from_value::<CoderReport>(candidate)
+                        .expect_err("policy-shaped data cannot extend the report");
+                    assert!(error.to_string().contains("unknown field `instructions`"));
+                    continue;
+                }
+                _ => panic!("unknown mutation: {kind}"),
+            }
+            let candidate: CoderReport =
+                serde_json::from_value(candidate).expect("mutation preserves report schema");
+            assert!(candidate.validate(&brief()).is_err(), "{kind} must fail");
+        }
+    }
 }

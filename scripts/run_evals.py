@@ -16,6 +16,7 @@ CORPUS = ROOT / "eval" / "corpus"
 CASE_FIELDS = {"schema_version", "id", "package", "test", "input", "expected"}
 REQUIRED_CASES = {
     "capability-boundaries",
+    "coder-containment",
     "exact-sha",
     "path-containment",
     "redaction",
