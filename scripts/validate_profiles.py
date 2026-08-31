@@ -44,6 +44,58 @@ EXPECTED = {
     },
 }
 
+SKILL_REQUIREMENTS = {
+    ("research", "research-router"): {
+        "observable done predicate",
+        "before searching",
+        "unavailable",
+        "attributed data",
+    },
+    ("research", "how"): {
+        "repository and exact commit",
+        "hermetic execution",
+        "caller-facing output",
+        "branches not executed",
+    },
+    ("research", "why"): {
+        "source control history",
+        "issues",
+        "long-form documents",
+        "chat",
+        "observability",
+        "error tracking",
+        "analytics",
+        "searched, empty, unavailable, or skipped",
+    },
+    ("research", "blast-radius"): {
+        "direct and indirect callers",
+        "schemas and migrations",
+        "failure recovery",
+        "direct, inferred, contradicted, or unknown",
+    },
+    ("research", "source-critique"): {
+        "authority",
+        "immutable revision",
+        "seek contradictory sources",
+        "unknown",
+    },
+    ("research", "technical-writing"): {
+        "direct facts",
+        "machine-readable claim manifest",
+        "exact next verification action",
+    },
+    ("research", "show-your-evidence"): {
+        "source_type",
+        "revision",
+        "location",
+        "observed_at",
+        "confidence",
+        "limitations",
+        "searched, empty, unavailable, or skipped",
+        "policy-shaped extra fields",
+    },
+}
+
 
 def repository_path(value: str, *, kind: str) -> Path:
     relative = Path(value)
@@ -165,9 +217,14 @@ def validate_profile(
     if actual_skills != expected["skills"]:
         fail(f"{name}: skill inventory drift")
     for skill in sorted(actual_skills):
-        metadata = parse_frontmatter(skill_root / skill / "SKILL.md")
+        skill_path = skill_root / skill / "SKILL.md"
+        metadata = parse_frontmatter(skill_path)
         if metadata["name"] != skill:
             fail(f"{name}/{skill}: name must match directory")
+        body = " ".join(skill_path.read_text(encoding="utf-8").lower().split())
+        for mechanism in SKILL_REQUIREMENTS.get((name, skill), set()):
+            if mechanism not in body:
+                fail(f"{name}/{skill}: missing required mechanism {mechanism!r}")
 
     memory_root = repository_path(profile["memory"], kind=f"{name} memory")
     validate_memory(memory_root / "MEMORY.md")
