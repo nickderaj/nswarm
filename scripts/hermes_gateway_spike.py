@@ -264,6 +264,43 @@ def verify_source(source: Path, pin: dict[str, Any]) -> dict[str, Any]:
         if anchor not in conversation_text:
             raise SpikeError(f"prompt persistence anchor missing: {anchor}")
 
+    cache_text = (source / "agent" / "prompt_caching.py").read_text(
+        encoding="utf-8"
+    )
+    for anchor in (
+        "def apply_anthropic_cache_control(",
+        'marker: Dict[str, str] = {"type": "ephemeral"}',
+        "legacy system-and-3 layout",
+    ):
+        if anchor not in cache_text:
+            raise SpikeError(f"provider cache-marker anchor missing: {anchor}")
+
+    runtime_text = (source / "agent" / "agent_runtime_helpers.py").read_text(
+        encoding="utf-8"
+    )
+    for anchor in (
+        'capability="prompt_caching"',
+        "return custom_prompt_caching, custom_prompt_caching and is_anthropic_wire",
+    ):
+        if anchor not in runtime_text:
+            raise SpikeError(f"provider cache-policy anchor missing: {anchor}")
+
+    transport_text = (source / "agent" / "transports" / "anthropic.py").read_text(
+        encoding="utf-8"
+    )
+    for anchor in (
+        'getattr(usage, "cache_read_input_tokens", 0)',
+        'getattr(usage, "cache_creation_input_tokens", 0)',
+    ):
+        if anchor not in transport_text:
+            raise SpikeError(f"provider cache-usage anchor missing: {anchor}")
+
+    pricing_text = (source / "agent" / "usage_pricing.py").read_text(
+        encoding="utf-8"
+    )
+    if "cache_read_tokens = _usage_count" not in pricing_text:
+        raise SpikeError("provider cache-pricing anchor missing")
+
     return {
         "schema_version": 1,
         "pin": {
@@ -290,6 +327,8 @@ def verify_source(source: Path, pin: dict[str, Any]) -> dict[str, Any]:
             "agent_todo_state_per_construction": True,
             "prompt_full_build_first_turn": True,
             "prompt_restored_from_session_db_later_turns": True,
+            "provider_cache_markers_reapplied_per_call": True,
+            "provider_cache_usage_buckets_preserved": True,
             "warm_agent_reuse_on_http_session_route": False,
             "native_adapter_ingress_is_internal_python_api": True,
             "native_adapter_ingress_line": native_ingress_calls[0],

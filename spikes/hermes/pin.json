@@ -10,7 +10,11 @@
   "capabilities_contract_sha256": "9b45159602276d39fb0ac73e5a1cbc816a78d06111cda7aaf0c134808bf5920c",
   "source_files": {
     "agent/agent_init.py": "1a553208ece88af251a79f117aad0c555bc45568ff260c15b58d72dbd6279b75",
+    "agent/agent_runtime_helpers.py": "9b088972cd0d7d9f6cedb50ae739ddfe71e50c99f3140ea36b7d5379e1c176b1",
     "agent/conversation_loop.py": "740349e7ff0aafda0585d84484824a01ac8ca78e86dafa11dc9014f0a621a326",
+    "agent/prompt_caching.py": "aadb0e15833a4fa14bd627d0798cd12a42c31c15e5da787a3b54e1fed1f9487a",
+    "agent/transports/anthropic.py": "7bac289e5d9022a15ec9f4cbab9fad9a1c22a135f39f02e1a7530b2b8d504573",
+    "agent/usage_pricing.py": "51ec125f03e5a2f686b8f669755712ef8f9956961fc49fdc33a0abc37cbfcd9e",
     "gateway/platforms/api_server.py": "204fa3e857dc50c032e084f2e8ebd864ea3ebbac80891f65ad85760e92edfeda",
     "gateway/platforms/base.py": "0d68a1612698278bb1f7bd6ff71a8f77148a6bb76325e474a0ff9a8b177ea5f4",
     "gateway/relay/adapter.py": "df6562a87d4132a62556165e90aaeb89661c8b1737b8f1c59151ae72a3565bdd",

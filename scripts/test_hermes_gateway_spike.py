@@ -33,7 +33,11 @@ class PinTests(unittest.TestCase):
             set(pin["source_files"]),
             {
                 "agent/agent_init.py",
+                "agent/agent_runtime_helpers.py",
                 "agent/conversation_loop.py",
+                "agent/prompt_caching.py",
+                "agent/transports/anthropic.py",
+                "agent/usage_pricing.py",
                 "gateway/platforms/api_server.py",
                 "gateway/platforms/base.py",
                 "gateway/relay/adapter.py",
