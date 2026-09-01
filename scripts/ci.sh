@@ -39,5 +39,8 @@ require_command cargo-semver-checks
 python3 -m unittest scripts/test_check_semver.py
 python3 -m unittest scripts/test_hermes_gateway_spike.py
 python3 -m unittest scripts/test_hermes_provider_cache_spike.py
+python3 -m unittest scripts/test_hermes_multiplex_spike.py
+python3 -m unittest scripts/test_hermes_multiplex_evidence.py
 python3 scripts/check_hermes_provider_cache_evidence.py
+python3 scripts/check_hermes_multiplex_evidence.py
 python3 scripts/check_semver.py origin/main
