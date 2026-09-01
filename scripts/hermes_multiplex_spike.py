@@ -92,7 +92,9 @@ def validate_args(args: argparse.Namespace) -> tuple[Path, Path, int]:
     if not args.i_understand_this_is_local_only:
         raise MultiplexSpikeError("refusing without --i-understand-this-is-local-only")
     source = args.source.resolve()
-    python = args.python.resolve()
+    # Preserve a virtualenv's interpreter symlink. Resolving it to the base
+    # CPython binary changes sys.prefix and silently drops the environment.
+    python = Path(os.path.abspath(args.python))
     output = args.output.resolve()
     if not source.is_dir():
         raise MultiplexSpikeError("Hermes source is not a directory")

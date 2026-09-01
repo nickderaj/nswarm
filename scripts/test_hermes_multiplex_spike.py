@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -51,6 +52,14 @@ class ArgumentTests(unittest.TestCase):
             path = Path(directory)
             with self.assertRaisesRegex(SPIKE.MultiplexSpikeError, "directly under"):
                 SPIKE.validate_args(self.args(path, output=path / "raw.json"))
+
+    def test_preserves_virtualenv_interpreter_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            interpreter = root / "python"
+            interpreter.symlink_to("/bin/sh")
+            _, actual, _ = SPIKE.validate_args(self.args(root, python=interpreter))
+            self.assertEqual(actual, Path(os.path.abspath(interpreter)))
 
 
 class SummaryTests(unittest.TestCase):
