@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 from argparse import Namespace
+import copy
 from decimal import Decimal
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -23,6 +25,13 @@ assert SPEC is not None and SPEC.loader is not None
 SPIKE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = SPIKE
 SPEC.loader.exec_module(SPIKE)
+CHECK_SPEC = importlib.util.spec_from_file_location(
+    "check_hermes_provider_cache_evidence",
+    ROOT / "scripts" / "check_hermes_provider_cache_evidence.py",
+)
+assert CHECK_SPEC is not None and CHECK_SPEC.loader is not None
+CHECK = importlib.util.module_from_spec(CHECK_SPEC)
+CHECK_SPEC.loader.exec_module(CHECK)
 
 
 def args(source: Path, output: Path, **overrides: object) -> Namespace:
@@ -168,7 +177,7 @@ class ProviderContractTests(unittest.TestCase):
             "id": "must-not-be-persisted",
             "content": [{"type": "text", "text": "ACK0001"}],
             "usage": {
-                "input_tokens": 10,
+                "input_tokens": 600,
                 "cache_read_input_tokens": 1_000,
                 "cache_creation_input_tokens": 0,
                 "output_tokens": 2,
@@ -185,6 +194,28 @@ class ProviderContractTests(unittest.TestCase):
         self.assertEqual(result.cached_input_tokens, 1_000)
         self.assertEqual(result.latency_ms, 321)
         self.assertNotIn("id", result.__dataclass_fields__)
+
+    def test_invoke_rejects_usage_that_omits_controlled_prefix(self) -> None:
+        response = {
+            "content": [{"type": "text", "text": "ACK0001"}],
+            "usage": {
+                "input_tokens": 12,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 2,
+            },
+        }
+        with (
+            patch.object(SPIKE, "_request_json", return_value=(response, 321)),
+            self.assertRaisesRegex(SPIKE.ProviderCacheError, "omitted too much"),
+        ):
+            SPIKE.invoke_provider(
+                api_key="inf_synthetic",
+                config=self.config,
+                quote=self.quote,
+                system_prompt="safe",
+                messages=[{"role": "user", "content": "safe"}],
+            )
 
     def test_system_prompts_are_equal_length_and_nonce_scoped(self) -> None:
         warm = SPIKE.make_system_prompt(
@@ -233,6 +264,11 @@ class ProviderContractTests(unittest.TestCase):
                 "fetch_price_quote",
                 return_value=(self.quote, "2026-09-01T08:09:59.006Z"),
             ),
+            patch.object(
+                SPIKE,
+                "secrets",
+                **{"token_hex.return_value": "a" * 32},
+            ),
             patch.object(SPIKE, "invoke_provider", side_effect=side_effect),
         ):
             evidence = SPIKE.measure_live(self.config)
@@ -246,6 +282,30 @@ class ProviderContractTests(unittest.TestCase):
         self.assertEqual(
             evidence["decision"]["d24_multiplexing_evaluation"], "unblocked"
         )
+
+
+class EvidenceIntegrityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.evidence = json.loads(CHECK.EVIDENCE_PATH.read_text(encoding="utf-8"))
+        cls.pin = json.loads(CHECK.PIN_PATH.read_text(encoding="utf-8"))
+
+    def test_committed_evidence_is_derived_and_complete(self) -> None:
+        CHECK.validate_evidence(copy.deepcopy(self.evidence), self.pin)
+
+    def test_tampered_turn_cost_fails_closed(self) -> None:
+        evidence = copy.deepcopy(self.evidence)
+        evidence["trial"]["turns"][1]["long_lived_session"][
+            "cost_micro_usd"
+        ] += 1
+        with self.assertRaisesRegex(CHECK.EvidenceError, "turn cost"):
+            CHECK.validate_evidence(evidence, self.pin)
+
+    def test_tampered_aggregate_fails_closed(self) -> None:
+        evidence = copy.deepcopy(self.evidence)
+        evidence["aggregate"]["cold_sessions"]["cached_input_tokens"] = 1
+        with self.assertRaisesRegex(CHECK.EvidenceError, "cold aggregate"):
+            CHECK.validate_evidence(evidence, self.pin)
 
 
 if __name__ == "__main__":

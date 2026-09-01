@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import json
 import os
 from pathlib import Path
+import secrets
 import statistics
 import subprocess
 import sys
@@ -336,10 +337,18 @@ def invoke_provider(
     usage = document.get("usage")
     if not isinstance(usage, dict):
         raise ProviderCacheError("provider response omitted usage")
+    uncached = _usage_int(usage, "input_tokens", required=True)
+    cached = _usage_int(usage, "cache_read_input_tokens")
+    written = _usage_int(usage, "cache_creation_input_tokens")
+    minimum_prompt_tokens = config.prefix_bytes // 16
+    if uncached + cached + written < minimum_prompt_tokens:
+        raise ProviderCacheError(
+            "provider usage omitted too much of the controlled prompt to measure cache behavior"
+        )
     return TurnUsage(
-        uncached_input_tokens=_usage_int(usage, "input_tokens", required=True),
-        cached_input_tokens=_usage_int(usage, "cache_read_input_tokens"),
-        cache_write_input_tokens=_usage_int(usage, "cache_creation_input_tokens"),
+        uncached_input_tokens=uncached,
+        cached_input_tokens=cached,
+        cache_write_input_tokens=written,
         output_tokens=_usage_int(usage, "output_tokens", required=True),
         cost_micro_usd=usage_cost_micro_usd(usage, quote),
         latency_ms=latency_ms,
@@ -419,9 +428,7 @@ def measure_live(config: LiveConfig) -> dict[str, Any]:
             "planned worst-case spend exceeds the operator's hard spend ceiling"
         )
     api_key = os.environ[API_KEY_ENV]
-    stable_prompt = make_system_prompt(
-        config.prefix_bytes, "warm-session-prefix-000000000000"
-    )
+    stable_prompt = make_system_prompt(config.prefix_bytes, secrets.token_hex(16))
     history: list[dict[str, str]] = []
     warm_turns: list[TurnUsage] = []
     cold_turns: list[TurnUsage] = []
@@ -430,9 +437,7 @@ def measure_live(config: LiveConfig) -> dict[str, Any]:
     for ordinal in range(1, config.turns + 1):
         user_text = f"ACK request {ordinal:04d}"
         messages = [*history, {"role": "user", "content": user_text}]
-        cold_prompt = make_system_prompt(
-            config.prefix_bytes, f"cold-session-prefix-{ordinal:04d}-0000000"
-        )
+        cold_prompt = make_system_prompt(config.prefix_bytes, secrets.token_hex(16))
         cold = invoke_provider(
             api_key=api_key,
             config=config,
@@ -518,6 +523,7 @@ def measure_live(config: LiveConfig) -> dict[str, Any]:
             "turns": paired_turns,
         },
         "aggregate": {
+            "cost_basis": "provider usage buckets multiplied by the provider's published per-bucket rates",
             "cold_sessions": _summarize(cold_turns),
             "long_lived_session": _summarize(warm_turns),
             "repeat_turns_only": {
