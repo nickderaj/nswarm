@@ -2,7 +2,8 @@
 
 Status: the local warm-agent assumption failed on 2026-08-30, but the separate
 provider-cache gate passed on 2026-09-01. D23 now retains the stable HTTP
-session API on that measured basis. D24 is unblocked but has not been run.
+session API on that measured basis. D24's pinned local multiplexing simulation
+also passes; target-Pi resources and Linux enforcement remain open.
 
 ## Pinned provenance
 
@@ -171,6 +172,13 @@ not fetch the external Hermes repository, so the full source-byte/call-graph
 verification remains an explicit execution gate against an already checked-out
 source tree rather than a claim of continuous upstream monitoring.
 
+The D24 local follow-up ran 27 additional pinned upstream files through
+Hermes's canonical per-file-isolation runner with four workers and retries
+disabled. All 288 tests passed, two optional-dependency cases skipped, and no
+file needed a retry. The aggregate runner time was 5.4 seconds on the Apple
+arm64 host. This is test-suite wall time, not gateway turn latency or a Pi
+resource measurement.
+
 ## Recorded capabilities contract
 
 The pinned release reports bearer authentication as required,
@@ -221,21 +229,45 @@ D23. D24 may now evaluate the documented multiplexed gateway. If credential,
 profile, socket, sandbox or Pi behavior fails that ordered trial, D24 still
 falls back to one sandboxed gateway process and service user per bot.
 
-Per the required measurement order, the following remain unexecuted until the
-newly unblocked D24 harness is reviewed:
+## D24 local multiplexing simulation
+
+[`../scripts/hermes_multiplex_spike.py`](../scripts/hermes_multiplex_spike.py)
+runs Hermes's canonical regression suite against the same exact source pin. It
+requires an explicit local-only acknowledgement, a clean tracked upstream
+worktree and an isolated Python environment with the pinned test dependencies.
+It caps the runner at four workers, disables retry-based green results, makes no
+provider calls and stores no raw test output.
+
+The focused suite uses two temporary profile homes and covers both directions
+of credential isolation, profile-prefixed HTTP routing and allowlists,
+per-profile bearer authorization, provider/model secret scope, SOUL/config/
+memory/skill scope, session-key namespaces, separate SQLite stores, concurrent
+context propagation, background task scope, adapter lifecycle and pairing
+stores. The result was 288 passed, 0 failed, 2 optional-dependency skips across
+27 files, with zero flaky retries. The committed aggregate is
+[`../spikes/hermes/evidence/multiplex-local.json`](../spikes/hermes/evidence/multiplex-local.json),
+and its fail-closed checker runs in local, PR and merge-queue CI.
+
+This passes D24's local functional isolation gate and provisionally supports
+one multiplexed gateway. It does not settle the complete topology decision:
+Darwin cannot exercise the Linux service user, systemd sandbox or Unix-socket
+group/ACL transition, and its resource result cannot stand in for the target
+Pi. The upstream tests use temporary profiles rather than attaching gym's real
+MCP server, and no live pilot or gym parallel trial was run.
+
+The following D24 acceptance work therefore remains target- or profile-specific:
 
 - a two-profile multiplex gateway and actual Pi RSS/latency measurements;
-- live or fake credential-isolation tests in both directions;
-- concurrent profile activity and home/memory/skills/MCP/toolset isolation;
 - the dedicated `hermes-gateway` systemd sandbox on Linux;
 - a throwaway cross-user socket group/ACL transition;
 - gym's real MCP server attachment;
 - `hermes prompt-size` before/after the §6.3 toolsets.
 
-Therefore D24 remains unevaluated, but it is no longer blocked by D23. There is
-still no basis in this PR to accept the single multiplexed process or to select
-the documented per-bot-process fallback. No Pi, credential, socket-isolation,
-or prompt-size result is claimed from the Apple host.
+Therefore D24 is locally de-risked but not finally settled. The local evidence
+finds no reason to force the per-bot-process fallback; one gateway remains the
+provisional topology until the target-host checks either confirm it or trigger
+that fallback. No Pi, Linux sandbox, socket-ACL, real-MCP, prompt-size or pilot
+result is claimed from the Apple host.
 
 The first exact D24 Pi run from the `nswarm` checkout is:
 
@@ -245,10 +277,10 @@ The first exact D24 Pi run from the `nswarm` checkout is:
   --output /tmp/hermes-http-reuse-pi.json
 ```
 
-The source checkout must first pass `verify-source`. A separate reviewed
-multiplex/isolation harness must then be added before any RSS, credential,
-socket or prompt-size command is considered valid. D23 now permits that work;
-this provider-cache change deliberately does not implement or run it.
+The source checkout must first pass `verify-source`. The reviewed local
+multiplex harness has now established the functional baseline; the Pi command
+does not by itself satisfy the remaining sandbox, socket or profile prompt-size
+gates.
 
 ## Scope held
 

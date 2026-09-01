@@ -78,3 +78,28 @@ result and fails closed in local, PR and merge-queue CI.
 This live experiment revises D23 to retain the stable HTTP session route and
 unblocks D24's multiplexing/isolation/Pi evaluation. It is not a bot session,
 deployment, gym parallel trial or live pilot.
+
+Run the local-only D24 multiplexing simulation against the same clean pinned
+checkout and its isolated test environment with:
+
+```console
+/path/to/pinned/venv/bin/python scripts/hermes_multiplex_spike.py \
+  --source /path/to/hermes-agent \
+  --python /path/to/pinned/venv/bin/python \
+  --output spikes/hermes/evidence/multiplex-local.json \
+  --workers 4 --i-understand-this-is-local-only
+```
+
+The harness invokes Hermes's canonical per-file-isolation runner with retries
+disabled. Its 27-file two-profile suite passed 288 tests, failed none, skipped
+two optional-dependency cases and required no flaky retry. It covers profile
+routing/auth, credential and provider-secret scope, SOUL/memory/skills/config
+scope, session namespaces and SQLite placement, concurrent context propagation
+and lifecycle. `evidence/multiplex-local.json` contains only aggregate counts,
+environment identity and bounded wall times; raw runner output, profile data
+and credentials are not persisted.
+
+This is a passing local functional gate, not full D24 acceptance. The target Pi
+resource envelope, Linux systemd/service-user enforcement, socket ACL change,
+real profile prompt sizes and gym MCP attachment remain pending. It is not a
+gym parallel trial or a live pilot.
