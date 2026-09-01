@@ -150,13 +150,13 @@ architecture experiment, not a Hermes pilot, bot session or deployment.
 
 ## Validation
 
-The exact source verifier, eleven evidence-integrity and derivation checks,
+The exact source verifier, 30 focused Hermes tests, aggregate-evidence checker,
 repository policy check, formatting check, and diff hygiene pass locally. The
-standard `just ci`
-run passed its policy, profile, generated-file, Fleet, formatting, check, eval,
-Clippy, 131-test, rustdoc, feature-power-set, dependency audit, vet, machete,
-coverage, and Python-test stages. Repository coverage was 97.02% and all 296
-marked critical branch outcomes were covered.
+standard `just ci` run passed its policy, profile, generated-file, Fleet,
+formatting, check, eval, Clippy, 212-test, rustdoc, feature-power-set,
+dependency audit, vet, machete, coverage, Python-test and semver stages.
+Repository coverage was 97.10% and all 318 marked critical branch outcomes were
+covered.
 
 The previously red standard semver stage is repaired without changing the Rust
 1.90 MSRV or weakening the comparison. `cargo-semver-checks` creates unlocked
