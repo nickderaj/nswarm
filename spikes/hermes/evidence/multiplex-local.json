@@ -1,0 +1,64 @@
+{
+  "contracts": {
+    "concurrent_context_and_background_scope": "passed",
+    "credential_and_provider_secret_isolation": "passed",
+    "multiplex_adapter_lifecycle": "passed",
+    "per_profile_http_bearer_auth": "passed",
+    "profile_route_and_allowlist": "passed",
+    "session_key_and_sqlite_store_isolation": "passed",
+    "soul_memory_skill_and_config_scope": "passed"
+  },
+  "decision": {
+    "d24_topology": "provisionally_supports_one_gateway",
+    "gym_mcp_attachment": "not_run",
+    "linux_sandbox_and_socket_acl_gate": "pending",
+    "live_pilot": false,
+    "local_multiplex_functional_gate": "passed",
+    "profile_prompt_size_gate": "pending_real_profiles",
+    "target_pi_resource_gate": "pending"
+  },
+  "environment": {
+    "aiohttp_version": "3.14.3",
+    "architecture": "arm64",
+    "linux_service_manager": false,
+    "os": "Darwin",
+    "pytest_version": "9.1.1",
+    "python_implementation": "CPython",
+    "python_version": "3.11.14",
+    "target_pi": false
+  },
+  "measurement": "pinned_hermes_multiplex_local_simulation",
+  "pin": {
+    "commit_sha": "fcbd1076a93841fa88855acce810e342a5b78101",
+    "package": "hermes-agent",
+    "package_version": "0.20.5",
+    "plan_source_commit_prefix": "68518c1",
+    "python_requires": ">=3.11,<3.14",
+    "repository": "https://github.com/NousResearch/hermes-agent.git",
+    "tag": "v2026.8.19",
+    "tag_object_sha": "b05e680e63d39d5a8e3ec0f5842a41d1c4209c03"
+  },
+  "safeguards": {
+    "exact_source_pin_required": true,
+    "max_workers": 4,
+    "operator_local_only_acknowledgement": true,
+    "production_credentials_loaded": 0,
+    "provider_calls": 0,
+    "raw_test_output_persisted": false,
+    "test_file_retries": 0,
+    "tracked_source_clean_required": true
+  },
+  "schema_version": 1,
+  "trial": {
+    "canonical_runner_wall_ms": 5400,
+    "completion_percent": 100,
+    "flaky_files": 0,
+    "harness_wall_ms": 6024,
+    "profile_count": 2,
+    "test_files": 27,
+    "tests_failed": 0,
+    "tests_passed": 288,
+    "tests_skipped_optional_dependencies": 2,
+    "workers": 4
+  }
+}
