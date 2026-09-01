@@ -30,8 +30,8 @@ first global route prime is reported separately, then 30 new-session calls and
 The verifier fails closed on a different Git commit, annotated tag object,
 package version, Python requirement, or relevant source byte. It also checks
 the load-bearing call path: session chat delegates to `_run_agent`, `_run_agent`
-constructs an agent for each request, and only the native messaging gateway
-contains the live-agent cache.
+constructs an agent for each request, only native messaging holds a live-agent
+cache, and the provider cache planner/usage path remains intact.
 
 No profile state, credentials, transcripts, caches, or owner-specific paths are
 stored here. Runtime measurements and their limitations are recorded separately
@@ -53,4 +53,28 @@ provide synchronous `ask()`. Hermes Relay retains native cache reuse while
 separating transport ownership, but its protocol is explicitly experimental and
 requires a connector outside the reviewed pin. Neither path is a reviewed D23
 local-agent-cache replacement. The stable HTTP transport remains a candidate;
-provider-side prefix-cache behavior and cost are the next unmeasured D23 gate.
+the separate provider-cache experiment settles that remaining D23 gate.
+
+Run the paid provider-cache harness only with an operator-selected ceiling and
+explicit opt-in. The credential is read only from the environment:
+
+```console
+SURPLUS_API_KEY=... python3 scripts/hermes_provider_cache_spike.py \
+  --source /path/to/hermes-agent \
+  --output spikes/hermes/evidence/provider-cache.json \
+  --turns 4 --model claude-haiku-4.5 --provider anthropic \
+  --prefix-bytes 24576 --max-output-tokens 8 --max-spend-usd 1.00 \
+  --i-understand-this-spends-money
+```
+
+`evidence/provider-cache.json` contains aggregate token buckets, modeled cost
+and end-to-end latency only. It records 6,435 provider cache writes on the
+long-lived prime and 6,435 cache reads on each of three repeats. Repeated-turn
+modeled cost falls 91.02%, from 24,391 to 2,190 micro-USD. The API key, prompt,
+transcript, response text, request identifiers and per-run cache nonces are not
+stored. `scripts/check_hermes_provider_cache_evidence.py` derives the complete
+result and fails closed in local, PR and merge-queue CI.
+
+This live experiment revises D23 to retain the stable HTTP session route and
+unblocks D24's multiplexing/isolation/Pi evaluation. It is not a bot session,
+deployment, gym parallel trial or live pilot.
