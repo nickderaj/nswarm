@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-control"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -68,9 +68,10 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "botkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -454,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "gym-bot"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "botkit",
  "chrono",

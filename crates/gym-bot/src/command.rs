@@ -145,11 +145,11 @@ impl CommandService {
         connection.execute(
             "INSERT INTO body_metrics (date, metric, value, unit, source) \
              VALUES (?1, 'weight_kg', ?2, 'kg', 'manual')",
-            (&self.clock.now_iso8601(), parsed.kilograms),
+            (&self.clock.now_iso8601(), parsed.kilograms()),
         )?;
         Ok(CommandResult::Reply(format!(
             "✅ Logged weight: {} kg",
-            format_v0_general(parsed.kilograms)
+            format_v0_general(parsed.kilograms())
         )))
     }
 }
@@ -198,7 +198,15 @@ fn format_v0_general(value: f64) -> String {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeightCommand {
     /// Positive, finite weight in kilograms.
-    pub kilograms: f64,
+    kilograms: f64,
+}
+
+impl WeightCommand {
+    /// Returns the validated positive, finite weight in kilograms.
+    #[must_use]
+    pub const fn kilograms(&self) -> f64 {
+        self.kilograms
+    }
 }
 
 /// Parses exactly `/weight <kg>` with the optional lowercase `kg` suffix used

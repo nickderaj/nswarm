@@ -1,7 +1,7 @@
 [package]
 name = "botkit"
 description = "Transport-neutral runtime contracts shared by nswarm bots"
-version.workspace = true
+version = "0.2.0"
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,6 +15,9 @@ categories = ["api-bindings"]
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

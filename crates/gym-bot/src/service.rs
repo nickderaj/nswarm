@@ -65,6 +65,31 @@ pub struct GymService {
     clock: Arc<dyn Clock>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BatchCommand {
+    Status,
+    Cancel,
+    Flush,
+    Retry,
+    Toggle,
+    Open,
+}
+
+impl BatchCommand {
+    const fn parse(value: Option<&str>) -> Option<Self> {
+        match value {
+            None => Some(Self::Toggle),
+            Some(value) if value.eq_ignore_ascii_case("status") => Some(Self::Status),
+            Some(value) if value.eq_ignore_ascii_case("cancel") => Some(Self::Cancel),
+            Some(value) if value.eq_ignore_ascii_case("flush") => Some(Self::Flush),
+            Some(value) if value.eq_ignore_ascii_case("retry") => Some(Self::Retry),
+            Some(value) if value.eq_ignore_ascii_case("toggle") => Some(Self::Toggle),
+            Some(value) if value.eq_ignore_ascii_case("open") => Some(Self::Open),
+            Some(_) => None,
+        }
+    }
+}
+
 impl GymService {
     /// Creates a service against the frozen v0 schema.
     #[must_use]
@@ -165,9 +190,9 @@ impl GymService {
         connection.execute(
             "INSERT INTO body_metrics (date, metric, value, unit, source) \
              VALUES (?1, 'weight_kg', ?2, 'kg', 'manual')",
-            params![self.clock.now_iso8601(), parsed.kilograms],
+            params![self.clock.now_iso8601(), parsed.kilograms()],
         )?;
-        Ok(format!("Logged weight: {} kg", General(parsed.kilograms)))
+        Ok(format!("Logged weight: {} kg", General(parsed.kilograms())))
     }
 
     fn strength(&self, connection: &Connection, text: &str) -> Result<String, ServiceError> {
@@ -316,13 +341,13 @@ impl GymService {
             return Ok("Batch commands require a numeric conversation id.".to_owned());
         };
         let mut tokens = text.split_whitespace().skip(1);
-        let subcommand = tokens.next().unwrap_or("toggle").to_ascii_lowercase();
+        let subcommand = BatchCommand::parse(tokens.next());
         if tokens.next().is_some() {
             return Ok(BATCH_USAGE.to_owned());
         }
         let batch = BatchService::new(&self.database_path);
-        match subcommand.as_str() {
-            "status" => {
+        match subcommand {
+            Some(BatchCommand::Status) => {
                 let (count, earliest) = batch.status(chat_id)?;
                 Ok(format!(
                     "Batch: {count} messages{}",
@@ -331,12 +356,12 @@ impl GymService {
                         .unwrap_or_default()
                 ))
             }
-            "cancel" => {
+            Some(BatchCommand::Cancel) => {
                 let count = batch.cancel(chat_id)?;
                 Ok(format!("Cancelled batch with {count} buffered messages."))
             }
-            "flush" | "retry" => batch_flush_reply(&batch, chat_id),
-            "toggle" => {
+            Some(BatchCommand::Flush | BatchCommand::Retry) => batch_flush_reply(&batch, chat_id),
+            Some(BatchCommand::Toggle) => {
                 let active = batch.active(chat_id)?;
                 if active {
                     batch_flush_reply(&batch, chat_id)
@@ -344,8 +369,8 @@ impl GymService {
                     self.open_batch(&batch, chat_id)
                 }
             }
-            "open" => self.open_batch(&batch, chat_id),
-            _ => Ok(BATCH_USAGE.to_owned()),
+            Some(BatchCommand::Open) => self.open_batch(&batch, chat_id),
+            None => Ok(BATCH_USAGE.to_owned()),
         }
     }
 

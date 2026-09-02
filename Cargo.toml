@@ -45,6 +45,11 @@ all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+partial_pub_fields = "deny"
+todo = "deny"
+unimplemented = "deny"
 
 [profile.release]
 codegen-units = 1

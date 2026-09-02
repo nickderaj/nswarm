@@ -47,7 +47,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo check --locked --workspace --all-targets --all-features
       - run: python3 scripts/run_evals.py
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo nextest run --workspace --all-features --profile ci
       - run: cargo test --workspace --doc --all-features
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps

@@ -429,7 +429,7 @@ fn batch_commands_manage_durable_state_without_attempting_agent_extraction() {
     let service = GymService::new(&database, Arc::new(FixedClock::new(NOW)));
 
     assert_eq!(
-        service.handle(&request("/batch status")).expect("status"),
+        service.handle(&request("/batch STATUS")).expect("status"),
         "Batch: 0 messages"
     );
     assert!(

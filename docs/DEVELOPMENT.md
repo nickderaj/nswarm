@@ -31,7 +31,10 @@ in `scripts/ci-full.sh`; the merge queue runs them after the PR gate.
 Workspace-wide and crate-wide allowances are prohibited. The narrowest
 item-level `allow` or `expect` may be used only with Rust's
 `reason = "..."` syntax. The repository policy checker rejects an unreasoned
-suppression.
+suppression. The workspace also denies selected high-signal Clippy restriction
+lints: committed debug/stub macros, unreasoned lint attributes, and structs that
+mix public and private fields. The full restriction group remains disabled
+because Clippy documents it as intentionally contradictory in places.
 
 ## Generated artifacts
 

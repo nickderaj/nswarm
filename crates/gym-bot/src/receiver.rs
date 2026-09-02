@@ -1,14 +1,26 @@
 //! Network-neutral Apple Health HTTP receiver contract.
 
+use std::fmt::{Debug, Formatter};
+
 use crate::health::{HealthError, HealthImporter};
 
 /// Minimal request accepted at the HTTP adapter edge.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct HealthRequest<'a> {
     /// Authorization header value.
     pub authorization: Option<&'a str>,
     /// Raw request body.
     pub body: &'a [u8],
+}
+
+impl Debug for HealthRequest<'_> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HealthRequest")
+            .field("authorization", &self.authorization.map(|_| "[REDACTED]"))
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 /// Minimal response emitted by the HTTP adapter edge.
@@ -39,11 +51,12 @@ impl HealthReceiver {
     /// Handles one request without exposing diagnostics or credentials.
     #[must_use]
     pub fn handle(&self, request: HealthRequest<'_>) -> HealthResponse {
-        let expected = format!("Bearer {}", self.bearer_token);
-        if !constant_time_equal(
-            request.authorization.unwrap_or_default().as_bytes(),
-            expected.as_bytes(),
-        ) {
+        let supplied_token = request
+            .authorization
+            .and_then(|authorization| authorization.strip_prefix("Bearer "));
+        if supplied_token.is_none_or(|token| {
+            !constant_time_equal(token.as_bytes(), self.bearer_token.as_bytes())
+        }) {
             return response(401, r#"{"error":"unauthorized"}"#);
         }
         match self.importer.import_json(request.body) {
@@ -61,13 +74,11 @@ impl HealthReceiver {
 }
 
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
+    let length_difference = left.len() ^ right.len();
     left.iter()
-        .zip(right)
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
+        .enumerate()
+        .fold(length_difference, |difference, (index, left)| {
+            difference | usize::from(*left ^ right.get(index).copied().unwrap_or_default())
         })
         == 0
 }

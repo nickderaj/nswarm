@@ -1,7 +1,8 @@
 //! Bounded read-only gym MCP surface over a Unix domain socket.
 
 use std::{
-    collections::HashMap,
+    cmp::{Ordering, Reverse},
+    collections::{BinaryHeap, HashMap},
     future::Future,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -11,7 +12,7 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt as LinuxMetadataExt;
 
-use chrono::{DateTime, Days};
+use chrono::{DateTime, Days, FixedOffset};
 use rmcp::{
     RoleServer, ServerHandler, ServiceExt,
     model::{
@@ -118,11 +119,31 @@ fn validate_metric(metric: &str) -> Result<String, McpQueryError> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedBodyMetricsArgs {
     /// Optional exact metric filter.
-    pub metric: Option<String>,
+    metric: Option<String>,
     /// Validated inclusive lookback.
-    pub days: u16,
+    days: u16,
     /// Validated row cap.
-    pub limit: u16,
+    limit: u16,
+}
+
+impl ValidatedBodyMetricsArgs {
+    /// Returns the optional validated metric filter.
+    #[must_use]
+    pub fn metric(&self) -> Option<&str> {
+        self.metric.as_deref()
+    }
+
+    /// Returns the validated inclusive lookback.
+    #[must_use]
+    pub const fn days(&self) -> u16 {
+        self.days
+    }
+
+    /// Returns the validated row cap.
+    #[must_use]
+    pub const fn limit(&self) -> u16 {
+        self.limit
+    }
 }
 
 /// One read-only body metric returned by MCP.
@@ -138,6 +159,35 @@ pub struct BodyMetric {
     pub unit: String,
     /// Import or manual source label.
     pub source: String,
+}
+
+/// Heap entry ordered by `(at, id)`. The database primary key makes that pair
+/// unique, so the metric payload is deliberately outside the ranking key.
+#[derive(Debug)]
+struct RankedBodyMetric {
+    at: DateTime<FixedOffset>,
+    id: i64,
+    metric: BodyMetric,
+}
+
+impl PartialEq for RankedBodyMetric {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for RankedBodyMetric {}
+
+impl PartialOrd for RankedBodyMetric {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankedBodyMetric {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.at.cmp(&other.at).then(self.id.cmp(&other.id))
+    }
 }
 
 /// Production implementation of the bounded gym tool.
@@ -180,7 +230,8 @@ impl GymMcp {
             .ok_or(McpQueryError::ClockOutOfRange)?
             .format("%Y-%m-%d")
             .to_string();
-        let mut candidates = Vec::new();
+        let limit = usize::from(args.limit);
+        let mut recent = BinaryHeap::with_capacity(limit + 1);
         if let Some(metric) = args.metric {
             let mut statement = connection.prepare(
                 "SELECT id, date, metric, value, unit, source FROM body_metrics \
@@ -188,9 +239,7 @@ impl GymMcp {
                  ORDER BY date DESC, id DESC",
             )?;
             let mapped = statement.query_map(params![metric, index_floor], metric_from_row)?;
-            for row in mapped {
-                candidates.push(row?);
-            }
+            retain_recent_metrics(mapped, &cutoff, limit, &mut recent)?;
         } else {
             let mut statement = connection.prepare(
                 "SELECT id, date, metric, value, unit, source FROM body_metrics \
@@ -198,23 +247,39 @@ impl GymMcp {
                  ORDER BY date DESC, id DESC",
             )?;
             let mapped = statement.query_map(params![index_floor], metric_from_row)?;
-            for row in mapped {
-                candidates.push(row?);
-            }
+            retain_recent_metrics(mapped, &cutoff, limit, &mut recent)?;
         }
-        let mut rows = candidates
+        let mut rows = recent
             .into_iter()
-            .map(|(id, metric)| {
-                let at = DateTime::parse_from_rfc3339(&metric.date)
-                    .map_err(|_| McpQueryError::StoredTimestamp(metric.date.clone()))?;
-                Ok((at, id, metric))
+            .map(|Reverse(ranked)| {
+                let RankedBodyMetric { at, id, metric } = ranked;
+                (at, id, metric)
             })
-            .collect::<Result<Vec<_>, McpQueryError>>()?;
-        rows.retain(|(at, _, _)| *at >= cutoff);
+            .collect::<Vec<_>>();
         rows.sort_by(|left, right| right.0.cmp(&left.0).then(right.1.cmp(&left.1)));
-        rows.truncate(usize::from(args.limit));
         Ok(rows.into_iter().map(|(_, _, metric)| metric).collect())
     }
+}
+
+fn retain_recent_metrics(
+    rows: impl Iterator<Item = rusqlite::Result<(i64, BodyMetric)>>,
+    cutoff: &DateTime<FixedOffset>,
+    limit: usize,
+    recent: &mut BinaryHeap<Reverse<RankedBodyMetric>>,
+) -> Result<(), McpQueryError> {
+    for row in rows {
+        let (id, metric) = row?;
+        let at = DateTime::parse_from_rfc3339(&metric.date)
+            .map_err(|_| McpQueryError::StoredTimestamp(metric.date.clone()))?;
+        if at < *cutoff {
+            continue;
+        }
+        recent.push(Reverse(RankedBodyMetric { at, id, metric }));
+        if recent.len() > limit {
+            recent.pop();
+        }
+    }
+    Ok(())
 }
 
 fn metric_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, BodyMetric)> {

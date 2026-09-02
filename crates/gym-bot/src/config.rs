@@ -1,6 +1,10 @@
 //! Secret-safe gym runtime configuration.
 
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{
+    collections::HashMap,
+    env,
+    path::{Path, PathBuf},
+};
 
 use thiserror::Error;
 
@@ -10,13 +14,13 @@ use crate::database::validate_existing;
 #[derive(Debug)]
 pub struct GymConfig {
     /// Disposable copied frozen-schema database.
-    pub database_path: PathBuf,
+    database_path: PathBuf,
     /// Fleet-owned MCP socket.
-    pub socket_path: PathBuf,
+    socket_path: PathBuf,
     /// Fleet-owned group expected on the MCP socket directory and socket.
-    pub socket_group: String,
+    socket_group: String,
     /// Configured IANA time zone.
-    pub timezone: String,
+    timezone: String,
 }
 
 impl GymConfig {
@@ -26,7 +30,7 @@ impl GymConfig {
     ///
     /// Returns [`ConfigError`] for missing or invalid settings and storage.
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_values(&env::vars().collect())
+        Self::from_lookup(|name| env::var(name).ok())
     }
 
     /// Loads an explicit setting map for supervised adapters and tests.
@@ -38,18 +42,48 @@ impl GymConfig {
         Self::from_values(values)
     }
 
+    /// Returns the validated database path.
+    #[must_use]
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
+    }
+
+    /// Returns the validated MCP socket path.
+    #[must_use]
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Returns the validated socket group.
+    #[must_use]
+    pub fn socket_group(&self) -> &str {
+        &self.socket_group
+    }
+
+    /// Returns the configured IANA time zone.
+    #[must_use]
+    pub fn timezone(&self) -> &str {
+        &self.timezone
+    }
+
     fn from_values(values: &HashMap<String, String>) -> Result<Self, ConfigError> {
-        let data = PathBuf::from(required(values, "GYM_DATA_DIR")?);
+        Self::from_lookup(|name| values.get(name).cloned())
+    }
+
+    fn from_lookup(
+        mut lookup: impl FnMut(&'static str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        let data = PathBuf::from(required(&mut lookup, "GYM_DATA_DIR")?);
         if !data.is_absolute() {
             return Err(ConfigError::DataRoot);
         }
         let database_path = data.join("gym.db");
         validate_existing(&database_path).map_err(ConfigError::Database)?;
-        let socket_path = PathBuf::from(required(values, "NSWARM_MCP_SOCKET")?);
+        let socket_path = PathBuf::from(required(&mut lookup, "NSWARM_MCP_SOCKET")?);
         if !socket_path.is_absolute() {
             return Err(ConfigError::SocketPath);
         }
-        let socket_group = required(values, "NSWARM_MCP_SOCKET_GROUP")?;
+        let socket_group = required(&mut lookup, "NSWARM_MCP_SOCKET_GROUP")?;
         if socket_group.len() > 64
             || !socket_group
                 .bytes()
@@ -61,19 +95,18 @@ impl GymConfig {
             database_path,
             socket_path,
             socket_group,
-            timezone: values
-                .get("TIMEZONE")
-                .cloned()
+            timezone: lookup("TIMEZONE")
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "Europe/London".to_owned()),
         })
     }
 }
 
-fn required(values: &HashMap<String, String>, name: &'static str) -> Result<String, ConfigError> {
-    values
-        .get(name)
-        .cloned()
+fn required(
+    lookup: &mut impl FnMut(&'static str) -> Option<String>,
+    name: &'static str,
+) -> Result<String, ConfigError> {
+    lookup(name)
         .filter(|value| !value.trim().is_empty())
         .ok_or(ConfigError::Missing(name))
 }
@@ -145,16 +178,16 @@ mod tests {
             ),
         ]);
         let config = GymConfig::from_values(&values).expect("valid config");
-        assert_eq!(config.timezone, "Europe/London");
-        assert_eq!(config.database_path, directory.path().join("gym.db"));
-        assert_eq!(config.socket_path, PathBuf::from("/run/gym/mcp.sock"));
-        assert_eq!(config.socket_group, "gym-access");
+        assert_eq!(config.timezone(), "Europe/London");
+        assert_eq!(config.database_path(), directory.path().join("gym.db"));
+        assert_eq!(config.socket_path(), PathBuf::from("/run/gym/mcp.sock"));
+        assert_eq!(config.socket_group(), "gym-access");
         let mut custom = values;
         custom.insert("TIMEZONE".to_owned(), "UTC".to_owned());
         assert_eq!(
             GymConfig::from_values(&custom)
                 .expect("custom zone")
-                .timezone,
+                .timezone(),
             "UTC"
         );
         custom.insert("NSWARM_MCP_SOCKET".to_owned(), "relative.sock".to_owned());
