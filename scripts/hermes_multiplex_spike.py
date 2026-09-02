@@ -102,17 +102,21 @@ CONTRACT_TEST_FILES = {
         "tests/hermes_cli/test_gateway_enroll_multiplex_warning.py",
     ),
 }
+# This file validates optional tier-1 secret migration compatibility. Its two
+# missing-extra skips do not exercise the steady-state multiplex credential
+# boundary, so report it separately instead of using it to ratify or invalidate
+# that boundary. The separate incomplete result keeps this judgment visible.
 SUPPLEMENTAL_TEST_FILES = ("tests/agent/test_secret_scope_tier1_migration.py",)
 CHILD_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR", "TZ")
 
 SUMMARY_RE = re.compile(
     r"=== Summary: (?P<files>\d+) files, (?P<passed>\d+) tests passed, "
-    r"(?P<failed>\d+) failed, (?P<skipped>\d+) skipped "
+    r"(?P<failed>\d+) failed(?:, (?P<skipped>\d+) skipped)? "
     r"\((?P<complete>\d+)% complete\) in (?P<seconds>\d+(?:\.\d+)?)s "
     r"\((?P<workers>\d+) workers\) ==="
 )
 FILE_RESULT_RE = re.compile(
-    r"^\[[^\n]+\]\s+[✓✗]\s+(?P<file>tests/\S+)\s+"
+    r"^\[[^\n]+\]\s+(?P<status>[✓✗])\s+(?P<file>tests/\S+)\s+"
     r"\((?P<summary>[^)]*)\)$",
     re.MULTILINE,
 )
@@ -172,17 +176,35 @@ def parse_file_results(output: str) -> dict[str, dict[str, int]]:
             "passed": 0,
             "failed": 0,
             "skipped": 0,
+            "errors": 0,
+            "xfailed": 0,
+            "xpassed": 0,
+            "file_failed": int(match.group("status") == "✗"),
         }
         for count_match in FILE_COUNT_RE.finditer(match.group("summary")):
             count = int(count_match.group("count"))
             kind = count_match.group("kind")
             if kind == "✓":
                 counts["passed"] += count
-            elif kind in {"✗", "e", "xp"}:
+            elif kind == "✗":
                 counts["failed"] += count
-            elif kind in {"s", "xf"}:
+            elif kind == "s":
                 counts["skipped"] += count
-        if sum(counts.values()) == 0:
+            elif kind == "e":
+                counts["errors"] += count
+            elif kind == "xf":
+                counts["xfailed"] += count
+            elif kind == "xp":
+                counts["xpassed"] += count
+        outcome_names = (
+            "passed",
+            "failed",
+            "skipped",
+            "errors",
+            "xfailed",
+            "xpassed",
+        )
+        if sum(counts[name] for name in outcome_names) == 0:
             raise MultiplexSpikeError("canonical Hermes file result omitted test counts")
         results[filename] = counts
     if set(results) != set(TEST_FILES):
@@ -196,9 +218,13 @@ def summarize_group(
     passed = sum(per_file[name]["passed"] for name in filenames)
     failed = sum(per_file[name]["failed"] for name in filenames)
     skipped = sum(per_file[name]["skipped"] for name in filenames)
-    if failed:
+    errors = sum(per_file[name]["errors"] for name in filenames)
+    xfailed = sum(per_file[name]["xfailed"] for name in filenames)
+    xpassed = sum(per_file[name]["xpassed"] for name in filenames)
+    files_failed = sum(per_file[name]["file_failed"] for name in filenames)
+    if failed or errors or files_failed:
         result = "failed"
-    elif skipped or not passed:
+    elif skipped or xfailed or xpassed or not passed:
         result = "incomplete"
     else:
         result = "passed"
@@ -207,6 +233,10 @@ def summarize_group(
         "tests_passed": passed,
         "tests_failed": failed,
         "tests_skipped": skipped,
+        "test_errors": errors,
+        "tests_xfailed": xfailed,
+        "tests_xpassed": xpassed,
+        "files_failed": files_failed,
         "result": result,
     }
 
@@ -217,7 +247,7 @@ def parse_summary(output: str, expected_workers: int) -> tuple[dict[str, int], d
         raise MultiplexSpikeError("canonical Hermes test summary missing or ambiguous")
     groups = matches[0].groupdict()
     values = {
-        name: int(value)
+        name: int(value or 0)
         for name, value in groups.items()
         if name != "seconds"
     }
@@ -310,7 +340,8 @@ def run_local_trial(source: Path, python: Path, workers: int) -> dict[str, Any]:
     elapsed_ms = round((time.perf_counter_ns() - started) / 1_000_000)
     combined = result.stdout + "\n" + result.stderr
     summary, per_file = parse_summary(combined, workers)
-    if (result.returncode == 0) != (summary["failed"] == 0):
+    files_failed = sum(item["file_failed"] for item in per_file.values())
+    if (result.returncode == 0) != (files_failed == 0):
         raise MultiplexSpikeError("Hermes runner exit status contradicts its summary")
     contracts = {
         name: summarize_group(files, per_file)
@@ -353,6 +384,10 @@ def run_local_trial(source: Path, python: Path, workers: int) -> dict[str, Any]:
             "tests_passed": summary["passed"],
             "tests_failed": summary["failed"],
             "tests_skipped_optional_dependencies": summary["skipped"],
+            "test_errors": sum(item["errors"] for item in per_file.values()),
+            "tests_xfailed": sum(item["xfailed"] for item in per_file.values()),
+            "tests_xpassed": sum(item["xpassed"] for item in per_file.values()),
+            "files_failed": files_failed,
             "completion_percent": summary["complete"],
             "workers": summary["workers"],
             "canonical_runner_wall_ms": summary["wall_ms"],

@@ -1,53 +1,81 @@
 {
   "contracts": {
     "concurrent_context_and_background_scope": {
+      "files_failed": 0,
       "result": "passed",
+      "test_errors": 0,
       "test_files": 3,
       "tests_failed": 0,
       "tests_passed": 22,
-      "tests_skipped": 0
+      "tests_skipped": 0,
+      "tests_xfailed": 0,
+      "tests_xpassed": 0
     },
     "credential_and_provider_secret_isolation": {
+      "files_failed": 0,
       "result": "passed",
+      "test_errors": 0,
       "test_files": 7,
       "tests_failed": 0,
       "tests_passed": 133,
-      "tests_skipped": 0
+      "tests_skipped": 0,
+      "tests_xfailed": 0,
+      "tests_xpassed": 0
     },
     "multiplex_adapter_lifecycle": {
+      "files_failed": 0,
       "result": "passed",
+      "test_errors": 0,
       "test_files": 4,
       "tests_failed": 0,
       "tests_passed": 46,
-      "tests_skipped": 0
+      "tests_skipped": 0,
+      "tests_xfailed": 0,
+      "tests_xpassed": 0
     },
     "per_profile_http_bearer_auth": {
+      "files_failed": 0,
       "result": "passed",
+      "test_errors": 0,
       "test_files": 3,
       "tests_failed": 0,
       "tests_passed": 14,
-      "tests_skipped": 0
+      "tests_skipped": 0,
+      "tests_xfailed": 0,
+      "tests_xpassed": 0
     },
     "profile_route_and_allowlist": {
+      "files_failed": 0,
       "result": "passed",
+      "test_errors": 0,
       "test_files": 3,
       "tests_failed": 0,
       "tests_passed": 17,
-      "tests_skipped": 0
+      "tests_skipped": 0,
+      "tests_xfailed": 0,
+      "tests_xpassed": 0
     },
     "session_key_and_sqlite_store_isolation": {
+      "files_failed": 0,
       "result": "passed",
+      "test_errors": 0,
       "test_files": 3,
       "tests_failed": 0,
       "tests_passed": 28,
-      "tests_skipped": 0
+      "tests_skipped": 0,
+      "tests_xfailed": 0,
+      "tests_xpassed": 0
     },
     "soul_memory_skill_and_config_scope": {
+      "files_failed": 0,
       "result": "passed",
+      "test_errors": 0,
       "test_files": 3,
       "tests_failed": 0,
       "tests_passed": 10,
-      "tests_skipped": 0
+      "tests_skipped": 0,
+      "tests_xfailed": 0,
+      "tests_xpassed": 0
     }
   },
   "decision": {
@@ -92,21 +120,29 @@
   },
   "schema_version": 2,
   "supplemental": {
+    "files_failed": 0,
     "result": "incomplete",
+    "test_errors": 0,
     "test_files": 1,
     "tests_failed": 0,
     "tests_passed": 18,
-    "tests_skipped": 2
+    "tests_skipped": 2,
+    "tests_xfailed": 0,
+    "tests_xpassed": 0
   },
   "trial": {
     "canonical_runner_wall_ms": 4900,
     "completion_percent": 100,
+    "files_failed": 0,
     "flaky_files": 0,
-    "harness_wall_ms": 5583,
+    "harness_wall_ms": 5627,
+    "test_errors": 0,
     "test_files": 27,
     "tests_failed": 0,
     "tests_passed": 288,
     "tests_skipped_optional_dependencies": 2,
+    "tests_xfailed": 0,
+    "tests_xpassed": 0,
     "workers": 4
   }
 }

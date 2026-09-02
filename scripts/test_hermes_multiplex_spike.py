@@ -96,6 +96,23 @@ class SummaryTests(unittest.TestCase):
         )
         self.assertEqual(contract["result"], "incomplete")
 
+    def test_xfail_and_xpass_are_reported_without_corrupting_summary_totals(self) -> None:
+        output = self.passing_output().replace(
+            "1✓ 2s, 0.1s",
+            "1✓ 1xf 1xp, 0.1s",
+        ).replace(
+            ", 2 skipped (100% complete)",
+            " (100% complete)",
+        )
+        summary, per_file = SPIKE.parse_summary(output, 4)
+        supplemental = SPIKE.summarize_group(
+            SPIKE.SUPPLEMENTAL_TEST_FILES, per_file
+        )
+        self.assertEqual(summary["skipped"], 0)
+        self.assertEqual(supplemental["tests_xfailed"], 1)
+        self.assertEqual(supplemental["tests_xpassed"], 1)
+        self.assertEqual(supplemental["result"], "incomplete")
+
     def test_records_failed_suite(self) -> None:
         output = self.passing_output().replace(
             "27 tests passed, 0 failed", "26 tests passed, 1 failed"

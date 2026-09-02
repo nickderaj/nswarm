@@ -131,6 +131,10 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
             "tests_passed",
             "tests_failed",
             "tests_skipped_optional_dependencies",
+            "test_errors",
+            "tests_xfailed",
+            "tests_xpassed",
+            "files_failed",
             "completion_percent",
             "workers",
             "canonical_runner_wall_ms",
@@ -143,6 +147,10 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
     _integer(trial["tests_passed"], "trial tests passed", positive=True)
     _integer(trial["tests_failed"], "trial tests failed")
     _integer(trial["tests_skipped_optional_dependencies"], "trial tests skipped")
+    _integer(trial["test_errors"], "trial test errors")
+    _integer(trial["tests_xfailed"], "trial xfailed tests")
+    _integer(trial["tests_xpassed"], "trial xpassed tests")
+    _integer(trial["files_failed"], "trial failed files")
     if _integer(trial["completion_percent"], "trial completion") != 100:
         raise EvidenceError("upstream regression suite is incomplete")
     workers = _integer(trial["workers"], "trial workers", positive=True)
@@ -175,9 +183,23 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
         "tests_passed",
         "tests_failed",
         "tests_skipped",
+        "test_errors",
+        "tests_xfailed",
+        "tests_xpassed",
+        "files_failed",
         "result",
     }
-    contract_totals = {"files": 0, "passed": 0, "failed": 0, "skipped": 0}
+    count_names = (
+        "tests_passed",
+        "tests_failed",
+        "tests_skipped",
+        "test_errors",
+        "tests_xfailed",
+        "tests_xpassed",
+        "files_failed",
+    )
+    contract_totals = {name: 0 for name in count_names}
+    contract_files = 0
     contract_results: list[str] = []
     for name, contract in contracts.items():
         if not isinstance(contract, dict):
@@ -187,13 +209,22 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
         passed = _integer(contract["tests_passed"], f"contract {name} passed")
         failed = _integer(contract["tests_failed"], f"contract {name} failed")
         skipped = _integer(contract["tests_skipped"], f"contract {name} skipped")
-        derived = "failed" if failed else "incomplete" if skipped or not passed else "passed"
+        errors = _integer(contract["test_errors"], f"contract {name} errors")
+        xfailed = _integer(contract["tests_xfailed"], f"contract {name} xfailed")
+        xpassed = _integer(contract["tests_xpassed"], f"contract {name} xpassed")
+        files_failed = _integer(contract["files_failed"], f"contract {name} failed files")
+        derived = (
+            "failed"
+            if failed or errors or files_failed
+            else "incomplete"
+            if skipped or xfailed or xpassed or not passed
+            else "passed"
+        )
         if contract["result"] != derived:
             raise EvidenceError(f"contract {name} result is not derived from its counts")
-        contract_totals["files"] += files
-        contract_totals["passed"] += passed
-        contract_totals["failed"] += failed
-        contract_totals["skipped"] += skipped
+        contract_files += files
+        for count_name in count_names:
+            contract_totals[count_name] += contract[count_name]
         contract_results.append(derived)
 
     supplemental = document["supplemental"]
@@ -201,30 +232,42 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
         raise EvidenceError("supplemental result must be an object")
     exact_keys(supplemental, contract_keys, "supplemental")
     supplemental_files = _integer(supplemental["test_files"], "supplemental files")
-    supplemental_passed = _integer(supplemental["tests_passed"], "supplemental passed")
-    supplemental_failed = _integer(supplemental["tests_failed"], "supplemental failed")
-    supplemental_skipped = _integer(supplemental["tests_skipped"], "supplemental skipped")
+    supplemental_counts = {
+        name: _integer(supplemental[name], f"supplemental {name}")
+        for name in count_names
+    }
     supplemental_result = (
         "failed"
-        if supplemental_failed
+        if supplemental_counts["tests_failed"]
+        or supplemental_counts["test_errors"]
+        or supplemental_counts["files_failed"]
         else "incomplete"
-        if supplemental_skipped or not supplemental_passed
+        if supplemental_counts["tests_skipped"]
+        or supplemental_counts["tests_xfailed"]
+        or supplemental_counts["tests_xpassed"]
+        or not supplemental_counts["tests_passed"]
         else "passed"
     )
     if supplemental["result"] != supplemental_result:
         raise EvidenceError("supplemental result is not derived from its counts")
-    if contract_totals["files"] + supplemental_files != trial["test_files"]:
+    if contract_files + supplemental_files != trial["test_files"]:
         raise EvidenceError("test-file totals are not derived from grouped results")
-    if contract_totals["passed"] + supplemental_passed != trial["tests_passed"]:
-        raise EvidenceError("passing-test totals are not derived from grouped results")
-    if contract_totals["failed"] + supplemental_failed != trial["tests_failed"]:
-        raise EvidenceError("failed-test totals are not derived from grouped results")
-    if contract_totals["skipped"] + supplemental_skipped != trial["tests_skipped_optional_dependencies"]:
-        raise EvidenceError("skipped-test totals are not derived from grouped results")
+    trial_names = {
+        "tests_passed": "tests_passed",
+        "tests_failed": "tests_failed",
+        "tests_skipped": "tests_skipped_optional_dependencies",
+        "test_errors": "test_errors",
+        "tests_xfailed": "tests_xfailed",
+        "tests_xpassed": "tests_xpassed",
+        "files_failed": "files_failed",
+    }
+    for count_name, trial_name in trial_names.items():
+        if contract_totals[count_name] + supplemental_counts[count_name] != trial[trial_name]:
+            raise EvidenceError(f"{count_name} totals are not derived from grouped results")
 
     suite_result = (
         "failed"
-        if trial["tests_failed"] or "failed" in contract_results
+        if trial["files_failed"] or "failed" in contract_results
         else "incomplete"
         if any(result != "passed" for result in contract_results)
         else "passed"

@@ -38,7 +38,7 @@ class EvidenceTests(unittest.TestCase):
     def test_rejects_incomplete_test_aggregate(self) -> None:
         changed = copy.deepcopy(self.document)
         changed["trial"]["tests_passed"] -= 1
-        with self.assertRaisesRegex(CHECK.EvidenceError, "passing-test totals"):
+        with self.assertRaisesRegex(CHECK.EvidenceError, "tests_passed totals"):
             CHECK.validate_evidence(changed, self.pin)
 
     def test_rejects_unmeasured_target_pi_or_pilot_claim(self) -> None:
