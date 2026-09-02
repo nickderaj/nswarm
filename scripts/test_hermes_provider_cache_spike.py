@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -163,6 +164,27 @@ class ProviderContractTests(unittest.TestCase):
         self.assertEqual(quote, self.quote)
         self.assertEqual(updated_at, response["updated_at"])
 
+    def test_price_quote_fails_closed_without_cache_write_rate(self) -> None:
+        response = {
+            "models": [
+                {
+                    "model": SPIKE.DEFAULT_MODEL,
+                    "providers": [
+                        {
+                            "provider": SPIKE.DEFAULT_PROVIDER,
+                            "pricing": {"input": 1, "output": 5, "cacheRead": 0.1},
+                        }
+                    ],
+                }
+            ],
+            "updated_at": "2026-09-01T08:09:59.006Z",
+        }
+        with (
+            patch.object(SPIKE, "_request_json", return_value=(response, 1)),
+            self.assertRaisesRegex(SPIKE.ProviderCacheError, "cacheWrite/cache_write"),
+        ):
+            SPIKE.fetch_price_quote(SPIKE.DEFAULT_MODEL, SPIKE.DEFAULT_PROVIDER)
+
     def test_usage_cost_uses_all_provider_cache_buckets(self) -> None:
         usage = {
             "input_tokens": 100,
@@ -270,6 +292,7 @@ class ProviderContractTests(unittest.TestCase):
                 **{"token_hex.return_value": "a" * 32},
             ),
             patch.object(SPIKE, "invoke_provider", side_effect=side_effect),
+            patch.object(SPIKE, "_write_partial_checkpoint"),
         ):
             evidence = SPIKE.measure_live(self.config)
         rendered = str(evidence)
@@ -279,9 +302,54 @@ class ProviderContractTests(unittest.TestCase):
         self.assertTrue(
             evidence["decision"]["provider_byte_prefix_cache_preserved"]
         )
+        self.assertEqual(evidence["boundary"]["hermes_in_request_path"], False)
         self.assertEqual(
-            evidence["decision"]["d24_multiplexing_evaluation"], "unblocked"
+            evidence["decision"]["d23_http_session_route"],
+            "pending_end_to_end_hermes_measurement",
         )
+
+    def test_partial_checkpoint_contains_only_count_and_cost_aggregates(self) -> None:
+        usage = SPIKE.TurnUsage(100, 0, 2_000, 2, 2_510, 500, "raw output")
+        with tempfile.TemporaryDirectory() as directory:
+            config = SPIKE.LiveConfig(
+                **{
+                    **self.config.__dict__,
+                    "output": Path(directory) / "provider-cache.json",
+                }
+            )
+            SPIKE._write_partial_checkpoint(
+                config,
+                {"commit_sha": "a" * 40},
+                [usage],
+                [],
+            )
+            rendered = SPIKE._partial_path(config.output).read_text(encoding="utf-8")
+        self.assertNotIn("raw output", rendered)
+        checkpoint = json.loads(rendered)
+        self.assertEqual(checkpoint["completed_requests"], 1)
+        self.assertEqual(
+            checkpoint["aggregate"]["cold_sessions"]["cost_micro_usd"], 2_510
+        )
+
+    def test_main_catches_source_verification_timeout(self) -> None:
+        timeout = subprocess.TimeoutExpired("verify", 30)
+        with (
+            patch.object(SPIKE, "validate_live_args", side_effect=timeout),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "hermes_provider_cache_spike.py",
+                    "--source",
+                    str(ROOT),
+                    "--output",
+                    str(self.config.output),
+                    "--max-spend-usd",
+                    "0.50",
+                ],
+            ),
+        ):
+            self.assertEqual(SPIKE.main(), 1)
 
 
 class EvidenceIntegrityTests(unittest.TestCase):
@@ -306,6 +374,43 @@ class EvidenceIntegrityTests(unittest.TestCase):
         evidence["aggregate"]["cold_sessions"]["cached_input_tokens"] = 1
         with self.assertRaisesRegex(CHECK.EvidenceError, "cold aggregate"):
             CHECK.validate_evidence(evidence, self.pin)
+
+    def test_internally_consistent_adverse_result_is_valid(self) -> None:
+        evidence = copy.deepcopy(self.evidence)
+        prices = evidence["provider"]["price_micro_usd_per_million"]
+        for pair in evidence["trial"]["turns"][1:]:
+            warm = pair["long_lived_session"]
+            warm["uncached_input_tokens"] = 9_000
+            warm["cached_input_tokens"] = 0
+            warm["cache_write_input_tokens"] = 0
+            warm["cost_micro_usd"] = CHECK.expected_cost(warm, prices)
+        cold = [pair["cold_session"] for pair in evidence["trial"]["turns"]]
+        warm = [pair["long_lived_session"] for pair in evidence["trial"]["turns"]]
+        evidence["aggregate"]["cold_sessions"] = CHECK.summarize(cold)
+        evidence["aggregate"]["long_lived_session"] = CHECK.summarize(warm)
+        cold_cost = sum(item["cost_micro_usd"] for item in cold[1:])
+        warm_cost = sum(item["cost_micro_usd"] for item in warm[1:])
+        saved = cold_cost - warm_cost
+        plain_cost = evidence["aggregate"]["repeat_turns_only"][
+            "plain_uncached_comparator_cost_micro_usd"
+        ]
+        repeat = evidence["aggregate"]["repeat_turns_only"]
+        repeat.update(
+            {
+                "cold_cost_micro_usd": cold_cost,
+                "long_lived_cost_micro_usd": warm_cost,
+                "cost_saved_micro_usd": saved,
+                "cost_reduction_percent": round(saved * 10_000 / cold_cost) / 100,
+                "plain_uncached_comparator_saved_micro_usd": plain_cost - warm_cost,
+                "plain_uncached_comparator_reduction_percent": round(
+                    (plain_cost - warm_cost) * 10_000 / plain_cost
+                )
+                / 100,
+            }
+        )
+        evidence["decision"]["provider_byte_prefix_cache_preserved"] = False
+        evidence["decision"]["provider_cache_reduced_repeat_cost"] = saved > 0
+        CHECK.validate_evidence(evidence, self.pin)
 
 
 if __name__ == "__main__":

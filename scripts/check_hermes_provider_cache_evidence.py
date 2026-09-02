@@ -73,6 +73,7 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
             "schema_version",
             "measurement",
             "pin",
+            "boundary",
             "provider",
             "safeguards",
             "trial",
@@ -81,9 +82,9 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
         },
         "root",
     )
-    if document["schema_version"] != 1:
+    if document["schema_version"] != 2:
         raise EvidenceError("unsupported evidence schema version")
-    if document["measurement"] != "live_provider_byte_prefix_cache":
+    if document["measurement"] != "direct_live_provider_byte_prefix_cache_control":
         raise EvidenceError("unexpected measurement")
     expected_pin = {
         "repository": pin["repository"],
@@ -97,6 +98,15 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
     }
     if document["pin"] != expected_pin:
         raise EvidenceError("evidence source identity differs from the SHA-256 pin")
+
+    if document["boundary"] != {
+        "request_path": "direct_provider_api",
+        "hermes_in_request_path": False,
+        "hermes_source_pin_verified": True,
+        "hermes_http_cache_continuity_measured": False,
+        "latency_interpretation": "uncontrolled_fixed_order_samples_only",
+    }:
+        raise EvidenceError("measurement boundary differs")
 
     provider = document["provider"]
     if not isinstance(provider, dict):
@@ -177,6 +187,7 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
             "prefix_bytes",
             "max_output_tokens",
             "pair_order",
+            "cache_control_policy",
             "cold_definition",
             "long_lived_definition",
             "turns",
@@ -186,12 +197,20 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
     turns_per_class = nonnegative_int(
         trial["turns_per_class"], "turns per class", positive=True
     )
-    if turns_per_class != 4 or trial["pair_order"] != "cold_then_long_lived":
+    if not 2 <= turns_per_class <= 10 or trial["pair_order"] != "cold_then_long_lived":
         raise EvidenceError("reviewed paired-trial shape differs")
+    if trial["cache_control_policy"] != (
+        "ephemeral_cache_breakpoint_applied_to_both_classes"
+    ):
+        raise EvidenceError("cache-control comparison differs")
     prefix_bytes = nonnegative_int(trial["prefix_bytes"], "prefix bytes", positive=True)
     if prefix_bytes < 16_384:
         raise EvidenceError("controlled prefix is too short")
-    nonnegative_int(trial["max_output_tokens"], "max output tokens", positive=True)
+    max_output_tokens = nonnegative_int(
+        trial["max_output_tokens"], "max output tokens", positive=True
+    )
+    if max_output_tokens > 32:
+        raise EvidenceError("max output token bound differs")
     turns = trial["turns"]
     if not isinstance(turns, list) or len(turns) != turns_per_class:
         raise EvidenceError("paired turns are incomplete")
@@ -218,6 +237,8 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
             exact_keys(turn, turn_keys, f"turn {ordinal} {class_name}")
             for name, value in turn.items():
                 nonnegative_int(value, f"turn {ordinal} {class_name} {name}")
+            if turn["output_tokens"] > max_output_tokens:
+                raise EvidenceError("turn output exceeds the configured bound")
             if turn["latency_ms"] == 0:
                 raise EvidenceError("turn latency must be positive")
             prompt_tokens = (
@@ -229,17 +250,8 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
                 raise EvidenceError("provider usage omits the controlled prompt")
             if turn["cost_micro_usd"] != expected_cost(turn, prices):
                 raise EvidenceError("turn cost does not derive from provider usage")
-        cold = pair["cold_session"]
-        warm = pair["long_lived_session"]
-        if cold["cached_input_tokens"] != 0 or cold["cache_write_input_tokens"] == 0:
-            raise EvidenceError("cold-session cache invariant differs")
-        if ordinal == 1:
-            if warm["cached_input_tokens"] != 0 or warm["cache_write_input_tokens"] == 0:
-                raise EvidenceError("long-lived prime cache invariant differs")
-        elif warm["cached_input_tokens"] == 0 or warm["cache_write_input_tokens"] != 0:
-            raise EvidenceError("long-lived repeat cache invariant differs")
-        cold_turns.append(cold)
-        warm_turns.append(warm)
+        cold_turns.append(pair["cold_session"])
+        warm_turns.append(pair["long_lived_session"])
 
     aggregate = document["aggregate"]
     if not isinstance(aggregate, dict):
@@ -273,28 +285,62 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
             "long_lived_cost_micro_usd",
             "cost_saved_micro_usd",
             "cost_reduction_percent",
+            "plain_uncached_comparator_cost_micro_usd",
+            "plain_uncached_comparator_saved_micro_usd",
+            "plain_uncached_comparator_reduction_percent",
         },
         "repeat aggregate",
     )
     cold_cost = sum(item["cost_micro_usd"] for item in cold_turns[1:])
     warm_cost = sum(item["cost_micro_usd"] for item in warm_turns[1:])
     saved = cold_cost - warm_cost
-    reduction = round(saved * 10_000 / cold_cost) / 100
+    reduction = round(saved * 10_000 / cold_cost) / 100 if cold_cost else 0.0
+    plain_uncached_cost = sum(
+        int(
+            (
+                Decimal(
+                    item["uncached_input_tokens"]
+                    + item["cached_input_tokens"]
+                    + item["cache_write_input_tokens"]
+                )
+                * Decimal(prices["uncached_input"])
+                / MICRO_USD
+                + Decimal(item["output_tokens"])
+                * Decimal(prices["output"])
+                / MICRO_USD
+            ).to_integral_value(rounding=ROUND_CEILING)
+        )
+        for item in cold_turns[1:]
+    )
+    plain_uncached_saved = plain_uncached_cost - warm_cost
+    plain_uncached_reduction = (
+        round(plain_uncached_saved * 10_000 / plain_uncached_cost) / 100
+        if plain_uncached_cost
+        else 0.0
+    )
     if repeat != {
         "cold_cost_micro_usd": cold_cost,
         "long_lived_cost_micro_usd": warm_cost,
         "cost_saved_micro_usd": saved,
         "cost_reduction_percent": reduction,
+        "plain_uncached_comparator_cost_micro_usd": plain_uncached_cost,
+        "plain_uncached_comparator_saved_micro_usd": plain_uncached_saved,
+        "plain_uncached_comparator_reduction_percent": plain_uncached_reduction,
     }:
         raise EvidenceError("repeat-turn savings are not derived")
-    if saved <= 0:
-        raise EvidenceError("provider cache did not reduce repeated-turn cost")
+    cache_preserved = (
+        all(item["cached_input_tokens"] > 0 for item in warm_turns[1:])
+        and sum(item["cached_input_tokens"] for item in warm_turns[1:])
+        > sum(item["cached_input_tokens"] for item in cold_turns[1:])
+    )
     if document["decision"] != {
-        "provider_byte_prefix_cache_preserved": True,
-        "d23_http_session_route": "acceptable",
-        "d24_multiplexing_evaluation": "unblocked",
+        "provider_byte_prefix_cache_preserved": cache_preserved,
+        "provider_cache_reduced_repeat_cost": saved > 0,
+        "hermes_http_session_route_cache_continuity": "not_measured",
+        "d23_http_session_route": "pending_end_to_end_hermes_measurement",
+        "d24_multiplexing_evaluation": "independently_executable",
     }:
-        raise EvidenceError("D23/D24 decision differs from measured result")
+        raise EvidenceError("D23/D24 decision is not derived from the measured scope")
 
 
 def main() -> int:

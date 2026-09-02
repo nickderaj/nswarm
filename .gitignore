@@ -9,3 +9,4 @@ __pycache__/
 coverage/
 artifacts/
 secrets/*.age.key
+spikes/hermes/evidence/*.partial.json

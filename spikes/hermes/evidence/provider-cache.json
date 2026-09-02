@@ -23,15 +23,27 @@
       "cold_cost_micro_usd": 24391,
       "cost_reduction_percent": 91.02,
       "cost_saved_micro_usd": 22201,
-      "long_lived_cost_micro_usd": 2190
+      "long_lived_cost_micro_usd": 2190,
+      "plain_uncached_comparator_cost_micro_usd": 19563,
+      "plain_uncached_comparator_reduction_percent": 88.81,
+      "plain_uncached_comparator_saved_micro_usd": 17373
     }
   },
-  "decision": {
-    "d23_http_session_route": "acceptable",
-    "d24_multiplexing_evaluation": "unblocked",
-    "provider_byte_prefix_cache_preserved": true
+  "boundary": {
+    "hermes_http_cache_continuity_measured": false,
+    "hermes_in_request_path": false,
+    "hermes_source_pin_verified": true,
+    "latency_interpretation": "uncontrolled_fixed_order_samples_only",
+    "request_path": "direct_provider_api"
   },
-  "measurement": "live_provider_byte_prefix_cache",
+  "decision": {
+    "d23_http_session_route": "pending_end_to_end_hermes_measurement",
+    "d24_multiplexing_evaluation": "independently_executable",
+    "hermes_http_session_route_cache_continuity": "not_measured",
+    "provider_byte_prefix_cache_preserved": true,
+    "provider_cache_reduced_repeat_cost": true
+  },
+  "measurement": "direct_live_provider_byte_prefix_cache_control",
   "pin": {
     "commit_sha": "fcbd1076a93841fa88855acce810e342a5b78101",
     "package": "hermes-agent",
@@ -63,8 +75,9 @@
     "provider_pin_required": true,
     "raw_provider_output_persisted": false
   },
-  "schema_version": 1,
+  "schema_version": 2,
   "trial": {
+    "cache_control_policy": "ephemeral_cache_breakpoint_applied_to_both_classes",
     "cold_definition": "same-length transcript with a unique 32-byte nonce near the start of the persisted system prompt",
     "long_lived_definition": "growing transcript with one byte-identical persisted system prompt",
     "max_output_tokens": 8,

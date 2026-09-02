@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cost-bounded live-provider prefix-cache measurement for Hermes D23."""
+"""Cost-bounded direct-provider prefix-cache measurement informing Hermes D23."""
 
 from __future__ import annotations
 
@@ -261,7 +261,7 @@ def fetch_price_quote(model: str, provider: str) -> tuple[PriceQuote, str]:
         output_per_million=_price_decimal(pricing, "output"),
         cache_read_per_million=_price_decimal(pricing, "cacheRead", "cache_read"),
         cache_write_per_million=_price_decimal(
-            pricing, "cacheWrite", "cache_write", "input"
+            pricing, "cacheWrite", "cache_write"
         ),
     )
     updated_at = document.get("updated_at")
@@ -418,6 +418,48 @@ def _summarize(turns: list[TurnUsage]) -> dict[str, int]:
     }
 
 
+def _plain_uncached_cost_micro_usd(usage: TurnUsage, quote: PriceQuote) -> int:
+    prompt_tokens = (
+        usage.uncached_input_tokens
+        + usage.cached_input_tokens
+        + usage.cache_write_input_tokens
+    )
+    cost = (
+        Decimal(prompt_tokens) * quote.input_per_million
+        + Decimal(usage.output_tokens) * quote.output_per_million
+    )
+    return int(cost.to_integral_value(rounding=ROUND_CEILING))
+
+
+def _partial_path(output: Path) -> Path:
+    return output.with_suffix(".partial.json")
+
+
+def _write_partial_checkpoint(
+    config: LiveConfig,
+    pin: dict[str, Any],
+    cold_turns: list[TurnUsage],
+    warm_turns: list[TurnUsage],
+) -> None:
+    document = {
+        "schema_version": 1,
+        "measurement": "direct_provider_cache_partial_checkpoint",
+        "pin": {"commit_sha": pin["commit_sha"]},
+        "completed_requests": len(cold_turns) + len(warm_turns),
+        "aggregate": {
+            "cold_sessions": {
+                "turns": len(cold_turns),
+                "cost_micro_usd": sum(item.cost_micro_usd for item in cold_turns),
+            },
+            "long_lived_session": {
+                "turns": len(warm_turns),
+                "cost_micro_usd": sum(item.cost_micro_usd for item in warm_turns),
+            },
+        },
+    }
+    write_evidence(_partial_path(config.output), document)
+
+
 def measure_live(config: LiveConfig) -> dict[str, Any]:
     """Run the live experiment after all preflight gates have passed."""
     pin = verify_pinned_source(config.source)
@@ -446,6 +488,8 @@ def measure_live(config: LiveConfig) -> dict[str, Any]:
             messages=messages,
         )
         actual_cost += cold.cost_micro_usd
+        cold_turns.append(cold)
+        _write_partial_checkpoint(config, pin, cold_turns, warm_turns)
         if actual_cost > config.max_spend_micro_usd:
             raise ProviderCacheError("provider-metered spend exceeded the hard ceiling")
         warm = invoke_provider(
@@ -456,10 +500,10 @@ def measure_live(config: LiveConfig) -> dict[str, Any]:
             messages=messages,
         )
         actual_cost += warm.cost_micro_usd
+        warm_turns.append(warm)
+        _write_partial_checkpoint(config, pin, cold_turns, warm_turns)
         if actual_cost > config.max_spend_micro_usd:
             raise ProviderCacheError("provider-metered spend exceeded the hard ceiling")
-        cold_turns.append(cold)
-        warm_turns.append(warm)
         paired_turns.append(
             {
                 "ordinal": ordinal,
@@ -488,10 +532,26 @@ def measure_live(config: LiveConfig) -> dict[str, Any]:
         and sum(item.cached_input_tokens for item in warm_repeat)
         > sum(item.cached_input_tokens for item in cold_repeat)
     )
+    plain_uncached_repeat_cost = sum(
+        _plain_uncached_cost_micro_usd(item, quote) for item in cold_repeat
+    )
+    plain_uncached_saved = plain_uncached_repeat_cost - warm_repeat_cost
+    plain_uncached_reduction = (
+        round(plain_uncached_saved * 10_000 / plain_uncached_repeat_cost) / 100
+        if plain_uncached_repeat_cost
+        else 0.0
+    )
     return {
-        "schema_version": 1,
-        "measurement": "live_provider_byte_prefix_cache",
+        "schema_version": 2,
+        "measurement": "direct_live_provider_byte_prefix_cache_control",
         "pin": pin,
+        "boundary": {
+            "request_path": "direct_provider_api",
+            "hermes_in_request_path": False,
+            "hermes_source_pin_verified": True,
+            "hermes_http_cache_continuity_measured": False,
+            "latency_interpretation": "uncontrolled_fixed_order_samples_only",
+        },
         "provider": {
             "marketplace": "surplus_intelligence",
             "upstream_provider": config.provider,
@@ -518,6 +578,7 @@ def measure_live(config: LiveConfig) -> dict[str, Any]:
             "prefix_bytes": config.prefix_bytes,
             "max_output_tokens": config.max_output_tokens,
             "pair_order": "cold_then_long_lived",
+            "cache_control_policy": "ephemeral_cache_breakpoint_applied_to_both_classes",
             "cold_definition": "same-length transcript with a unique 32-byte nonce near the start of the persisted system prompt",
             "long_lived_definition": "growing transcript with one byte-identical persisted system prompt",
             "turns": paired_turns,
@@ -531,14 +592,26 @@ def measure_live(config: LiveConfig) -> dict[str, Any]:
                 "long_lived_cost_micro_usd": warm_repeat_cost,
                 "cost_saved_micro_usd": saved_micro,
                 "cost_reduction_percent": savings_percent,
+                "plain_uncached_comparator_cost_micro_usd": plain_uncached_repeat_cost,
+                "plain_uncached_comparator_saved_micro_usd": plain_uncached_saved,
+                "plain_uncached_comparator_reduction_percent": plain_uncached_reduction,
             },
         },
         "decision": {
             "provider_byte_prefix_cache_preserved": cache_preserved,
-            "d23_http_session_route": "acceptable" if cache_preserved and saved_micro > 0 else "fallback_required",
-            "d24_multiplexing_evaluation": "unblocked" if cache_preserved and saved_micro > 0 else "blocked",
+            "provider_cache_reduced_repeat_cost": saved_micro > 0,
+            "hermes_http_session_route_cache_continuity": "not_measured",
+            "d23_http_session_route": "pending_end_to_end_hermes_measurement",
+            "d24_multiplexing_evaluation": "independently_executable",
         },
     }
+
+
+def write_evidence(output: Path, document: dict[str, Any]) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(output)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -560,9 +633,9 @@ def main() -> int:
     try:
         config = validate_live_args(args)
         result = measure_live(config)
-        rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
-        config.output.write_text(rendered, encoding="utf-8")
-    except (OSError, ProviderCacheError, json.JSONDecodeError) as error:
+        write_evidence(config.output, result)
+        _partial_path(config.output).unlink(missing_ok=True)
+    except (OSError, ProviderCacheError, json.JSONDecodeError, subprocess.TimeoutExpired) as error:
         print(f"Hermes provider-cache spike: {error}", file=sys.stderr)
         return 1
     return 0
