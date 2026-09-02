@@ -167,20 +167,20 @@ architecture control, not a Hermes pilot, bot session or deployment.
 
 ## Validation
 
-The exact source verifier, 30 focused Hermes tests, aggregate-evidence checker,
-repository policy check, formatting check, and diff hygiene pass locally. The
-standard `just ci` run passed its policy, profile, generated-file, Fleet,
-formatting, check, eval, Clippy, 212-test, rustdoc, feature-power-set,
-dependency audit, vet, machete, coverage, Python-test and semver stages.
-Repository coverage was 97.10% and all 318 marked critical branch outcomes were
-covered.
+The exact source verifier, 49 focused Hermes tests, both aggregate-evidence
+checkers, repository policy check, formatting check, and diff hygiene pass
+locally. The standard `scripts/ci.sh` run passed its policy, profile,
+generated-file, Fleet, formatting, check, eval, Clippy, 218-test, rustdoc,
+feature-power-set, dependency audit, vet, machete, coverage, Python-test and
+semver stages. Repository coverage was 97.33% and all 304 marked critical
+branch outcomes were covered.
 
 The previously red standard semver stage is repaired without changing the Rust
 1.90 MSRV or weakening the comparison. `cargo-semver-checks` creates unlocked
 scratch packages; the runner now explicitly uses Cargo's MSRV-aware resolver
 fallback, selecting the newest compatible transitive versions instead of
 `takecell==0.1.2`, which requires Rust 1.96. The formerly failing command passes
-for all four shared crates locally without a shell-level override.
+for all checked workspace crates locally without a shell-level override.
 
 The committed Python checks exercise pin parsing, annotated-tag drift,
 `sys.path` restoration, evidence integrity and summary derivation. Core CI does
@@ -256,8 +256,8 @@ It caps the runner at four workers, disables retry-based green results, passes
 only an explicit non-secret environment allowlist to the child, and stores no
 raw test output. No provider credential is forwarded.
 
-The selected upstream tests use temporary profile homes and cover
-of credential isolation, profile-prefixed HTTP routing and allowlists,
+The selected upstream tests use temporary profile homes and cover credential
+isolation, profile-prefixed HTTP routing and allowlists,
 per-profile bearer authorization, provider/model secret scope, SOUL/config/
 memory/skill scope, session-key namespaces, SQLite store scoping, concurrent
 context propagation, background task scope, adapter lifecycle and pairing
@@ -267,7 +267,11 @@ stores. The result was 288 passed, 0 failed, 2 optional-dependency skips across
 and its fail-closed checker runs in local, PR and merge-queue CI. Seven contract
 groups are derived from explicit per-file pass/fail/skip counts. The two skips
 belong only to a separately reported supplemental migration file; a skip in a
-contract group would make that group incomplete rather than green.
+contract group would make that group incomplete rather than green. That file
+validates optional tier-1 migration compatibility rather than the steady-state
+multiplex credential boundary, so its missing-extra skips are reported as an
+honest supplemental `incomplete` result instead of deciding the credential
+contract.
 
 This passes a pinned Hermes upstream regression baseline. It does not execute
 nswarm's own two-profile gateway, so it does not pass D24's runtime isolation
