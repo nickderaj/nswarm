@@ -42,9 +42,8 @@ request, including all repeated calls to the same session ID, invokes the agent
 factory and receives a distinct agent instance. The session transcript and
 system prompt can be restored from SQLite, and MCP discovery is process-wide,
 but the `AIAgent`, memory load, tool snapshot and in-memory session state are
-reconstructed. This fails the D23 architecture gate, so the multiplexing/Pi,
-credential-isolation, socket-ACL and prompt-size phases are intentionally not
-executed until §6.3 is revisited.
+reconstructed. This fails the warm-agent assumption. D23's separate end-to-end
+provider-cache continuity remains open; D24 can be evaluated independently.
 
 The native-adapter follow-up is `evidence/native-adapter.json`. Native messaging
 reuses cached agents, but only behind first-class platform adapters and private
@@ -53,7 +52,8 @@ provide synchronous `ask()`. Hermes Relay retains native cache reuse while
 separating transport ownership, but its protocol is explicitly experimental and
 requires a connector outside the reviewed pin. Neither path is a reviewed D23
 local-agent-cache replacement. The stable HTTP transport remains a candidate;
-the separate provider-cache experiment settles that remaining D23 gate.
+the separate direct-provider control does not settle its end-to-end Hermes
+continuity gate.
 
 Run the paid provider-cache harness only with an operator-selected ceiling and
 explicit opt-in. The credential is read only from the environment:
@@ -70,14 +70,16 @@ SURPLUS_API_KEY=... python3 scripts/hermes_provider_cache_spike.py \
 `evidence/provider-cache.json` contains aggregate token buckets, modeled cost
 and end-to-end latency only. It records 6,435 provider cache writes on the
 long-lived prime and 6,435 cache reads on each of three repeats. Repeated-turn
-modeled cost falls 91.02%, from 24,391 to 2,190 micro-USD. The API key, prompt,
+modeled cost falls from 24,391 to 2,190 micro-USD: 91.02% against cache-marked
+fresh sessions and 88.81% against a plain uncached-price comparator. The API
+key, prompt,
 transcript, response text, request identifiers and per-run cache nonces are not
 stored. `scripts/check_hermes_provider_cache_evidence.py` derives the complete
 result and fails closed in local, PR and merge-queue CI.
 
-This live experiment revises D23 to retain the stable HTTP session route and
-unblocks D24's multiplexing/isolation/Pi evaluation. It is not a bot session,
-deployment, gym parallel trial or live pilot.
+This direct-provider experiment leaves D23's end-to-end Hermes gate open. D24's
+multiplexing/isolation/Pi evaluation is independently executable. It is not a
+bot session, deployment, gym parallel trial or live pilot.
 
 Run the local-only D24 multiplexing simulation against the same clean pinned
 checkout and its isolated test environment with:
@@ -91,7 +93,8 @@ checkout and its isolated test environment with:
 ```
 
 The harness invokes Hermes's canonical per-file-isolation runner with retries
-disabled. Its 27-file two-profile suite passed 288 tests, failed none, skipped
+disabled and a non-secret child-environment allowlist. Its 27-file upstream
+suite passed 288 tests, failed none, skipped
 two optional-dependency cases and required no flaky retry. It covers profile
 routing/auth, credential and provider-secret scope, SOUL/memory/skills/config
 scope, session namespaces and SQLite placement, concurrent context propagation
@@ -99,7 +102,8 @@ and lifecycle. `evidence/multiplex-local.json` contains only aggregate counts,
 environment identity and bounded wall times; raw runner output, profile data
 and credentials are not persisted.
 
-This is a passing local functional gate, not full D24 acceptance. The target Pi
-resource envelope, Linux systemd/service-user enforcement, socket ACL change,
-real profile prompt sizes and gym MCP attachment remain pending. It is not a
-gym parallel trial or a live pilot.
+This is a passing upstream regression baseline, not nswarm's D24 runtime gate.
+An nswarm-launched two-profile isolation trial, the target Pi resource envelope,
+Linux systemd/service-user enforcement, socket ACL change, real profile prompt
+sizes and gym MCP attachment remain pending. It is not a gym parallel trial or
+a live pilot.

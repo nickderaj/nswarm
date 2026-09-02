@@ -1,9 +1,11 @@
 # Hermes gateway architecture-gate report
 
-Status: the local warm-agent assumption failed on 2026-08-30, but the separate
-provider-cache gate passed on 2026-09-01. D23 now retains the stable HTTP
-session API on that measured basis. D24's pinned local multiplexing simulation
-also passes; target-Pi resources and Linux enforcement remain open.
+Status: the local warm-agent assumption failed on 2026-08-30. A direct-provider
+control on 2026-09-01 proved that a byte-identical marked prefix preserves the
+upstream cache, but Hermes was not in that request path. D23's end-to-end HTTP
+continuity gate therefore remains open. D24's pinned upstream regression suite
+passes; the nswarm runtime, target-Pi resources and Linux enforcement remain
+open.
 
 ## Pinned provenance
 
@@ -44,12 +46,14 @@ The distinction between durable and warm state matters:
   snapshot, reloads enabled built-in memory, creates new in-memory todo/session
   state, and runs the turn on that new object.
 
-Persisted transcript/prompt continuity preserves the upstream provider's
-byte-prefix cache in the live follow-up below. The first claimed benefit—avoiding
-fixed local construction work—still does not exist on the HTTP route. The
-separate provider benefit does: after the prime, the measured stable prefix is
-served entirely from the provider cache and reduces repeated-turn modeled cost
-by 91.02%.
+The pinned source asserts that persisted transcript/prompt continuity can
+reproduce the marked bytes used by the provider call. The live follow-up below
+separately proves the provider preserves a byte-identical marked prefix, but it
+calls the provider directly rather than traversing Hermes. It therefore does
+not prove that the Hermes HTTP route reproduces those bytes end to end. The
+first claimed benefit—avoiding fixed local construction work—does not exist on
+the HTTP route; the separate provider control is encouraging but cannot close
+D23 by itself.
 
 ## Executable trial
 
@@ -103,14 +107,17 @@ deterministic; it does not measure the reload curve before compaction.
 ## Live provider-cache follow-up
 
 [`../scripts/hermes_provider_cache_spike.py`](../scripts/hermes_provider_cache_spike.py)
-measures the upstream half that the deterministic lifecycle probe cannot. It
+measures a direct-provider control for the upstream half that the deterministic
+lifecycle probe cannot. Hermes is source-verified before the paid calls but is
+not in their request path. The harness
 first runs the exact Hermes source verifier. The pin now also covers the cache
 planner, custom-provider cache capability, Anthropic usage extractor and
-canonical cache-bucket pricing path. The source contract proves that later HTTP
-turns restore the system-prompt bytes and that every fresh `AIAgent` reapplies
-provider cache markers before the call.
+canonical cache-bucket pricing path. The pinned source inspection asserts that
+later HTTP turns restore the persisted system prompt and that every fresh
+`AIAgent` reapplies provider cache markers before the call; the direct-provider
+control does not independently verify that end-to-end byte reproduction.
 
-The paid trial then sends four matched pairs to Surplus Intelligence's
+The paid control then sends four matched pairs to Surplus Intelligence's
 Anthropic-compatible endpoint, pinned to the healthy native Anthropic provider
 and `claude-haiku-4.5`. Each pair contains the same growing transcript and a
 24,576-byte controlled system prompt. The cold session receives a fresh
@@ -124,7 +131,10 @@ environment-only `SURPLUS_API_KEY`, a positive ceiling no greater than $3, the
 exact source pin and a provider price quote. Before inference it conservatively
 reserves one input token per request byte at the more expensive of uncached or
 cache-write rates, plus the maximum output. The final run's hard ceiling was
-$1.00 and its full planned worst case was $0.2884.
+$1.00 and its full planned worst case was $0.2884. A missing cache-write quote
+fails closed instead of being priced as ordinary input. After each successful
+request, an ignored aggregate-only partial checkpoint records completed-call
+count and metered cost; no response content or request identifier is retained.
 
 | Turn | Cold write | Cold read | Long-lived write | Long-lived read | Cold cost | Long-lived cost | Cold latency | Long-lived latency |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -133,21 +143,27 @@ $1.00 and its full planned worst case was $0.2884.
 | 3 | 6,437 | 0 | 0 | 6,435 | 8,133 µUSD | 730 µUSD | 40.843 s | 6.054 s |
 | 4 | 6,434 | 0 | 0 | 6,435 | 8,146 µUSD | 747 µUSD | 24.152 s | 10.562 s |
 
-Across all four turns, cold sessions wrote 25,742 cache tokens and read none;
+Both classes carried the same ephemeral cache marker. Across all four turns,
+the fresh-prefix control wrote 25,742 cache tokens and read none;
 the long-lived session wrote 6,435 on its prime and read 19,305 across the
 three repeats. For repeats only, provider-usage cost fell from 24,391 to 2,190
-micro-USD, saving 22,201 micro-USD or 91.02%. Median end-to-end latency was
-32.486 seconds cold and 9.602 seconds long-lived. Cost is derived solely from
-the provider's uncached/cache-read/cache-write/output usage buckets multiplied
-by that provider's published bucket rates. It is not represented as the
-marketplace wallet's settlement debit.
+micro-USD, saving 22,201 micro-USD or 91.02% against cache-marked fresh
+sessions, which pay the provider's cache-write premium. Repricing those same
+fresh-session prompt tokens at the ordinary uncached-input rate gives a 19,563
+micro-USD comparator and an 88.81% reduction. Cost is derived solely from the
+provider's uncached/cache-read/cache-write/output usage buckets multiplied by
+that provider's published bucket rates. It is not represented as the
+marketplace wallet's settlement debit. The four fixed-order pairs are
+uncontrolled endpoint-latency samples; their medians support no comparative
+latency conclusion.
 
 The committed aggregate-only result is
 [`../spikes/hermes/evidence/provider-cache.json`](../spikes/hermes/evidence/provider-cache.json).
 Its integrity checker derives every turn cost, aggregate, saving and decision,
 checks the spend ceiling and prompt-coverage floor, rejects raw output or secret
-material, and runs in local, PR and merge-queue CI. The live measurement is an
-architecture experiment, not a Hermes pilot, bot session or deployment.
+material, accepts internally consistent favorable or adverse cache results, and
+runs in local, PR and merge-queue CI. The live measurement is a direct-provider
+architecture control, not a Hermes pilot, bot session or deployment.
 
 ## Validation
 
@@ -175,7 +191,7 @@ source tree rather than a claim of continuous upstream monitoring.
 The D24 local follow-up ran 27 additional pinned upstream files through
 Hermes's canonical per-file-isolation runner with four workers and retries
 disabled. All 288 tests passed, two optional-dependency cases skipped, and no
-file needed a retry. The aggregate runner time was 5.4 seconds on the Apple
+file needed a retry. The aggregate runner time was 4.9 seconds on the Apple
 arm64 host. This is test-suite wall time, not gateway turn latency or a Pi
 resource measurement.
 
@@ -191,11 +207,12 @@ summarized into an assumed client contract.
 
 ## Stop condition and unmeasured phases
 
-D23 is revised: retain the stable HTTP session API. Fresh local construction is
-a known cost and must be measured on the target Pi, but it does not destroy the
-provider cache that dominates repeated input-token cost. The internal native
-adapter and experimental Relay paths remain rejected because neither supplies
-the reviewed synchronous external contract that `botkit` requires.
+D23 remains open: keep the stable HTTP session API as the candidate boundary,
+but do not claim its provider-cache continuity until an end-to-end Hermes pair
+confirms the provider usage buckets. Fresh local construction is a known cost
+and must also be measured on the target Pi. The internal native adapter and
+experimental Relay paths remain rejected because neither supplies the reviewed
+synchronous external contract that `botkit` requires.
 
 ## Native-adapter follow-up
 
@@ -206,7 +223,7 @@ result is [`../spikes/hermes/evidence/native-adapter.json`](../spikes/hermes/evi
 
 | Candidate | Stable external contract | Warm agent | Required boundary | Result |
 | --- | --- | --- | --- | --- |
-| HTTP session API | yes | no | preserves `botkit` transport ownership | accepted by provider-cache measurement |
+| HTTP session API | yes | no | preserves `botkit` transport ownership | candidate; end-to-end cache continuity pending |
 | Native platform adapter | no; Python internals | yes | Hermes owns Telegram; no synchronous `ask()` | rejected |
 | Hermes Relay adapter | no; experimental | yes | needs an external connector and changing frame contract | rejected |
 
@@ -224,50 +241,64 @@ the other half of the contract. Adopting it would replace one failed assumption
 with an unpinned service and unstable wire format.
 
 There is no stable local-agent-cache replacement to implement from the reviewed
-pin, and the measured provider-cache result means one is not required to settle
-D23. D24 may now evaluate the documented multiplexed gateway. If credential,
-profile, socket, sandbox or Pi behavior fails that ordered trial, D24 still
-falls back to one sandboxed gateway process and service user per bot.
+pin. D24's isolation evaluation is independently executable and need not wait
+for D23's provider-cache result. If credential, profile, socket, sandbox or Pi
+behavior fails that ordered trial, D24 falls back to one sandboxed gateway
+process and service user per bot.
 
 ## D24 local multiplexing simulation
 
 [`../scripts/hermes_multiplex_spike.py`](../scripts/hermes_multiplex_spike.py)
-runs Hermes's canonical regression suite against the same exact source pin. It
+runs Hermes's canonical upstream regression suite against the same exact source pin. It
 requires an explicit local-only acknowledgement, a clean tracked upstream
 worktree and an isolated Python environment with the pinned test dependencies.
-It caps the runner at four workers, disables retry-based green results, makes no
-provider calls and stores no raw test output.
+It caps the runner at four workers, disables retry-based green results, passes
+only an explicit non-secret environment allowlist to the child, and stores no
+raw test output. No provider credential is forwarded.
 
-The focused suite uses two temporary profile homes and covers both directions
+The selected upstream tests use temporary profile homes and cover
 of credential isolation, profile-prefixed HTTP routing and allowlists,
 per-profile bearer authorization, provider/model secret scope, SOUL/config/
-memory/skill scope, session-key namespaces, separate SQLite stores, concurrent
+memory/skill scope, session-key namespaces, SQLite store scoping, concurrent
 context propagation, background task scope, adapter lifecycle and pairing
 stores. The result was 288 passed, 0 failed, 2 optional-dependency skips across
 27 files, with zero flaky retries. The committed aggregate is
 [`../spikes/hermes/evidence/multiplex-local.json`](../spikes/hermes/evidence/multiplex-local.json),
-and its fail-closed checker runs in local, PR and merge-queue CI.
+and its fail-closed checker runs in local, PR and merge-queue CI. Seven contract
+groups are derived from explicit per-file pass/fail/skip counts. The two skips
+belong only to a separately reported supplemental migration file; a skip in a
+contract group would make that group incomplete rather than green.
 
-This passes D24's local functional isolation gate and provisionally supports
-one multiplexed gateway. It does not settle the complete topology decision:
-Darwin cannot exercise the Linux service user, systemd sandbox or Unix-socket
+This passes a pinned Hermes upstream regression baseline. It does not execute
+nswarm's own two-profile gateway, so it does not pass D24's runtime isolation
+gate or select a topology. Darwin cannot exercise the Linux service user,
+systemd sandbox or Unix-socket
 group/ACL transition, and its resource result cannot stand in for the target
 Pi. The upstream tests use temporary profiles rather than attaching gym's real
 MCP server, and no live pilot or gym parallel trial was run.
 
 The following D24 acceptance work therefore remains target- or profile-specific:
 
-- a two-profile multiplex gateway and actual Pi RSS/latency measurements;
+- an nswarm-launched two-profile multiplex gateway with distinct profile homes,
+  allowlists and bearer credentials;
+- concurrent requests proving profile, session, memory and provider-secret
+  isolation at the nswarm/Hermes boundary;
+- actual Pi RSS/latency measurements for that two-profile process;
 - the dedicated `hermes-gateway` systemd sandbox on Linux;
 - a throwaway cross-user socket group/ACL transition;
 - gym's real MCP server attachment;
 - `hermes prompt-size` before/after the §6.3 toolsets.
 
-Therefore D24 is locally de-risked but not finally settled. The local evidence
-finds no reason to force the per-bot-process fallback; one gateway remains the
-provisional topology until the target-host checks either confirm it or trigger
-that fallback. No Pi, Linux sandbox, socket-ACL, real-MCP, prompt-size or pilot
-result is claimed from the Apple host.
+Therefore D24 is locally de-risked but not settled. Its topology remains pending
+the nswarm runtime trial; a failed isolation contract forces the per-bot-process
+fallback. No Pi, Linux sandbox, socket-ACL, real-MCP, prompt-size or pilot result
+is claimed from the Apple host.
+
+The earlier stop condition said not to begin D24 in this change. The operator's
+follow-up explicitly requested the local D24 simulation in the same draft PR,
+so that stop condition is retracted for this evidence-only extension. It did
+not authorize increased coder concurrency, the gym parallel trial or a live
+pilot; none was run.
 
 The first exact D24 Pi run from the `nswarm` checkout is:
 
@@ -278,7 +309,7 @@ The first exact D24 Pi run from the `nswarm` checkout is:
 ```
 
 The source checkout must first pass `verify-source`. The reviewed local
-multiplex harness has now established the functional baseline; the Pi command
+multiplex harness has established an upstream regression baseline; the Pi command
 does not by itself satisfy the remaining sandbox, socket or profile prompt-size
 gates.
 

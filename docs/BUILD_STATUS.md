@@ -1,21 +1,23 @@
 # nswarm v1 build status
 
-## Checkpoint AC - D23 live provider-cache gate
+## Checkpoint AC - direct-provider cache control
 
-Updated: 2026-09-01. The cost-bounded live trial combined the pinned Hermes
-prompt-restoration/cache-marker path with four matched cold-versus-long-lived
-provider requests. The long-lived prime wrote 6,435 cache tokens; each of three
-repeats read all 6,435 while matched cold sessions wrote the prefix again.
-Repeated-turn modeled cost fell from 24,391 to 2,190 micro-USD (91.02%), and
-median end-to-end latency was 9.602 seconds long-lived versus 32.486 seconds
-cold.
+Updated: 2026-09-02. The cost-bounded direct-provider control source-verified
+the pinned Hermes prompt-restoration/cache-marker path, then made four matched
+cold-versus-long-lived provider requests without Hermes in the request path.
+The long-lived prime wrote 6,435 cache tokens; each of three repeats read all
+6,435 while matched fresh prefixes wrote the cache again. Repeated-turn modeled
+cost fell from 24,391 to 2,190 micro-USD: 91.02% against cache-marked fresh
+sessions and 88.81% against a plain uncached-price comparator. The fixed-order
+latency samples do not support a comparative conclusion.
 
-D23 is revised to retain the stable HTTP session route despite fresh local
-`AIAgent` construction. D24 is unblocked and remains unevaluated; multiplexing,
-credential/profile/tool/socket isolation, the dedicated-user sandbox, Pi
-RSS/latency and prompt size still decide between one gateway and the documented
-per-bot-process fallback. No D24 run, gym parallel trial, bot session,
-deployment, live pilot or coder-concurrency increase occurred.
+D23's end-to-end HTTP cache-continuity gate remains open despite the favorable
+provider control. D24 is independently executable. Its pinned upstream
+regression suite passes, but nswarm runtime multiplexing, credential/profile/
+tool/socket isolation, the dedicated-user sandbox, Pi RSS/latency and prompt
+size still decide between one gateway and the documented per-bot-process
+fallback. No gym parallel trial, bot session, deployment, live pilot or
+coder-concurrency increase occurred.
 
 The harness required explicit operator opt-in and a $1 hard ceiling; its
 conservative full-run reservation was $0.2884 and the usage-derived total was
@@ -59,8 +61,10 @@ per crate. Strict coverage passes at 1,305/1,327 changed executable lines
 (98.34%), 318/318 critical branch outcomes (100.00%), and 10,267/10,576
 repository lines (97.08%).
 
-D23 is now settled by the later provider-cache evidence even though the pinned
-Hermes HTTP route creates a fresh `AIAgent` per request. D24 remains unevaluated.
+D23's direct-provider control is favorable, but the pinned Hermes HTTP route
+was not in that paid request path and its end-to-end cache continuity remains
+unmeasured. D24's upstream regression baseline passes; its nswarm runtime gate
+remains unevaluated.
 Therefore no live Hermes research or coder pilot, ask surface, fallback
 topology, or concurrency above one is claimed. Deterministic startup and
 containment tests do not satisfy the live serial-pilot gate. This PR was

@@ -55,12 +55,14 @@ represented as output from that live coder pilot.
 
 ## D23 and D24
 
-The pinned Hermes HTTP session route creates a fresh `AIAgent` per request, but
-the later live provider-cache trial proves that persisted byte-prefix continuity
-survives that lifecycle: three repeated turns each read 6,435 cached tokens and
-modeled repeated-turn cost fell 91.02%. D23 is revised to retain the stable HTTP
-route. D24's multiplexing, credential isolation, Pi resource use, prompt size,
-dedicated-user sandbox and socket ACL sequence has still not run. Consequently:
+The pinned Hermes HTTP session route creates a fresh `AIAgent` per request. A
+later direct-provider control showed that three byte-identical repeated prefixes
+each read 6,435 cached tokens and reduced modeled repeated-turn cost 91.02%
+against cache-marked fresh sessions. Hermes was not in that paid request path,
+so D23's end-to-end HTTP continuity remains open. D24's pinned upstream
+regression baseline passes, while nswarm multiplexing, credential isolation, Pi
+resource use, prompt size, dedicated-user sandbox and socket ACL checks remain.
+Consequently:
 
 - `research-bot` still exits unsuccessfully by design;
 - the research manifest advertises no `ask` surface;
@@ -78,10 +80,10 @@ paths. Native adapters reuse warm agents but are internal Python integration
 points that would make Hermes own Telegram and provide no synchronous `ask()`.
 The relay path also reuses warm agents but is explicitly experimental and
 depends on an external, unpinned connector contract. Neither is a reviewed D23
-local-agent-cache replacement. The provider-cache measurement means no such
-replacement is required for D23. D24 is unblocked, but the multiplexed topology
-is not accepted until its ordered isolation and Pi checks pass; failure selects
-the one-sandboxed-process-and-user-per-bot fallback.
+local-agent-cache replacement. D24 is independently executable, but the
+multiplexed topology is not accepted until its ordered nswarm runtime isolation
+and Pi checks pass; failure selects the one-sandboxed-process-and-user-per-bot
+fallback.
 
 ## Live completion sequence
 
