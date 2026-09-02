@@ -58,33 +58,53 @@ class ArgumentTests(unittest.TestCase):
             root = Path(directory)
             interpreter = root / "python"
             interpreter.symlink_to("/bin/sh")
-            _, actual, _ = SPIKE.validate_args(self.args(root, python=interpreter))
+            _, actual, output, _ = SPIKE.validate_args(
+                self.args(root, python=interpreter)
+            )
             self.assertEqual(actual, Path(os.path.abspath(interpreter)))
+            self.assertEqual(output, SPIKE.DEFAULT_OUTPUT.resolve())
 
 
 class SummaryTests(unittest.TestCase):
-    def test_parses_passing_canonical_summary(self) -> None:
-        output = (
-            "=== Summary: 27 files, 288 tests passed, 0 failed, 2 skipped "
+    def passing_output(self) -> str:
+        lines = []
+        for filename in SPIKE.TEST_FILES:
+            counts = "1✓ 2s" if filename in SPIKE.SUPPLEMENTAL_TEST_FILES else "1✓"
+            lines.append(f"[100.0% | 1/~1 | ✓1 | ✗0] ✓ {filename} ({counts}, 0.1s)")
+        lines.append(
+            "=== Summary: 27 files, 27 tests passed, 0 failed, 2 skipped "
             "(100% complete) in 5.3s (4 workers) ==="
         )
-        summary = SPIKE.parse_summary(output, 4)
-        self.assertEqual(summary["passed"], 288)
+        return "\n".join(lines)
+
+    def test_parses_passing_canonical_summary(self) -> None:
+        summary, per_file = SPIKE.parse_summary(self.passing_output(), 4)
+        self.assertEqual(summary["passed"], 27)
         self.assertEqual(summary["wall_ms"], 5_300)
+        self.assertEqual(len(per_file), 27)
+
+    def test_contract_result_is_derived_from_per_file_counts(self) -> None:
+        _, per_file = SPIKE.parse_summary(self.passing_output(), 4)
+        contract = SPIKE.summarize_group(
+            SPIKE.CONTRACT_TEST_FILES["per_profile_http_bearer_auth"], per_file
+        )
+        self.assertEqual(contract["result"], "passed")
+        first = SPIKE.CONTRACT_TEST_FILES["per_profile_http_bearer_auth"][0]
+        per_file[first]["skipped"] = 1
+        contract = SPIKE.summarize_group(
+            SPIKE.CONTRACT_TEST_FILES["per_profile_http_bearer_auth"], per_file
+        )
+        self.assertEqual(contract["result"], "incomplete")
 
     def test_rejects_failed_suite(self) -> None:
-        output = (
-            "=== Summary: 27 files, 287 tests passed, 1 failed, 2 skipped "
-            "(100% complete) in 5.3s (4 workers) ==="
+        output = self.passing_output().replace(
+            "27 tests passed, 0 failed", "26 tests passed, 1 failed"
         )
         with self.assertRaisesRegex(SPIKE.MultiplexSpikeError, "did not pass"):
             SPIKE.parse_summary(output, 4)
 
     def test_rejects_flaky_retry(self) -> None:
-        output = (
-            "=== Summary: 27 files, 288 tests passed, 0 failed, 2 skipped "
-            "(100% complete) in 5.3s (4 workers) ===\n=== ⚠ 1 FLAKY file ==="
-        )
+        output = self.passing_output() + "\n=== ⚠ 1 FLAKY file ==="
         with self.assertRaisesRegex(SPIKE.MultiplexSpikeError, "required a retry"):
             SPIKE.parse_summary(output, 4)
 

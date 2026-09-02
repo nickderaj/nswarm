@@ -1,21 +1,64 @@
 {
   "contracts": {
-    "concurrent_context_and_background_scope": "passed",
-    "credential_and_provider_secret_isolation": "passed",
-    "multiplex_adapter_lifecycle": "passed",
-    "per_profile_http_bearer_auth": "passed",
-    "profile_route_and_allowlist": "passed",
-    "session_key_and_sqlite_store_isolation": "passed",
-    "soul_memory_skill_and_config_scope": "passed"
+    "concurrent_context_and_background_scope": {
+      "result": "passed",
+      "test_files": 3,
+      "tests_failed": 0,
+      "tests_passed": 22,
+      "tests_skipped": 0
+    },
+    "credential_and_provider_secret_isolation": {
+      "result": "passed",
+      "test_files": 7,
+      "tests_failed": 0,
+      "tests_passed": 133,
+      "tests_skipped": 0
+    },
+    "multiplex_adapter_lifecycle": {
+      "result": "passed",
+      "test_files": 4,
+      "tests_failed": 0,
+      "tests_passed": 46,
+      "tests_skipped": 0
+    },
+    "per_profile_http_bearer_auth": {
+      "result": "passed",
+      "test_files": 3,
+      "tests_failed": 0,
+      "tests_passed": 14,
+      "tests_skipped": 0
+    },
+    "profile_route_and_allowlist": {
+      "result": "passed",
+      "test_files": 3,
+      "tests_failed": 0,
+      "tests_passed": 17,
+      "tests_skipped": 0
+    },
+    "session_key_and_sqlite_store_isolation": {
+      "result": "passed",
+      "test_files": 3,
+      "tests_failed": 0,
+      "tests_passed": 28,
+      "tests_skipped": 0
+    },
+    "soul_memory_skill_and_config_scope": {
+      "result": "passed",
+      "test_files": 3,
+      "tests_failed": 0,
+      "tests_passed": 10,
+      "tests_skipped": 0
+    }
   },
   "decision": {
-    "d24_topology": "provisionally_supports_one_gateway",
+    "d24_topology": "pending_nswarm_runtime_trial",
     "gym_mcp_attachment": "not_run",
     "linux_sandbox_and_socket_acl_gate": "pending",
     "live_pilot": false,
-    "local_multiplex_functional_gate": "passed",
+    "nswarm_runtime_isolation_gate": "not_measured",
     "profile_prompt_size_gate": "pending_real_profiles",
-    "target_pi_resource_gate": "pending"
+    "target_pi_resource_gate": "pending",
+    "upstream_regression_suite": "passed"
   },
   "environment": {
     "aiohttp_version": "3.14.3",
@@ -27,7 +70,7 @@
     "python_version": "3.11.14",
     "target_pi": false
   },
-  "measurement": "pinned_hermes_multiplex_local_simulation",
+  "measurement": "pinned_hermes_upstream_multiplex_regression_suite",
   "pin": {
     "commit_sha": "fcbd1076a93841fa88855acce810e342a5b78101",
     "package": "hermes-agent",
@@ -39,22 +82,29 @@
     "tag_object_sha": "b05e680e63d39d5a8e3ec0f5842a41d1c4209c03"
   },
   "safeguards": {
+    "child_environment_allowlist_enforced": true,
+    "credential_variables_forwarded": 0,
     "exact_source_pin_required": true,
+    "forwarded_environment_variable_count": 5,
     "max_workers": 4,
     "operator_local_only_acknowledgement": true,
-    "production_credentials_loaded": 0,
-    "provider_calls": 0,
     "raw_test_output_persisted": false,
     "test_file_retries": 0,
     "tracked_source_clean_required": true
   },
-  "schema_version": 1,
+  "schema_version": 2,
+  "supplemental": {
+    "result": "incomplete",
+    "test_files": 1,
+    "tests_failed": 0,
+    "tests_passed": 18,
+    "tests_skipped": 2
+  },
   "trial": {
-    "canonical_runner_wall_ms": 5400,
+    "canonical_runner_wall_ms": 4900,
     "completion_percent": 100,
     "flaky_files": 0,
-    "harness_wall_ms": 6024,
-    "profile_count": 2,
+    "harness_wall_ms": 5583,
     "test_files": 27,
     "tests_failed": 0,
     "tests_passed": 288,

@@ -38,24 +38,24 @@ class EvidenceTests(unittest.TestCase):
     def test_rejects_incomplete_test_aggregate(self) -> None:
         changed = copy.deepcopy(self.document)
         changed["trial"]["tests_passed"] -= 1
-        with self.assertRaisesRegex(CHECK.EvidenceError, "tests_passed differs"):
+        with self.assertRaisesRegex(CHECK.EvidenceError, "passing-test totals"):
             CHECK.validate_evidence(changed, self.pin)
 
     def test_rejects_target_pi_or_pilot_claim(self) -> None:
         changed = copy.deepcopy(self.document)
         changed["environment"]["target_pi"] = True
-        with self.assertRaisesRegex(CHECK.EvidenceError, "environment differs"):
+        with self.assertRaisesRegex(CHECK.EvidenceError, "target-Pi"):
             CHECK.validate_evidence(changed, self.pin)
 
         changed = copy.deepcopy(self.document)
         changed["decision"]["live_pilot"] = True
-        with self.assertRaisesRegex(CHECK.EvidenceError, "decision differs"):
+        with self.assertRaisesRegex(CHECK.EvidenceError, "decision is not derived"):
             CHECK.validate_evidence(changed, self.pin)
 
     def test_rejects_raw_or_secret_material(self) -> None:
         changed = copy.deepcopy(self.document)
         changed["environment"]["os"] = "/Users/operator/raw-output"
-        with self.assertRaisesRegex(CHECK.EvidenceError, "environment differs"):
+        with self.assertRaisesRegex(CHECK.EvidenceError, "raw or secret"):
             CHECK.validate_evidence(changed, self.pin)
 
 

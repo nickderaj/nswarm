@@ -60,11 +60,64 @@ TEST_FILES = (
     "tests/test_secret_scope_plugin_families.py",
 )
 
+CONTRACT_TEST_FILES = {
+    "profile_route_and_allowlist": (
+        "tests/gateway/test_multiplex_http_routing.py",
+        "tests/gateway/test_multiplex_api_server_routing.py",
+        "tests/gateway/test_profile_routing.py",
+    ),
+    "per_profile_http_bearer_auth": (
+        "tests/gateway/test_64674_multiplex_primary_token_scope.py",
+        "tests/gateway/test_api_server_multiplex_secret_scope.py",
+        "tests/gateway/test_multiplex_profile_authz.py",
+    ),
+    "credential_and_provider_secret_isolation": (
+        "tests/agent/test_secret_scope.py",
+        "tests/gateway/test_adapter_startup_secret_scope.py",
+        "tests/gateway/test_email_secret_scope.py",
+        "tests/gateway/test_multiplex_credential_isolation.py",
+        "tests/gateway/test_weixin_secret_scope.py",
+        "tests/hermes_cli/test_model_picker_secret_scope.py",
+        "tests/test_secret_scope_plugin_families.py",
+    ),
+    "soul_memory_skill_and_config_scope": (
+        "tests/agent/test_soul_md_profile_isolation.py",
+        "tests/cron/test_cron_profile_isolation.py",
+        "tests/test_profile_isolation_runtime.py",
+    ),
+    "session_key_and_sqlite_store_isolation": (
+        "tests/gateway/test_multiplex_adapter_session_key_namespace.py",
+        "tests/gateway/test_multiplex_pairing_stores.py",
+        "tests/gateway/test_multiplex_session_db_profile_scope.py",
+    ),
+    "concurrent_context_and_background_scope": (
+        "tests/gateway/test_75349_whatsapp_multiplex_secret_scope.py",
+        "tests/gateway/test_multiplex_background_task_scope.py",
+        "tests/gateway/test_multiplex_busy_input_mode.py",
+    ),
+    "multiplex_adapter_lifecycle": (
+        "tests/gateway/test_multiplex_adapter_registry.py",
+        "tests/gateway/test_multiplex_lifecycle.py",
+        "tests/gateway/test_multiplex_phase0.py",
+        "tests/hermes_cli/test_gateway_enroll_multiplex_warning.py",
+    ),
+}
+SUPPLEMENTAL_TEST_FILES = ("tests/agent/test_secret_scope_tier1_migration.py",)
+CHILD_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR", "TZ")
+
 SUMMARY_RE = re.compile(
     r"=== Summary: (?P<files>\d+) files, (?P<passed>\d+) tests passed, "
     r"(?P<failed>\d+) failed, (?P<skipped>\d+) skipped "
     r"\((?P<complete>\d+)% complete\) in (?P<seconds>\d+(?:\.\d+)?)s "
     r"\((?P<workers>\d+) workers\) ==="
+)
+FILE_RESULT_RE = re.compile(
+    r"^\[[^\n]+\]\s+[✓✗]\s+(?P<file>tests/\S+)\s+"
+    r"\((?P<summary>[^)]*)\)$",
+    re.MULTILINE,
+)
+FILE_COUNT_RE = re.compile(
+    r"(?:^|\s)(?P<count>\d+)(?P<kind>xf|xp|✓|✗|s|e)(?=\s|,|$)"
 )
 
 
@@ -88,7 +141,7 @@ def _pin_identity(pin: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate_args(args: argparse.Namespace) -> tuple[Path, Path, int]:
+def validate_args(args: argparse.Namespace) -> tuple[Path, Path, Path, int]:
     if not args.i_understand_this_is_local_only:
         raise MultiplexSpikeError("refusing without --i-understand-this-is-local-only")
     source = args.source.resolve()
@@ -104,10 +157,61 @@ def validate_args(args: argparse.Namespace) -> tuple[Path, Path, int]:
         raise MultiplexSpikeError("output must be directly under spikes/hermes/evidence")
     if not 1 <= args.workers <= MAX_WORKERS:
         raise MultiplexSpikeError(f"workers must be between 1 and {MAX_WORKERS}")
-    return source, python, args.workers
+    return source, python, output, args.workers
 
 
-def parse_summary(output: str, expected_workers: int) -> dict[str, int]:
+def parse_file_results(output: str) -> dict[str, dict[str, int]]:
+    results: dict[str, dict[str, int]] = {}
+    for match in FILE_RESULT_RE.finditer(output):
+        filename = match.group("file")
+        if filename not in TEST_FILES:
+            continue
+        if filename in results:
+            raise MultiplexSpikeError("canonical Hermes output repeated a test file")
+        counts = {
+            "passed": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+        for count_match in FILE_COUNT_RE.finditer(match.group("summary")):
+            count = int(count_match.group("count"))
+            kind = count_match.group("kind")
+            if kind == "✓":
+                counts["passed"] += count
+            elif kind in {"✗", "e", "xp"}:
+                counts["failed"] += count
+            elif kind in {"s", "xf"}:
+                counts["skipped"] += count
+        if sum(counts.values()) == 0:
+            raise MultiplexSpikeError("canonical Hermes file result omitted test counts")
+        results[filename] = counts
+    if set(results) != set(TEST_FILES):
+        raise MultiplexSpikeError("canonical Hermes per-file results are incomplete")
+    return results
+
+
+def summarize_group(
+    filenames: tuple[str, ...], per_file: dict[str, dict[str, int]]
+) -> dict[str, int | str]:
+    passed = sum(per_file[name]["passed"] for name in filenames)
+    failed = sum(per_file[name]["failed"] for name in filenames)
+    skipped = sum(per_file[name]["skipped"] for name in filenames)
+    if failed:
+        result = "failed"
+    elif skipped or not passed:
+        result = "incomplete"
+    else:
+        result = "passed"
+    return {
+        "test_files": len(filenames),
+        "tests_passed": passed,
+        "tests_failed": failed,
+        "tests_skipped": skipped,
+        "result": result,
+    }
+
+
+def parse_summary(output: str, expected_workers: int) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
     matches = list(SUMMARY_RE.finditer(output))
     if len(matches) != 1:
         raise MultiplexSpikeError("canonical Hermes test summary missing or ambiguous")
@@ -126,7 +230,18 @@ def parse_summary(output: str, expected_workers: int) -> dict[str, int]:
         raise MultiplexSpikeError("Hermes runner worker count differs")
     if "FLAKY file" in output:
         raise MultiplexSpikeError("focused Hermes multiplex suite required a retry")
-    return values
+    per_file = parse_file_results(output)
+    if values["passed"] != sum(item["passed"] for item in per_file.values()):
+        raise MultiplexSpikeError("canonical Hermes pass totals are inconsistent")
+    if values["failed"] != sum(item["failed"] for item in per_file.values()):
+        raise MultiplexSpikeError("canonical Hermes failure totals are inconsistent")
+    if values["skipped"] != sum(item["skipped"] for item in per_file.values()):
+        parsed_skips = sum(item["skipped"] for item in per_file.values())
+        raise MultiplexSpikeError(
+            "canonical Hermes skip totals are inconsistent "
+            f"({values['skipped']} summary, {parsed_skips} per-file)"
+        )
+    return values, per_file
 
 
 def _python_identity(python: Path) -> dict[str, str]:
@@ -176,7 +291,11 @@ def run_local_trial(source: Path, python: Path, workers: int) -> dict[str, Any]:
         "0",
         *TEST_FILES,
     ]
-    environment = os.environ.copy()
+    environment = {
+        name: os.environ[name]
+        for name in CHILD_ENV_ALLOWLIST
+        if name in os.environ
+    }
     environment["HERMES_PYTHON"] = str(python)
     started = time.perf_counter_ns()
     result = subprocess.run(
@@ -192,11 +311,23 @@ def run_local_trial(source: Path, python: Path, workers: int) -> dict[str, Any]:
     combined = result.stdout + "\n" + result.stderr
     if result.returncode != 0:
         raise MultiplexSpikeError("focused Hermes multiplex suite failed")
-    summary = parse_summary(combined, workers)
+    summary, per_file = parse_summary(combined, workers)
+    contracts = {
+        name: summarize_group(files, per_file)
+        for name, files in CONTRACT_TEST_FILES.items()
+    }
+    supplemental = summarize_group(SUPPLEMENTAL_TEST_FILES, per_file)
+    suite_result = (
+        "failed"
+        if summary["failed"] or any(item["result"] == "failed" for item in contracts.values())
+        else "incomplete"
+        if any(item["result"] != "passed" for item in contracts.values())
+        else "passed"
+    )
 
     return {
-        "schema_version": 1,
-        "measurement": "pinned_hermes_multiplex_local_simulation",
+        "schema_version": 2,
+        "measurement": "pinned_hermes_upstream_multiplex_regression_suite",
         "pin": _pin_identity(pin),
         "environment": {
             "os": platform.system(),
@@ -212,14 +343,14 @@ def run_local_trial(source: Path, python: Path, workers: int) -> dict[str, Any]:
             "operator_local_only_acknowledgement": True,
             "exact_source_pin_required": True,
             "tracked_source_clean_required": True,
-            "provider_calls": 0,
-            "production_credentials_loaded": 0,
+            "child_environment_allowlist_enforced": True,
+            "forwarded_environment_variable_count": len(environment) - 1,
+            "credential_variables_forwarded": 0,
             "test_file_retries": 0,
             "max_workers": MAX_WORKERS,
             "raw_test_output_persisted": False,
         },
         "trial": {
-            "profile_count": 2,
             "test_files": summary["files"],
             "tests_passed": summary["passed"],
             "tests_failed": summary["failed"],
@@ -230,18 +361,12 @@ def run_local_trial(source: Path, python: Path, workers: int) -> dict[str, Any]:
             "harness_wall_ms": elapsed_ms,
             "flaky_files": 0,
         },
-        "contracts": {
-            "profile_route_and_allowlist": "passed",
-            "per_profile_http_bearer_auth": "passed",
-            "credential_and_provider_secret_isolation": "passed",
-            "soul_memory_skill_and_config_scope": "passed",
-            "session_key_and_sqlite_store_isolation": "passed",
-            "concurrent_context_and_background_scope": "passed",
-            "multiplex_adapter_lifecycle": "passed",
-        },
+        "contracts": contracts,
+        "supplemental": supplemental,
         "decision": {
-            "local_multiplex_functional_gate": "passed",
-            "d24_topology": "provisionally_supports_one_gateway",
+            "upstream_regression_suite": suite_result,
+            "nswarm_runtime_isolation_gate": "not_measured",
+            "d24_topology": "pending_nswarm_runtime_trial",
             "target_pi_resource_gate": "pending",
             "linux_sandbox_and_socket_acl_gate": "pending",
             "profile_prompt_size_gate": "pending_real_profiles",
@@ -271,9 +396,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     try:
-        source, python, workers = validate_args(args)
+        source, python, output, workers = validate_args(args)
         evidence = run_local_trial(source, python, workers)
-        write_evidence(args.output.resolve(), evidence)
+        write_evidence(output, evidence)
     except (MultiplexSpikeError, GATEWAY.SpikeError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

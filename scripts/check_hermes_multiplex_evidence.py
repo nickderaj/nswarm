@@ -42,13 +42,14 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
             "safeguards",
             "trial",
             "contracts",
+            "supplemental",
             "decision",
         },
         "root",
     )
-    if document["schema_version"] != 1:
+    if document["schema_version"] != 2:
         raise EvidenceError("unsupported evidence schema version")
-    if document["measurement"] != "pinned_hermes_multiplex_local_simulation":
+    if document["measurement"] != "pinned_hermes_upstream_multiplex_regression_suite":
         raise EvidenceError("unexpected measurement")
 
     expected_pin = {
@@ -84,31 +85,45 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
         },
         "environment",
     )
-    if environment != {
-        "os": "Darwin",
-        "architecture": "arm64",
-        "python_implementation": "CPython",
-        "python_version": "3.11.14",
-        "aiohttp_version": "3.14.3",
-        "pytest_version": "9.1.1",
-        "target_pi": False,
-        "linux_service_manager": False,
-    }:
-        raise EvidenceError("local measurement environment differs")
+    for name in (
+        "os",
+        "architecture",
+        "python_implementation",
+        "python_version",
+        "aiohttp_version",
+        "pytest_version",
+    ):
+        if not isinstance(environment[name], str) or not environment[name]:
+            raise EvidenceError(f"environment {name} must be a nonempty string")
+    if environment["python_implementation"] != "CPython":
+        raise EvidenceError("trial must use CPython")
+    if environment["target_pi"] is not False or environment["linux_service_manager"] is not False:
+        raise EvidenceError("local trial must not claim target-Pi or Linux-service coverage")
 
     safeguards = document["safeguards"]
     expected_safeguards = {
         "operator_local_only_acknowledgement": True,
         "exact_source_pin_required": True,
         "tracked_source_clean_required": True,
-        "provider_calls": 0,
-        "production_credentials_loaded": 0,
+        "child_environment_allowlist_enforced": True,
+        "credential_variables_forwarded": 0,
         "test_file_retries": 0,
         "max_workers": 4,
         "raw_test_output_persisted": False,
     }
-    if safeguards != expected_safeguards:
+    exact_keys(
+        safeguards,
+        {*expected_safeguards, "forwarded_environment_variable_count"},
+        "safeguards",
+    )
+    if {name: safeguards[name] for name in expected_safeguards} != expected_safeguards:
         raise EvidenceError("local-trial safeguards differ")
+    forwarded = _integer(
+        safeguards["forwarded_environment_variable_count"],
+        "forwarded environment variable count",
+    )
+    if forwarded > 6:
+        raise EvidenceError("child environment exceeds the reviewed allowlist")
 
     trial = document["trial"]
     if not isinstance(trial, dict):
@@ -116,7 +131,6 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
     exact_keys(
         trial,
         {
-            "profile_count",
             "test_files",
             "tests_passed",
             "tests_failed",
@@ -129,24 +143,23 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
         },
         "trial",
     )
-    expected_counts = {
-        "profile_count": 2,
-        "test_files": 27,
-        "tests_passed": 288,
-        "tests_failed": 0,
-        "tests_skipped_optional_dependencies": 2,
-        "completion_percent": 100,
-        "workers": 4,
-        "flaky_files": 0,
-    }
-    for name, expected in expected_counts.items():
-        if _integer(trial.get(name), f"trial {name}") != expected:
-            raise EvidenceError(f"trial {name} differs")
+    _integer(trial["test_files"], "trial test files", positive=True)
+    _integer(trial["tests_passed"], "trial tests passed", positive=True)
+    if _integer(trial["tests_failed"], "trial tests failed") != 0:
+        raise EvidenceError("upstream regression suite failed")
+    _integer(trial["tests_skipped_optional_dependencies"], "trial tests skipped")
+    if _integer(trial["completion_percent"], "trial completion") != 100:
+        raise EvidenceError("upstream regression suite is incomplete")
+    workers = _integer(trial["workers"], "trial workers", positive=True)
+    if workers > safeguards["max_workers"]:
+        raise EvidenceError("trial workers exceed the concurrency cap")
+    if _integer(trial["flaky_files"], "trial flaky files") != 0:
+        raise EvidenceError("upstream regression suite used a retry")
     runner_ms = _integer(
         trial["canonical_runner_wall_ms"], "canonical runner wall time", positive=True
     )
     harness_ms = _integer(trial["harness_wall_ms"], "harness wall time", positive=True)
-    if runner_ms > 180_000 or harness_ms > 180_000 or harness_ms < runner_ms:
+    if harness_ms < runner_ms:
         raise EvidenceError("local trial timing is inconsistent")
 
     contracts = document["contracts"]
@@ -162,12 +175,69 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
     if not isinstance(contracts, dict):
         raise EvidenceError("contracts must be an object")
     exact_keys(contracts, expected_contracts, "contracts")
-    if any(value != "passed" for value in contracts.values()):
-        raise EvidenceError("a local multiplex contract did not pass")
+    contract_keys = {
+        "test_files",
+        "tests_passed",
+        "tests_failed",
+        "tests_skipped",
+        "result",
+    }
+    contract_totals = {"files": 0, "passed": 0, "failed": 0, "skipped": 0}
+    contract_results: list[str] = []
+    for name, contract in contracts.items():
+        if not isinstance(contract, dict):
+            raise EvidenceError(f"contract {name} must be an object")
+        exact_keys(contract, contract_keys, f"contract {name}")
+        files = _integer(contract["test_files"], f"contract {name} files", positive=True)
+        passed = _integer(contract["tests_passed"], f"contract {name} passed")
+        failed = _integer(contract["tests_failed"], f"contract {name} failed")
+        skipped = _integer(contract["tests_skipped"], f"contract {name} skipped")
+        derived = "failed" if failed else "incomplete" if skipped or not passed else "passed"
+        if contract["result"] != derived:
+            raise EvidenceError(f"contract {name} result is not derived from its counts")
+        contract_totals["files"] += files
+        contract_totals["passed"] += passed
+        contract_totals["failed"] += failed
+        contract_totals["skipped"] += skipped
+        contract_results.append(derived)
 
+    supplemental = document["supplemental"]
+    if not isinstance(supplemental, dict):
+        raise EvidenceError("supplemental result must be an object")
+    exact_keys(supplemental, contract_keys, "supplemental")
+    supplemental_files = _integer(supplemental["test_files"], "supplemental files")
+    supplemental_passed = _integer(supplemental["tests_passed"], "supplemental passed")
+    supplemental_failed = _integer(supplemental["tests_failed"], "supplemental failed")
+    supplemental_skipped = _integer(supplemental["tests_skipped"], "supplemental skipped")
+    supplemental_result = (
+        "failed"
+        if supplemental_failed
+        else "incomplete"
+        if supplemental_skipped or not supplemental_passed
+        else "passed"
+    )
+    if supplemental["result"] != supplemental_result:
+        raise EvidenceError("supplemental result is not derived from its counts")
+    if contract_totals["files"] + supplemental_files != trial["test_files"]:
+        raise EvidenceError("test-file totals are not derived from grouped results")
+    if contract_totals["passed"] + supplemental_passed != trial["tests_passed"]:
+        raise EvidenceError("passing-test totals are not derived from grouped results")
+    if contract_totals["failed"] + supplemental_failed != trial["tests_failed"]:
+        raise EvidenceError("failed-test totals are not derived from grouped results")
+    if contract_totals["skipped"] + supplemental_skipped != trial["tests_skipped_optional_dependencies"]:
+        raise EvidenceError("skipped-test totals are not derived from grouped results")
+
+    suite_result = (
+        "failed"
+        if trial["tests_failed"] or "failed" in contract_results
+        else "incomplete"
+        if any(result != "passed" for result in contract_results)
+        else "passed"
+    )
     expected_decision = {
-        "local_multiplex_functional_gate": "passed",
-        "d24_topology": "provisionally_supports_one_gateway",
+        "upstream_regression_suite": suite_result,
+        "nswarm_runtime_isolation_gate": "not_measured",
+        "d24_topology": "pending_nswarm_runtime_trial",
         "target_pi_resource_gate": "pending",
         "linux_sandbox_and_socket_acl_gate": "pending",
         "profile_prompt_size_gate": "pending_real_profiles",
@@ -175,7 +245,7 @@ def validate_evidence(document: dict[str, Any], pin: dict[str, Any]) -> None:
         "live_pilot": False,
     }
     if document["decision"] != expected_decision:
-        raise EvidenceError("D24 local-only decision differs")
+        raise EvidenceError("D24 decision is not derived from the measured scope")
 
     serialized = json.dumps(document, sort_keys=True)
     for forbidden in (
