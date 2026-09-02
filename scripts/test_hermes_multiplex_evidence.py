@@ -41,10 +41,10 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(CHECK.EvidenceError, "passing-test totals"):
             CHECK.validate_evidence(changed, self.pin)
 
-    def test_rejects_target_pi_or_pilot_claim(self) -> None:
+    def test_rejects_unmeasured_target_pi_or_pilot_claim(self) -> None:
         changed = copy.deepcopy(self.document)
         changed["environment"]["target_pi"] = True
-        with self.assertRaisesRegex(CHECK.EvidenceError, "target-Pi"):
+        with self.assertRaisesRegex(CHECK.EvidenceError, "environment schema"):
             CHECK.validate_evidence(changed, self.pin)
 
         changed = copy.deepcopy(self.document)
@@ -57,6 +57,17 @@ class EvidenceTests(unittest.TestCase):
         changed["environment"]["os"] = "/Users/operator/raw-output"
         with self.assertRaisesRegex(CHECK.EvidenceError, "raw or secret"):
             CHECK.validate_evidence(changed, self.pin)
+
+    def test_internally_consistent_failed_result_is_valid_evidence(self) -> None:
+        changed = copy.deepcopy(self.document)
+        contract = changed["contracts"]["profile_route_and_allowlist"]
+        contract["tests_passed"] -= 1
+        contract["tests_failed"] = 1
+        contract["result"] = "failed"
+        changed["trial"]["tests_passed"] -= 1
+        changed["trial"]["tests_failed"] = 1
+        changed["decision"]["upstream_regression_suite"] = "failed"
+        CHECK.validate_evidence(changed, self.pin)
 
 
 if __name__ == "__main__":

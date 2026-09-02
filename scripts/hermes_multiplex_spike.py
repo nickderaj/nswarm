@@ -224,8 +224,8 @@ def parse_summary(output: str, expected_workers: int) -> tuple[dict[str, int], d
     values["wall_ms"] = round(float(groups["seconds"]) * 1000)
     if values["files"] != len(TEST_FILES):
         raise MultiplexSpikeError("focused test-file count differs")
-    if values["passed"] <= 0 or values["failed"] != 0 or values["complete"] != 100:
-        raise MultiplexSpikeError("focused Hermes multiplex suite did not pass")
+    if values["passed"] <= 0 or values["complete"] != 100:
+        raise MultiplexSpikeError("focused Hermes multiplex suite was incomplete")
     if values["workers"] != expected_workers:
         raise MultiplexSpikeError("Hermes runner worker count differs")
     if "FLAKY file" in output:
@@ -309,9 +309,9 @@ def run_local_trial(source: Path, python: Path, workers: int) -> dict[str, Any]:
     )
     elapsed_ms = round((time.perf_counter_ns() - started) / 1_000_000)
     combined = result.stdout + "\n" + result.stderr
-    if result.returncode != 0:
-        raise MultiplexSpikeError("focused Hermes multiplex suite failed")
     summary, per_file = parse_summary(combined, workers)
+    if (result.returncode == 0) != (summary["failed"] == 0):
+        raise MultiplexSpikeError("Hermes runner exit status contradicts its summary")
     contracts = {
         name: summarize_group(files, per_file)
         for name, files in CONTRACT_TEST_FILES.items()
@@ -336,8 +336,6 @@ def run_local_trial(source: Path, python: Path, workers: int) -> dict[str, Any]:
             "python_version": identity["version"],
             "aiohttp_version": identity["aiohttp"],
             "pytest_version": identity["pytest"],
-            "target_pi": False,
-            "linux_service_manager": False,
         },
         "safeguards": {
             "operator_local_only_acknowledgement": True,
@@ -403,7 +401,7 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(evidence, indent=2, sort_keys=True))
-    return 0
+    return 0 if evidence["decision"]["upstream_regression_suite"] == "passed" else 1
 
 
 if __name__ == "__main__":

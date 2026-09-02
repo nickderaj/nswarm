@@ -63,12 +63,10 @@
   "environment": {
     "aiohttp_version": "3.14.3",
     "architecture": "arm64",
-    "linux_service_manager": false,
     "os": "Darwin",
     "pytest_version": "9.1.1",
     "python_implementation": "CPython",
-    "python_version": "3.11.14",
-    "target_pi": false
+    "python_version": "3.11.14"
   },
   "measurement": "pinned_hermes_upstream_multiplex_regression_suite",
   "pin": {

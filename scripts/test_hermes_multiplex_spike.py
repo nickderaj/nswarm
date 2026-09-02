@@ -96,12 +96,17 @@ class SummaryTests(unittest.TestCase):
         )
         self.assertEqual(contract["result"], "incomplete")
 
-    def test_rejects_failed_suite(self) -> None:
+    def test_records_failed_suite(self) -> None:
         output = self.passing_output().replace(
             "27 tests passed, 0 failed", "26 tests passed, 1 failed"
         )
-        with self.assertRaisesRegex(SPIKE.MultiplexSpikeError, "did not pass"):
-            SPIKE.parse_summary(output, 4)
+        output = output.replace(
+            "✓ tests/agent/test_secret_scope.py (1✓,",
+            "✗ tests/agent/test_secret_scope.py (1✗,",
+        )
+        summary, per_file = SPIKE.parse_summary(output, 4)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(per_file["tests/agent/test_secret_scope.py"]["failed"], 1)
 
     def test_rejects_flaky_retry(self) -> None:
         output = self.passing_output() + "\n=== ⚠ 1 FLAKY file ==="
