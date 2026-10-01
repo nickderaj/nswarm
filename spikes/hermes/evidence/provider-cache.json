@@ -1,0 +1,166 @@
+{
+  "aggregate": {
+    "cold_sessions": {
+      "cache_write_input_tokens": 25742,
+      "cached_input_tokens": 0,
+      "cost_micro_usd": 32490,
+      "latency_median_ms": 32486,
+      "output_tokens": 32,
+      "turns": 4,
+      "uncached_input_tokens": 150
+    },
+    "cost_basis": "provider usage buckets multiplied by the provider's published per-bucket rates",
+    "long_lived_session": {
+      "cache_write_input_tokens": 6435,
+      "cached_input_tokens": 19305,
+      "cost_micro_usd": 10286,
+      "latency_median_ms": 9602,
+      "output_tokens": 32,
+      "turns": 4,
+      "uncached_input_tokens": 150
+    },
+    "repeat_turns_only": {
+      "cold_cost_micro_usd": 24391,
+      "cost_reduction_percent": 91.02,
+      "cost_saved_micro_usd": 22201,
+      "long_lived_cost_micro_usd": 2190,
+      "plain_uncached_comparator_cost_micro_usd": 19563,
+      "plain_uncached_comparator_reduction_percent": 88.81,
+      "plain_uncached_comparator_saved_micro_usd": 17373
+    }
+  },
+  "boundary": {
+    "hermes_http_cache_continuity_measured": false,
+    "hermes_in_request_path": false,
+    "hermes_source_pin_verified": true,
+    "latency_interpretation": "uncontrolled_fixed_order_samples_only",
+    "request_path": "direct_provider_api"
+  },
+  "decision": {
+    "d23_http_session_route": "pending_end_to_end_hermes_measurement",
+    "d24_multiplexing_evaluation": "independently_executable",
+    "hermes_http_session_route_cache_continuity": "not_measured",
+    "provider_byte_prefix_cache_preserved": true,
+    "provider_cache_reduced_repeat_cost": true
+  },
+  "measurement": "direct_live_provider_byte_prefix_cache_control",
+  "pin": {
+    "commit_sha": "fcbd1076a93841fa88855acce810e342a5b78101",
+    "package": "hermes-agent",
+    "package_version": "0.20.5",
+    "plan_source_commit_prefix": "68518c1",
+    "python_requires": ">=3.11,<3.14",
+    "repository": "https://github.com/NousResearch/hermes-agent.git",
+    "tag": "v2026.8.19",
+    "tag_object_sha": "b05e680e63d39d5a8e3ec0f5842a41d1c4209c03"
+  },
+  "provider": {
+    "marketplace": "surplus_intelligence",
+    "model": "claude-haiku-4.5",
+    "price_micro_usd_per_million": {
+      "cache_write_input": 1250000,
+      "cached_input": 100000,
+      "output": 5000000,
+      "uncached_input": 1000000
+    },
+    "price_updated_at": "2026-09-01T08:25:55.513Z",
+    "upstream_provider": "anthropic",
+    "wire_protocol": "anthropic_messages"
+  },
+  "safeguards": {
+    "environment_key_only": "SURPLUS_API_KEY",
+    "hard_spend_ceiling_micro_usd": 1000000,
+    "operator_opt_in_required": true,
+    "planned_worst_case_micro_usd": 288400,
+    "provider_pin_required": true,
+    "raw_provider_output_persisted": false
+  },
+  "schema_version": 2,
+  "trial": {
+    "cache_control_policy": "ephemeral_cache_breakpoint_applied_to_both_classes",
+    "cold_definition": "same-length transcript with a unique 32-byte nonce near the start of the persisted system prompt",
+    "long_lived_definition": "growing transcript with one byte-identical persisted system prompt",
+    "max_output_tokens": 8,
+    "pair_order": "cold_then_long_lived",
+    "prefix_bytes": 24576,
+    "turns": [
+      {
+        "cold_session": {
+          "cache_write_input_tokens": 6437,
+          "cached_input_tokens": 0,
+          "cost_micro_usd": 8099,
+          "latency_ms": 40819,
+          "output_tokens": 8,
+          "uncached_input_tokens": 12
+        },
+        "long_lived_session": {
+          "cache_write_input_tokens": 6435,
+          "cached_input_tokens": 0,
+          "cost_micro_usd": 8096,
+          "latency_ms": 8642,
+          "output_tokens": 8,
+          "uncached_input_tokens": 12
+        },
+        "ordinal": 1
+      },
+      {
+        "cold_session": {
+          "cache_write_input_tokens": 6434,
+          "cached_input_tokens": 0,
+          "cost_micro_usd": 8112,
+          "latency_ms": 4171,
+          "output_tokens": 8,
+          "uncached_input_tokens": 29
+        },
+        "long_lived_session": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 6435,
+          "cost_micro_usd": 713,
+          "latency_ms": 23271,
+          "output_tokens": 8,
+          "uncached_input_tokens": 29
+        },
+        "ordinal": 2
+      },
+      {
+        "cold_session": {
+          "cache_write_input_tokens": 6437,
+          "cached_input_tokens": 0,
+          "cost_micro_usd": 8133,
+          "latency_ms": 40843,
+          "output_tokens": 8,
+          "uncached_input_tokens": 46
+        },
+        "long_lived_session": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 6435,
+          "cost_micro_usd": 730,
+          "latency_ms": 6054,
+          "output_tokens": 8,
+          "uncached_input_tokens": 46
+        },
+        "ordinal": 3
+      },
+      {
+        "cold_session": {
+          "cache_write_input_tokens": 6434,
+          "cached_input_tokens": 0,
+          "cost_micro_usd": 8146,
+          "latency_ms": 24152,
+          "output_tokens": 8,
+          "uncached_input_tokens": 63
+        },
+        "long_lived_session": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 6435,
+          "cost_micro_usd": 747,
+          "latency_ms": 10562,
+          "output_tokens": 8,
+          "uncached_input_tokens": 63
+        },
+        "ordinal": 4
+      }
+    ],
+    "turns_per_class": 4
+  }
+}

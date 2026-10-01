@@ -2,7 +2,7 @@
 
 Status: deterministic profile, evidence and serial-scheduling boundaries are
 implemented. Live Hermes-backed research and coding sessions remain gated by
-D23/D24, so the first end-to-end research report and coding candidate are not
+D24, so the first end-to-end research report and coding candidate are not
 claimed.
 
 ## Implemented
@@ -47,43 +47,47 @@ audited handoff.
 
 The adapter is not represented as an atomic multi-process scheduler. Concurrent
 admission, rollback after injected partial-start failures, and normal teardown
-recovery remain part of the live runtime gate after D23/D24 select a process and
-session topology.
+recovery remain part of the live runtime gate after D24 selects a process
+topology for the retained HTTP session route.
 
 The current PR was produced through the ordinary maintainer workflow. It is not
 represented as output from that live coder pilot.
 
 ## D23 and D24
 
-The pinned Hermes HTTP session route creates a fresh `AIAgent` per request. No
-merged decision has revised D23, and D24's multiplexing, credential isolation,
-Pi resource use, prompt size, dedicated-user sandbox and socket ACL sequence was
-not reached. Consequently:
+The pinned Hermes HTTP session route creates a fresh `AIAgent` per request. A
+later direct-provider control showed that three byte-identical repeated prefixes
+each read 6,435 cached tokens and reduced modeled repeated-turn cost 91.02%
+against cache-marked fresh sessions. Hermes was not in that paid request path,
+so D23's end-to-end HTTP continuity remains open. D24's pinned upstream
+regression baseline passes, while nswarm multiplexing, credential isolation, Pi
+resource use, prompt size, dedicated-user sandbox and socket ACL checks remain.
+Consequently:
 
 - `research-bot` still exits unsuccessfully by design;
 - the research manifest advertises no `ask` surface;
-- no Hermes session, model call, critic session or coder transient service is
-  launched by this repository work;
+- no Hermes-backed research/coder session, critic session or coder transient
+  service is launched by this repository work;
 - no fallback gateway topology or gateway socket identity is selected;
 - no live report, coding branch, push credential or deployment is claimed.
 
-Settlement requires a reviewed replacement for D23/section 6.3, followed by the
-ordered D24 measurements in [`HERMES_SPIKE.md`](HERMES_SPIKE.md). Only then can
-the research socket and one-coder runtime be wired to a selected Hermes route.
+Settlement now requires the ordered D24 measurements in
+[`HERMES_SPIKE.md`](HERMES_SPIKE.md). Only after that topology decision can the
+research socket and one-coder runtime be wired to the retained Hermes route.
 
 The native-adapter follow-up evaluated the pinned native platform and relay
 paths. Native adapters reuse warm agents but are internal Python integration
 points that would make Hermes own Telegram and provide no synchronous `ask()`.
 The relay path also reuses warm agents but is explicitly experimental and
 depends on an external, unpinned connector contract. Neither is a reviewed D23
-local-agent-cache replacement. The stable HTTP route remains a candidate, and
-provider-side byte-prefix cache behavior and cost on repeated turns are the next
-D23 measurement. D24 remains blocked until that evidence is reviewed and D23 is
-settled.
+local-agent-cache replacement. D24 is independently executable, but the
+multiplexed topology is not accepted until its ordered nswarm runtime isolation
+and Pi checks pass; failure selects the one-sandboxed-process-and-user-per-bot
+fallback.
 
 ## Live completion sequence
 
-After D23/D24 settle, the Step 5 completion run is:
+After D24 settles, the Step 5 completion run is:
 
 1. install the generated root-owned profiles and verify their byte identity;
 2. start the research socket with read-only repository/source methods and

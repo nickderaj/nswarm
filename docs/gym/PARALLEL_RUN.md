@@ -39,8 +39,9 @@ Telegram transcripts in git or command logs.
 
 The v1 process must be configured with the disposable directory as its only gym
 data root. Refuse startup if the configured database path aliases the recorded
-source path or if schema/integrity validation fails. D23/D24 remain unresolved,
-so agent-dependent coaching is unavailable and no Hermes identity is authorized
+source path or if schema/integrity validation fails. D23 is settled by the later
+provider-cache result, but D24 remains unresolved, so agent-dependent coaching
+is unavailable and no Hermes identity is authorized
 for `gym-access`. Only deterministic commands and reviewed MCP tools may run.
 
 ## Linux verification still required
@@ -55,7 +56,7 @@ sudo scripts/verify_gym_socket_linux.sh /run/gym/mcp.sock gym-access
 
 - `/run/gym` is not world-accessible;
 - `/run/gym/mcp.sock` is group-owned by `gym-access` with mode `0660`;
-- only `boss-agent` and the selected gateway identity, once D23/D24 approve one,
+- only `boss-agent` and the selected gateway identity, once D24 approves one,
   can connect;
 - unrelated service users cannot connect;
 - restart recreates the same ownership and mode;

@@ -1,5 +1,31 @@
 # nswarm v1 build status
 
+## Checkpoint AC - direct-provider cache control
+
+Updated: 2026-09-02. The cost-bounded direct-provider control source-verified
+the pinned Hermes prompt-restoration/cache-marker path, then made four matched
+cold-versus-long-lived provider requests without Hermes in the request path.
+The long-lived prime wrote 6,435 cache tokens; each of three repeats read all
+6,435 while matched fresh prefixes wrote the cache again. Repeated-turn modeled
+cost fell from 24,391 to 2,190 micro-USD: 91.02% against cache-marked fresh
+sessions and 88.81% against a plain uncached-price comparator. The fixed-order
+latency samples do not support a comparative conclusion.
+
+D23's end-to-end HTTP cache-continuity gate remains open despite the favorable
+provider control. D24 is independently executable. Its pinned upstream
+regression suite passes, but nswarm runtime multiplexing, credential/profile/
+tool/socket isolation, the dedicated-user sandbox, Pi RSS/latency and prompt
+size still decide between one gateway and the documented per-bot-process
+fallback. No gym parallel trial, bot session, deployment, live pilot or
+coder-concurrency increase occurred.
+
+The harness required explicit operator opt-in and a $1 hard ceiling; its
+conservative full-run reservation was $0.2884 and the usage-derived total was
+42,776 micro-USD. The credential and raw provider material were not persisted.
+The aggregate evidence and fail-closed derivation check are in
+`spikes/hermes/evidence/provider-cache.json` and
+`scripts/check_hermes_provider_cache_evidence.py`.
+
 ## Checkpoint AB - D23 native-adapter architecture gate
 
 Updated: 2026-08-31. The pinned Hermes native messaging path reuses cached
@@ -35,16 +61,19 @@ per crate. Strict coverage passes at 1,305/1,327 changed executable lines
 (98.34%), 318/318 critical branch outcomes (100.00%), and 10,267/10,576
 repository lines (97.08%).
 
-D23 remains unresolved because the pinned Hermes HTTP route creates a fresh
-`AIAgent` per request, and D24 remains unevaluated. Therefore no live Hermes
-research or coder pilot, ask surface, fallback topology, or concurrency above
-one is claimed. Deterministic startup and containment tests do not satisfy the
-live serial-pilot gate. This PR was produced through the ordinary maintainer
-workflow, and coder concurrency remains one.
+D23's direct-provider control is favorable, but the pinned Hermes HTTP route
+was not in that paid request path and its end-to-end cache continuity remains
+unmeasured. D24's upstream regression baseline passes; its nswarm runtime gate
+remains unevaluated.
+Therefore no live Hermes research or coder pilot, ask surface, fallback
+topology, or concurrency above one is claimed. Deterministic startup and
+containment tests do not satisfy the live serial-pilot gate. This PR was
+produced through the ordinary maintainer workflow, and coder concurrency
+remains one.
 
 The deterministic adapter does not yet prove atomic multi-process admission or
 rollback after partial startup. Those runtime properties remain gated with the
-live pilot after D23/D24 settle.
+live pilot after D24 settles.
 
 The frozen `ultron` checkout remained read-only. No credentials, private
 databases, transcripts, production state, or private paths were accessed.
@@ -55,9 +84,9 @@ PR #5 is based directly on merged PR #4
 `b150ced3e77bfc83d47d3e75bb11864eebe0e72b`. The implementation and remaining
 external gates are recorded in [`gym/STEP4_STATUS.md`](gym/STEP4_STATUS.md).
 The v0 checkout remains read-only and no production credential or private gym
-database has been accessed. D23/D24 remain unresolved, so conversation behavior
-is explicitly unavailable rather than built against the invalidated warm-agent
-assumption.
+database has been accessed. D23 is settled by the later provider-cache result,
+but D24 remains unresolved, so conversation behavior is explicitly unavailable
+rather than built against an unevaluated topology.
 
 Updated: 2026-08-30 (Europe/London). Active branch:
 `codex/post-step3-followups`, based directly on merged PR #3 main

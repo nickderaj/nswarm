@@ -15,13 +15,13 @@ Step 1 merged as `ac4bfd5f35a1aa2fbbf76ed46f84e7644ca7b049` in PR #1.
 Step 2 merged as `5d3f7ef4cb449df3cd9a90d4742a651140c6f3d9` in PR #2.
 Step 3 merged as `c8c1b69390f607be7f0ae895441b2141c74a3d93` in PR #3. The
 pinned Hermes `v2026.8.19` HTTP session route constructs a fresh `AIAgent` for
-every request, including repeated turns on one explicit session ID. D23 and
-section 6.3 must therefore be revisited before any `botkit` conversation code
-is written. The native-adapter follow-up found warm reuse only behind internal
-platform-adapter APIs or the experimental external-connector relay contract, so
-no reviewed local-agent-cache replacement is available. The stable HTTP route's
-provider-side prefix-cache behavior remains unmeasured. D24 remains unevaluated
-and no fallback topology has been selected.
+every request, including repeated turns on one explicit session ID. A direct-
+provider control measured 6,435 cache reads on each of three repeated turns and
+a 91.02% reduction against cache-marked fresh sessions (88.81% against a plain
+uncached-price comparator). Because Hermes was not in that paid request path,
+D23's end-to-end HTTP cache-continuity gate remains open. D24 can be evaluated
+independently; its pinned upstream regression baseline passes, while the nswarm
+runtime topology remains unselected.
 See [`docs/HERMES_SPIKE.md`](docs/HERMES_SPIKE.md) for the reproducible evidence
 and [`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md) for verified checkpoints and
 remaining gates.
@@ -35,8 +35,8 @@ README.
 Step 4 merged as `f4a40e07e226757f218c0aa45d992237c43a21e0` in PR #5. The
 Step 5 branch implements the research/coder policy bundles, typed evidence
 contracts, hostile-input evals and the one-live-coder scheduler gate. Live
-Hermes sessions and the first end-to-end serial pilot remain gated by D23/D24;
-the concurrency limit stays at one. See
+Hermes sessions and the first end-to-end serial pilot remain gated by D24; the
+concurrency limit stays at one. See
 [`docs/STEP5_STATUS.md`](docs/STEP5_STATUS.md) for the exact implemented and
 deferred boundary.
 

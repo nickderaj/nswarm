@@ -36,7 +36,13 @@ jobs:
       - run: python3 scripts/policy_check.py
       - run: python3 scripts/validate_profiles.py
       - name: Hermes evidence integrity
-        run: python3 -m unittest scripts/test_hermes_gateway_spike.py
+        run: |
+          python3 -m unittest scripts/test_hermes_gateway_spike.py
+          python3 -m unittest scripts/test_hermes_provider_cache_spike.py
+          python3 -m unittest scripts/test_hermes_multiplex_spike.py
+          python3 -m unittest scripts/test_hermes_multiplex_evidence.py
+          python3 scripts/check_hermes_provider_cache_evidence.py
+          python3 scripts/check_hermes_multiplex_evidence.py
       - name: Gym evidence integrity
         run: |
           python3 scripts/check_gym_inventory.py

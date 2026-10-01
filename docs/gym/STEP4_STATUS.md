@@ -30,9 +30,9 @@ and agent conversation behavior remain externally gated.
 
 ## D23 and D24
 
-No later merged decision revises the Step 3 result. Pinned Hermes constructs a
-fresh `AIAgent` for each HTTP chat request. D23 remains unresolved and D24 was
-not measured. Therefore this port does not implement a Hermes HTTP client,
+Pinned Hermes constructs a fresh `AIAgent` for each HTTP chat request. The later
+provider-cache measurement revises D23 to retain that route, but D24 was not
+measured. Therefore this port does not implement a Hermes HTTP client,
 conversation core or `ask()` endpoint, does not claim warm-agent reuse, and
 does not authorize any Hermes gateway identity in `gym-access`. Agent-dependent
 free text, plan generation, batch extraction and reflection fail closed with an
